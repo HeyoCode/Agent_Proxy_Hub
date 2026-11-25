@@ -1,0 +1,136 @@
+using System.Text.Json.Serialization;
+
+namespace AgentProxyHub.Core.Models;
+
+/// <summary>
+/// 支持的上游代理协议类型
+/// </summary>
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ProxyProtocol
+{
+    SOCKS5,
+    SOCKS4,
+    HTTP,
+    HTTPS,
+    DIRECT_PHYSICAL
+}
+
+/// <summary>
+/// 独立代理线路节点配置与实时状态
+/// </summary>
+public sealed class ProxyNode
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N")[..10];
+    public string Name { get; set; } = string.Empty;
+    public string Group { get; set; } = "默认分组";
+    public ProxyProtocol Protocol { get; set; } = ProxyProtocol.SOCKS5;
+    public string Host { get; set; } = string.Empty;
+    public int Port { get; set; }
+    public string? Username { get; set; }
+    public string? Password { get; set; }
+    public bool Enabled { get; set; } = true;
+
+    // 验真与运行状态
+    public string Status { get; set; } = "unverified"; // online | offline | unverified
+    public int? LatencyMs { get; set; }
+    public string ExitIp { get; set; } = "—";
+    public string IspSummary { get; set; } = "待验真";
+    public List<string> AiReachability { get; set; } = new() { "待验真" };
+    public DateTimeOffset? LastCheckedAt { get; set; }
+
+    /// <summary>
+    /// 用于去重的唯一指纹（协议 + 主机 + 端口 + 用户名）
+    /// </summary>
+    public string Fingerprint =>
+        $"{Protocol}|{Host.Trim().ToLowerInvariant()}|{Port}|{Username?.Trim() ?? string.Empty}";
+}
+
+/// <summary>
+/// AI 软件独立代理席位
+/// </summary>
+public sealed class AppSeat
+{
+    public string Id { get; set; } = string.Empty;
+    public string Glyph { get; set; } = "AI";
+    public string Name { get; set; } = string.Empty;
+    public string Subtitle { get; set; } = string.Empty;
+    public string ProcessWin { get; set; } = string.Empty;
+    public string ProcessMac { get; set; } = string.Empty;
+    public int LocalPort { get; set; }
+    public string? BoundNodeId { get; set; }
+    public bool Enabled { get; set; } = true;
+    public bool KillSwitchEnabled { get; set; } = true;
+    public bool AllowSameGroupFailover { get; set; } = true;
+    public string CaptureMode { get; set; } = "独立混合端口 + 环境变量注入";
+    public string? LaunchCommandWin { get; set; }
+    public string? LaunchCommandMac { get; set; }
+}
+
+/// <summary>
+/// 本机网络适配器信息
+/// </summary>
+public sealed class NetworkAdapterInfo
+{
+    public string Id { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+    public int InterfaceIndex { get; set; }
+    public string? IPv4Address { get; set; }
+    public string? GatewayAddress { get; set; }
+    public string Status { get; set; } = "Down";
+    public bool IsVirtualOrTunnel { get; set; }
+    public string? ExclusionReason { get; set; }
+    public bool IsSelected { get; set; }
+}
+
+/// <summary>
+/// 网络隔离与防干扰全局配置
+/// </summary>
+public sealed class IsolationSettings
+{
+    public int DefaultMixedPort { get; set; } = 17890;
+    public string? LockedPhysicalNicId { get; set; }
+    public bool AutoBypassVirtualNics { get; set; } = true;
+    public bool TlsSniRecoveryEnabled { get; set; } = true;
+    public bool ForceRemoteDns { get; set; } = true;
+    public bool DirectPhysicalDohEnabled { get; set; } = true;
+    public string DohServerIp { get; set; } = "223.5.5.5";
+    public bool GlobalKillSwitch { get; set; } = true;
+}
+
+/// <summary>
+/// 持久化整体状态文档
+/// </summary>
+public sealed class HubStateDocument
+{
+    public IsolationSettings Isolation { get; set; } = new();
+    public List<ProxyNode> Nodes { get; set; } = new();
+    public List<AppSeat> Seats { get; set; } = new();
+    public List<ModelPricingRule> CustomPricings { get; set; } = new();
+    public int HostApiPort { get; set; } = 17880;
+}
+
+/// <summary>
+/// 批量解析单行预览结果
+/// </summary>
+public sealed class BatchParseItem
+{
+    public int LineNumber { get; set; }
+    public string RawLine { get; set; } = string.Empty;
+    public bool Valid { get; set; }
+    public bool IsDuplicate { get; set; }
+    public string? ErrorReason { get; set; }
+    public ProxyNode? Node { get; set; }
+}
+
+/// <summary>
+/// 批量解析响应
+/// </summary>
+public sealed class BatchParseResult
+{
+    public int TotalLines { get; set; }
+    public int ValidCount { get; set; }
+    public int DuplicateCount { get; set; }
+    public int ErrorCount { get; set; }
+    public List<BatchParseItem> Items { get; set; } = new();
+}

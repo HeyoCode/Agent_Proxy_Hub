@@ -1,0 +1,36 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.12.35527.113
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentProxyHub.Core", "src\AgentProxyHub.Core\AgentProxyHub.Core.csproj", "{B6D7C3C8-8F0B-4F36-91E1-1B0010000001}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentProxyHub.Host", "src\AgentProxyHub.Host\AgentProxyHub.Host.csproj", "{B6D7C3C8-8F0B-4F36-91E1-1B0010000002}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentProxyHub.Desktop.Win", "src\AgentProxyHub.Desktop.Win\AgentProxyHub.Desktop.Win.csproj", "{B6D7C3C8-8F0B-4F36-91E1-1B0010000003}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentProxyHub.Tests", "tests\AgentProxyHub.Tests\AgentProxyHub.Tests.csproj", "{B6D7C3C8-8F0B-4F36-91E1-1B0010000004}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000001}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000001}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000001}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000001}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000002}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000002}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000002}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000002}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000003}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000003}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000003}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000003}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000004}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000004}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000004}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B6D7C3C8-8F0B-4F36-91E1-1B0010000004}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

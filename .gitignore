@@ -1,0 +1,26 @@
+# .NET 构建与调试产物
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+*.userprefs
+TestResults/
+
+# Node / Vite 前端依赖与编译输出
+**/node_modules/
+src/AgentProxyHub.Host/wwwroot/
+web/dist/
+*.tsbuildinfo
+
+# macOS 与桌面打包产物
+dist/
+.DS_Store
+*.app/
+
+# 本地配置、日志与敏感状态文件
+*.log
+.env
+.env.*
+state.json
+.agent-proxy-hub/
