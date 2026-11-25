@@ -16,13 +16,16 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
+        bool startMinimized = args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
+        string[] hostArgs = args.Where(a => !a.Equals("--minimized", StringComparison.OrdinalIgnoreCase)).ToArray();
+
         // 在桌面端同进程后台拉起跨平台核心代理与本地 API 服务 (127.0.0.1:17880)
-        var webApp = AgentProxyHub.Host.HubHostFactory.BuildApp(args);
+        var webApp = AgentProxyHub.Host.HubHostFactory.BuildApp(hostArgs);
         _ = webApp.RunAsync();
 
         try
         {
-            Application.Run(new MainForm("http://127.0.0.1:17880/"));
+            Application.Run(new MainForm("http://127.0.0.1:17880/", startMinimized));
         }
         finally
         {

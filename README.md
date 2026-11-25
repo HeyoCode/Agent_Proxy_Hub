@@ -1,5 +1,7 @@
 # Agent Proxy Hub
 
+> 仓库地址：<https://github.com/HeyoCode/Agent_Proxy_Hub> · 最新安装程序下载：[GitHub Releases](https://github.com/HeyoCode/Agent_Proxy_Hub/releases)
+
 专为 **Claude**（Desktop / Claude Code）、**ChatGPT**（Desktop / Codex CLI）、**Antigravity**（IDE / Agent）等海外 AI 软件打造的跨平台（Windows / macOS）轻量级独立网络代理与双源用量统计网关。
 
 ## 核心能力
@@ -60,3 +62,21 @@ dotnet test tests/AgentProxyHub.Tests/AgentProxyHub.Tests.csproj -c Release
   chmod +x macos/build-macos-app.sh
   ./macos/build-macos-app.sh osx-arm64
   ```
+
+## 制作优雅安装程序（Windows Setup / macOS DMG）
+
+### Windows 安装包（Inno Setup 6 + Cult UI 视觉向导）
+```powershell
+# 生成用户级轻量版安装程序（输出至 dist/AgentProxyHub-Setup-v0.2.0-win-x64.exe）
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1
+
+# 或生成内置全量 .NET 10 运行时的离线独立版：
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -SelfContained
+```
+特性：默认用户级免 UAC 安装、支持 `/PORTABLE=1` 便携模式、支持开机静默托盘启动（`--minimized`）、卸载时智能保留本地节点配置。
+
+### macOS DMG 镜像（Apple Silicon / Intel）
+```bash
+chmod +x installer/macos/build-dmg.sh
+./installer/macos/build-dmg.sh osx-arm64 0.2.0
+```

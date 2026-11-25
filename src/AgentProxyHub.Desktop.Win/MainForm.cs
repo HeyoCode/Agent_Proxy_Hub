@@ -17,7 +17,7 @@ public sealed class MainForm : Form
     private readonly NotifyIcon _trayIcon;
     private bool _reallyExiting;
 
-    public MainForm(string url)
+    public MainForm(string url, bool startMinimized = false)
     {
         _url = url;
         Text = $"{ProjectMetadata.Name} v{ProjectMetadata.Version} — {ProjectMetadata.RepoSlug}";
@@ -26,6 +26,16 @@ public sealed class MainForm : Form
         MinimumSize = new Size(1060, 680);
         StartPosition = FormStartPosition.CenterScreen;
         BackColor = Color.FromArgb(10, 10, 13);
+
+        Icon? appIcon = TryLoadAppIcon();
+        if (appIcon != null) Icon = appIcon;
+
+        if (startMinimized)
+        {
+            WindowState = FormWindowState.Minimized;
+            ShowInTaskbar = false;
+            Opacity = 0;
+        }
 
         _webView = new WebView2
         {
@@ -56,7 +66,7 @@ public sealed class MainForm : Form
 
         _trayIcon = new NotifyIcon
         {
-            Icon = SystemIcons.Shield,
+            Icon = appIcon ?? SystemIcons.Shield,
             Text = $"{ProjectMetadata.Name} v{ProjectMetadata.Version} · 物理直出独立代理",
             ContextMenuStrip = menu,
             Visible = true
@@ -64,7 +74,23 @@ public sealed class MainForm : Form
         _trayIcon.DoubleClick += (_, _) => ShowMainWindow();
 
         Load += async (_, _) => await InitWebViewAsync();
+        Shown += (_, _) =>
+        {
+            if (startMinimized) Hide();
+        };
         FormClosing += OnFormClosing;
+    }
+
+    private static Icon? TryLoadAppIcon()
+    {
+        try
+        {
+            return Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private async Task InitWebViewAsync()
@@ -111,6 +137,8 @@ public sealed class MainForm : Form
 
     private void ShowMainWindow()
     {
+        Opacity = 1;
+        ShowInTaskbar = true;
         Show();
         WindowState = FormWindowState.Normal;
         Activate();
