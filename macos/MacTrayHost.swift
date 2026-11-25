@@ -19,6 +19,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "打开 Agent Proxy Hub 控制台", action: #selector(showWindow), keyEquivalent: "o"))
+        menu.addItem(NSMenuItem(title: "访问 GitHub 仓库 (HeyoCode/Agent_Proxy_Hub)", action: #selector(openRepo), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "退出 Agent Proxy Hub", action: #selector(quitAll), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -31,7 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "Agent Proxy Hub"
+        window.title = "Agent Proxy Hub v0.2.0 — HeyoCode/Agent_Proxy_Hub"
         window.center()
         window.delegate = self
 
@@ -63,6 +64,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func showWindow() {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func openRepo() {
+        if let url = URL(string: "https://github.com/HeyoCode/Agent_Proxy_Hub") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {

@@ -72,7 +72,20 @@ export interface SeatTrafficSnapshot {
   killSwitchBlockedCount: number;
 }
 
+export interface ProjectMetadataDto {
+  name: string;
+  version: string;
+  repoOwner: string;
+  repoName: string;
+  repoSlug: string;
+  repoUrl: string;
+  cloneUrl: string;
+  author: string;
+  description: string;
+}
+
 export interface OverviewResponse {
+  project?: ProjectMetadataDto;
   os: 'win' | 'mac';
   arch: string;
   memoryMb: number;
@@ -255,7 +268,9 @@ export const api = {
   syncStatsNow: () => requestJson<{ syncedAt: string; scannedFiles: number; parsedEntries: number; elapsedMs: number }>('/api/stats/sync', { method: 'POST' }),
   getPricings: () => requestJson<ModelPricingRule[]>('/api/stats/pricing'),
   upsertPricing: (body: Omit<ModelPricingRule, 'isCustom'>) =>
-    requestJson<ModelPricingRule[]>('/api/stats/pricing', { method: 'PUT', body: JSON.stringify(body) })
+    requestJson<ModelPricingRule[]>('/api/stats/pricing', { method: 'PUT', body: JSON.stringify(body) }),
+  openRepo: () =>
+    requestJson<{ opened: boolean; url: string; error?: string }>('/api/system/open-repo', { method: 'POST' })
 };
 
 export function formatBytes(bytes: number): string {

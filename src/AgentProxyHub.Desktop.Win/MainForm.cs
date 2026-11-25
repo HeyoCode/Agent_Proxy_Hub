@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using System.Drawing;
 using System.Net.Http;
+using AgentProxyHub.Core.Models;
+using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
 namespace AgentProxyHub.Desktop.Win;
@@ -17,7 +20,7 @@ public sealed class MainForm : Form
     public MainForm(string url)
     {
         _url = url;
-        Text = "Agent Proxy Hub — AI 专用独立出口与用量网关";
+        Text = $"{ProjectMetadata.Name} v{ProjectMetadata.Version} — {ProjectMetadata.RepoSlug}";
         Width = 1380;
         Height = 880;
         MinimumSize = new Size(1060, 680);
@@ -38,10 +41,11 @@ public sealed class MainForm : Form
             {
                 using var http = new HttpClient();
                 await http.PostAsync("http://127.0.0.1:17880/api/stats/sync", null);
-                _trayIcon?.ShowBalloonTip(1800, "Agent Proxy Hub", "已完成本地 AI 会话用量增量同步", ToolTipIcon.Info);
+                _trayIcon?.ShowBalloonTip(1800, ProjectMetadata.Name, "已完成本地 AI 会话用量增量同步", ToolTipIcon.Info);
             }
             catch { }
         });
+        menu.Items.Add($"访问 GitHub 仓库 ({ProjectMetadata.RepoSlug})", null, (_, _) => OpenRepoInBrowser());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("彻底退出（停止独立代理）", null, (_, _) =>
         {
@@ -53,7 +57,7 @@ public sealed class MainForm : Form
         _trayIcon = new NotifyIcon
         {
             Icon = SystemIcons.Shield,
-            Text = "Agent Proxy Hub · 物理直出独立代理运行中",
+            Text = $"{ProjectMetadata.Name} v{ProjectMetadata.Version} · 物理直出独立代理",
             ContextMenuStrip = menu,
             Visible = true
         };
@@ -70,13 +74,39 @@ public sealed class MainForm : Form
             await _webView.EnsureCoreWebView2Async();
             _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+            _webView.CoreWebView2.NewWindowRequested += OnWebViewNewWindowRequested;
             _webView.Source = new Uri(_url);
         }
         catch (Exception ex)
         {
             MessageBox.Show($"WebView2 初始化失败，请确认系统已安装 Edge WebView2 Runtime。\n详情: {ex.Message}",
-                "Agent Proxy Hub", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ProjectMetadata.Name, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private static void OnWebViewNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
+    {
+        if (Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http")
+        {
+            if (uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+            {
+                e.Handled = true;
+                OpenRepoInBrowser();
+            }
+        }
+    }
+
+    private static void OpenRepoInBrowser()
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = ProjectMetadata.RepoUrl,
+                UseShellExecute = true
+            });
+        }
+        catch { }
     }
 
     private void ShowMainWindow()

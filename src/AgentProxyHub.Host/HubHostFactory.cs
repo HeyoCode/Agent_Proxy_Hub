@@ -118,6 +118,7 @@ public static class HubHostFactory
 
                 return Results.Ok(new
                 {
+                    project = ProjectMetadata.ToDto(),
                     os = OperatingSystem.IsMacOS() ? "mac" : "win",
                     arch = RuntimeInformation.OSArchitecture.ToString(),
                     memoryMb = Math.Round(Process.GetCurrentProcess().WorkingSet64 / 1024.0 / 1024.0, 1),
@@ -379,6 +380,24 @@ public static class HubHostFactory
             }
 
             return Results.Ok(pricingCatalog.GetAllRules());
+        });
+
+        // 6. 在系统默认浏览器中安全打开固定 GitHub 项目仓库
+        app.MapPost("/api/system/open-repo", () =>
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = ProjectMetadata.RepoUrl,
+                    UseShellExecute = true
+                });
+                return Results.Ok(new { opened = true, url = ProjectMetadata.RepoUrl });
+            }
+            catch (Exception ex)
+            {
+                return Results.Ok(new { opened = false, url = ProjectMetadata.RepoUrl, error = ex.Message });
+            }
         });
 
         return app;

@@ -134,3 +134,32 @@ public sealed class BatchParseResult
     public int ErrorCount { get; set; }
     public List<BatchParseItem> Items { get; set; } = new();
 }
+
+/// <summary>
+/// 项目仓库与版本单一元数据中心
+/// </summary>
+public static class ProjectMetadata
+{
+    public const string Name = "Agent Proxy Hub";
+    public const string Version = "0.2.0";
+    public const string RepoOwner = "HeyoCode";
+    public const string RepoName = "Agent_Proxy_Hub";
+    public const string RepoSlug = "HeyoCode/Agent_Proxy_Hub";
+    public const string RepoUrl = "https://github.com/HeyoCode/Agent_Proxy_Hub";
+    public const string CloneUrl = "https://github.com/HeyoCode/Agent_Proxy_Hub.git";
+    public const string Author = "Heyo (@HeyoCode)";
+    public const string Description = "AI 专用独立出口代理与双源用量统计桌面网关 (Windows / macOS)";
+
+    public static object ToDto() => new
+    {
+        name = Name,
+        version = Version,
+        repoOwner = RepoOwner,
+        repoName = RepoName,
+        repoSlug = RepoSlug,
+        repoUrl = RepoUrl,
+        cloneUrl = CloneUrl,
+        author = Author,
+        description = Description
+    };
+}
