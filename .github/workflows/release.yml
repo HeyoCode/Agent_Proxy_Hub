@@ -80,34 +80,36 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Generate Release Notes from Tag & Commits
+      - name: Generate Release Notes from CHANGELOG & Commits
         shell: bash
         run: |
           TAG="${GITHUB_REF_NAME}"
-          git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}" --force --tags
           PREV_TAG="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
-          OBJ_TYPE="$(git cat-file -t "refs/tags/${TAG}" 2>/dev/null || true)"
-          if [ "${OBJ_TYPE}" = "tag" ]; then
-            TAG_MSG="$(git for-each-ref --format='%(contents)' "refs/tags/${TAG}")"
-          else
-            TAG_MSG=""
+          CHANGELOG_SECTION=""
+          if [ -f CHANGELOG.md ]; then
+            CHANGELOG_SECTION="$(awk -v ver="[${TAG}]" '
+              index($0, "## " ver) == 1 { flag=1; next }
+              flag && /^## \[/ { exit }
+              flag { print }
+            ' CHANGELOG.md | sed '/^---$/d')"
+          fi
+          if [ -z "$(echo "${CHANGELOG_SECTION}" | tr -d '[:space:]')" ]; then
+            git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}" --force --tags || true
+            OBJ_TYPE="$(git cat-file -t "refs/tags/${TAG}" 2>/dev/null || true)"
+            if [ "${OBJ_TYPE}" = "tag" ]; then
+              CHANGELOG_SECTION="$(git for-each-ref --format='%(contents)' "refs/tags/${TAG}")"
+            fi
           fi
           {
-            if [ -n "${TAG_MSG}" ]; then
-              echo "${TAG_MSG}"
+            if [ -n "$(echo "${CHANGELOG_SECTION}" | tr -d '[:space:]')" ]; then
+              echo "${CHANGELOG_SECTION}"
               echo ""
             fi
-            echo "## 📝 本次更新提交记录"
             if [ -n "${PREV_TAG}" ]; then
-              git log "${PREV_TAG}..${TAG}" --no-merges --pretty=format:"- %s (\`%h\`)"
-              echo ""
-              echo ""
               echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
-            else
-              git log -n 10 --no-merges --pretty=format:"- %s (\`%h\`)"
-              echo ""
             fi
           } > release_notes.md
+          cat release_notes.md
       - name: Publish GitHub Release Assets
         uses: softprops/action-gh-release@v2
         with:
