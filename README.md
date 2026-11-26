@@ -197,8 +197,8 @@ flowchart LR
 ### 方式一：直接下载安装程序（推荐）
 
 前往 [**GitHub Releases**](https://github.com/HeyoCode/Agent_Proxy_Hub/releases) 下载对应平台最新安装包：
-- **Windows x64**：`AgentProxyHub-Setup-v0.4.1-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
-- **macOS**：`AgentProxyHub-v0.4.1-macos-arm64.dmg`
+- **Windows x64**：`AgentProxyHub-Setup-v0.4.2-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
+- **macOS**：`AgentProxyHub-v0.4.2-macos-arm64.dmg`
 
 ### 方式二：3 步完成首次配置
 
@@ -272,16 +272,16 @@ dotnet run --project src/AgentProxyHub.Host/AgentProxyHub.Host.csproj -c Release
 
 ```powershell
 # Windows 轻量安装程序（需安装 Inno Setup 6）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.1
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.2
 
 # Windows 离线独立版（内置完整 .NET 10 运行时）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.1 -SelfContained
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.2 -SelfContained
 ```
 
 ```bash
 # macOS Apple Silicon / Intel DMG 镜像
 chmod +x installer/macos/build-dmg.sh
-./installer/macos/build-dmg.sh osx-arm64 0.4.1
+./installer/macos/build-dmg.sh osx-arm64 0.4.2
 ```
 
 </details>

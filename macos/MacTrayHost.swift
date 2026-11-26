@@ -17,7 +17,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMe
         // 1. 初始化菜单栏图标与原生 NSPopover 快捷面板
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "APH"
-        statusItem.button?.toolTip = "Agent Proxy Hub v0.4.1 · 物理直出独立代理"
+        statusItem.button?.toolTip = "Agent Proxy Hub v0.4.2 · 物理直出独立代理"
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePopover(_:))
 
@@ -45,7 +45,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMe
             backing: .buffered,
             defer: false
         )
-        window.title = "Agent Proxy Hub v0.4.1"
+        window.title = "Agent Proxy Hub v0.4.2"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = false
@@ -66,10 +66,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKScriptMe
         window.contentView = webView
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            if let url = URL(string: "http://127.0.0.1:17880/?v=0.4.1") {
+            if let url = URL(string: "http://127.0.0.1:17880/?v=0.4.2") {
                 self.webView.load(URLRequest(url: url))
             }
-            if let trayUrl = URL(string: "http://127.0.0.1:17880/?tray=1&v=0.4.1") {
+            if let trayUrl = URL(string: "http://127.0.0.1:17880/?tray=1&v=0.4.2") {
                 self.popoverWebView.load(URLRequest(url: trayUrl))
             }
         }
