@@ -27,6 +27,9 @@
   <img src="https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D6?style=flat-square&logo=windows&logoColor=white" alt="Windows" />
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%2F%20Intel-18181B?style=flat-square&logo=apple&logoColor=white" alt="macOS" />
   <img src="https://img.shields.io/badge/Zero_MITM-TLS%201.3%20端到端加密-059669?style=flat-square" alt="Zero MITM" />
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0.0-E11D48?style=flat-square" alt="PolyForm Noncommercial 1.0.0" />
+  </a>
 </p>
 
 <p>
@@ -74,8 +77,8 @@
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>🌐 L1 原生多协议 + L2 按需 <code>sing-box</code> 扩展</h3>
-      <p><strong>L1 核心层</strong>纯 .NET 零依赖原生支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code> Sidecar 支持 <code>VLESS (Reality) / Hysteria2 / TUIC / WireGuard</code>，无 L2 节点时 0 后台进程、0 额外内存占用。</p>
+      <h3>🌐 L1 原生多协议 + L2 按需 <code>sing-box</code> 扩展 & 机场订阅</h3>
+      <p><strong>L1 核心层</strong>纯 .NET 零依赖原生支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code> Sidecar 支持 <code>VLESS (Reality) / Hysteria2 / TUIC / WireGuard</code>（无 L2 节点时 0 进程占用）；全面支持 <strong>L1+L2 手动动态填表</strong>、单条链接回填与 <strong>Clash YAML / Base64 机场订阅链接一键拉取</strong>。</p>
     </td>
     <td width="50%" valign="top">
       <h3>🔀 双跳链式加速（高速中转 → 静态住宅落地）</h3>
@@ -194,12 +197,12 @@ flowchart LR
 ### 方式一：直接下载安装程序（推荐）
 
 前往 [**GitHub Releases**](https://github.com/HeyoCode/Agent_Proxy_Hub/releases) 下载对应平台最新安装包：
-- **Windows x64**：`AgentProxyHub-Setup-v0.4.0-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
-- **macOS**：`AgentProxyHub-v0.4.0-macos-arm64.dmg`
+- **Windows x64**：`AgentProxyHub-Setup-v0.4.1-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
+- **macOS**：`AgentProxyHub-v0.4.1-macos-arm64.dmg`
 
 ### 方式二：3 步完成首次配置
 
-1. **导入独立专线**：点击左侧「独立线路池」→「批量导入」，粘贴你的静态 `SOCKS5 / HTTP(S) / Trojan / Shadowsocks / VLESS / Hysteria2 / TUIC / WireGuard` 节点链接并点击「全部验真」。
+1. **导入独立专线或机场订阅**：点击左侧「独立线路池」→「批量导入线路」，可直接粘贴 **机场订阅 URL**（自动识别 Clash YAML 与 Base64）一键拉取预览，或通过「手动添加」逐项配置 L1/L2 全部 10 种协议（支持单条节点链接自动填表）。
 2. **绑定席位（可选前置中转）并接管**：在控制台为每个 AI 应用选择落地出口线路（需要加速时再选一个「前置中转」），点击右侧 **「一键接管」**（或点击 **「全链路验真」** 实流测试通道并刷新吞吐）。
 3. **日常托盘操控**：关闭主窗口后自动常驻系统托盘；左键或右键单击托盘图标即可呼出圆角快捷面板，双击托盘图标直达主控制台。
 
@@ -254,7 +257,7 @@ Agent_Proxy_Hub/
 pnpm --dir web install
 pnpm --dir web build
 
-# 2. 运行全套 xUnit 单元测试（13 项全绿）
+# 2. 运行全套 xUnit 单元测试（14 项全绿）
 dotnet test AgentProxyHub.sln -c Release
 
 # 3. 启动 Windows 无边框托盘客户端
@@ -269,16 +272,16 @@ dotnet run --project src/AgentProxyHub.Host/AgentProxyHub.Host.csproj -c Release
 
 ```powershell
 # Windows 轻量安装程序（需安装 Inno Setup 6）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.0
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.1
 
 # Windows 离线独立版（内置完整 .NET 10 运行时）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.0 -SelfContained
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.1 -SelfContained
 ```
 
 ```bash
 # macOS Apple Silicon / Intel DMG 镜像
 chmod +x installer/macos/build-dmg.sh
-./installer/macos/build-dmg.sh osx-arm64 0.4.0
+./installer/macos/build-dmg.sh osx-arm64 0.4.1
 ```
 
 </details>
@@ -289,7 +292,8 @@ chmod +x installer/macos/build-dmg.sh
 | 方法 | 路径 | 说明 |
 | :---: | :--- | :--- |
 | `GET` | `/api/overview` | 获取物理网卡、绕过隧道、席位配置、节点池、实时吞吐/速率与接管状态 |
-| `POST` | `/api/nodes/batch-import` | 批量解析并去重导入多协议代理节点 |
+| `POST` | `/api/nodes/batch-import` | 批量解析并去重导入多协议代理节点（支持 Clash YAML / Base64 / URI） |
+| `POST` | `/api/nodes/fetch-subscription` | 拉取机场订阅链接（自动兼容 `clash.meta` / `v2rayN` 与可选代理）并实时预览 |
 | `POST` | `/api/nodes/{id}/verify` | 物理网卡直连并发验真单个节点（单次最快 RTT + 出口 IP） |
 | `PUT` | `/api/seats/{id}` | 更新席位启停、绑定线路、前置中转 (`relayNodeId`)、本地端口与防串熔断锁 |
 | `POST` | `/api/seats/{id}/takeover` | 对目标 AI 应用执行一键无损代理接管或还原默认配置 |
@@ -345,6 +349,15 @@ chmod +x installer/macos/build-dmg.sh
 
 ---
 
+## 📜 开源许可协议（非商用）
+
+本项目采用 [**PolyForm Noncommercial License 1.0.0**](LICENSE) 非商业用途开源协议发布：
+
+- ✅ **允许**：个人学习、研究、测试、日常非商业自用，以及在保留本协议声明前提下的非商业开源二次修改与分享；
+- ❌ **禁止**：未经作者（[@HeyoCode](https://github.com/HeyoCode)）书面授权，禁止用于任何形式的商业售卖、付费套壳分发、商业 SaaS 托管、打包进商业软件或企业内部商业用途。
+
+---
+
 <div align="center">
-  <sub>Crafted with precision by <a href="https://github.com/HeyoCode">@HeyoCode</a> · 如果这个项目帮你的 AI 账号告别了串线与风控，欢迎点一颗 ⭐ Star</sub>
+  <sub>Crafted with precision by <a href="https://github.com/HeyoCode">@HeyoCode</a> · 基于 PolyForm Noncommercial 1.0.0 协议开放 · 欢迎点一颗 ⭐ Star</sub>
 </div>

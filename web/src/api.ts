@@ -23,6 +23,7 @@ export interface ProxyNode {
   method?: string | null;
   sni?: string | null;
   allowInsecure?: boolean;
+  extra?: Record<string, string> | null;
   requiresSidecarEngine?: boolean;
   engineKind?: 'native' | 'sing-box';
   enabled: boolean;
@@ -277,6 +278,14 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const txt = await res.text();
+    try {
+      const parsed = JSON.parse(txt) as { message?: string };
+      if (parsed?.message) throw new Error(parsed.message);
+    } catch (inner) {
+      if (inner instanceof Error && inner.message && inner.message !== txt && !inner.message.startsWith('Unexpected token')) {
+        throw inner;
+      }
+    }
     throw new Error(txt || `HTTP ${res.status}`);
   }
   return res.json() as Promise<T>;
@@ -295,7 +304,13 @@ export const api = {
     method?: string;
     sni?: string;
     allowInsecure?: boolean;
+    extra?: Record<string, string>;
   }) => requestJson<ProxyNode>('/api/nodes/manual', { method: 'POST', body: JSON.stringify(body) }),
+  fetchSubscription: (url: string, defaultGroup: string, proxyUrl?: string) =>
+    requestJson<{ rawText: string; preview: BatchParseResult; detectedFormat: string }>('/api/nodes/fetch-subscription', {
+      method: 'POST',
+      body: JSON.stringify({ url, defaultGroup, proxyUrl: proxyUrl?.trim() || undefined })
+    }),
   previewBatch: (rawText: string, defaultProtocol: ProxyProtocol, defaultGroup: string) =>
     requestJson<BatchParseResult>('/api/nodes/batch-preview', {
       method: 'POST',

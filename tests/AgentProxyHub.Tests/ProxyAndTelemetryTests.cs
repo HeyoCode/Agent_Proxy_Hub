@@ -996,4 +996,59 @@ public class ProxyAndTelemetryTests
         record.Write(hsBytes);
         return record.ToArray();
     }
+
+    [Fact]
+    public void ProxyNodeImporter_ShouldParseClashYamlInlineAndBlockSubscriptions()
+    {
+        const string clashYaml = """
+            port: 7890
+            proxies:
+              - { name: "HK-Trojan-Inline", type: trojan, server: hk.example.com, port: 443, password: "pw1", sni: "cdn.example.com", skip-cert-verify: true }
+              - { name: "JP-SS-Inline", type: ss, server: jp.example.com, port: 8388, cipher: aes-256-gcm, password: "pw2" }
+              - name: "US-VLESS-Reality"
+                type: vless
+                server: us.example.com
+                port: 443
+                uuid: 11111111-2222-3333-4444-555555555555
+                tls: true
+                servername: www.apple.com
+                flow: xtls-rprx-vision
+                client-fingerprint: chrome
+                reality-opts:
+                  public-key: test-pbk-123
+                  short-id: abcd
+              - name: "SG-Hy2-Block"
+                type: hysteria2
+                server: sg.example.com
+                port: 443
+                password: hy2-secret
+                sni: sg.example.com
+                obfs: salamander
+                obfs-password: obfs-pw
+            proxy-groups:
+              - name: Proxy
+                type: select
+            """;
+
+        var res = ProxyNodeImporter.Parse(clashYaml, ProxyProtocol.SOCKS5, "机场订阅测试");
+        Assert.Equal(4, res.ValidCount);
+        Assert.Equal(0, res.ErrorCount);
+
+        var nodes = res.Items.Where(i => i.Valid).Select(i => i.Node!).ToList();
+        var trojan = Assert.Single(nodes, n => n.Protocol == ProxyProtocol.TROJAN);
+        Assert.Equal("cdn.example.com", trojan.Sni);
+        Assert.True(trojan.AllowInsecure);
+
+        var ss = Assert.Single(nodes, n => n.Protocol == ProxyProtocol.SHADOWSOCKS);
+        Assert.Equal("aes-256-gcm", ss.Method);
+
+        var vless = Assert.Single(nodes, n => n.Protocol == ProxyProtocol.VLESS);
+        Assert.Equal("test-pbk-123", vless.Extra?["pbk"]);
+        Assert.Equal("abcd", vless.Extra?["sid"]);
+        Assert.Equal("xtls-rprx-vision", vless.Extra?["flow"]);
+
+        var hy2 = Assert.Single(nodes, n => n.Protocol == ProxyProtocol.HYSTERIA2);
+        Assert.Equal("salamander", hy2.Extra?["obfs"]);
+        Assert.Equal("obfs-pw", hy2.Extra?["obfs-password"]);
+    }
 }

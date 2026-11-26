@@ -26,7 +26,13 @@ public static class HubHostFactory
         string? Password,
         string? Method = null,
         string? Sni = null,
-        bool AllowInsecure = false);
+        bool AllowInsecure = false,
+        Dictionary<string, string>? Extra = null);
+
+    public sealed record SubscriptionFetchRequest(
+        string Url,
+        string? DefaultGroup = null,
+        string? ProxyUrl = null);
 
     public sealed record BatchPreviewRequest(
         string RawText,
@@ -242,9 +248,12 @@ public static class HubHostFactory
                 Method = string.IsNullOrWhiteSpace(req.Method) ? null : req.Method.Trim().ToLowerInvariant(),
                 Sni = string.IsNullOrWhiteSpace(req.Sni) ? null : req.Sni.Trim(),
                 AllowInsecure = req.AllowInsecure,
+                Extra = req.Extra is { Count: > 0 } ? new Dictionary<string, string>(req.Extra, StringComparer.OrdinalIgnoreCase) : null,
                 Status = "unverified",
                 ExitIp = "—",
-                IspSummary = "手动添加 · 待物理直连验真"
+                IspSummary = req.Protocol is ProxyProtocol.VLESS or ProxyProtocol.HYSTERIA2 or ProxyProtocol.TUIC or ProxyProtocol.WIREGUARD
+                    ? $"{req.Protocol} · sing-box 手动添加"
+                    : "手动添加 · 待物理直连验真"
             };
 
             lock (stateLock)
@@ -255,6 +264,94 @@ public static class HubHostFactory
                     proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
             }
             return Results.Ok(node);
+        });
+
+        app.MapPost("/api/nodes/fetch-subscription", async (SubscriptionFetchRequest req, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Url) ||
+                !Uri.TryCreate(req.Url.Trim(), UriKind.Absolute, out var subUri) ||
+                (subUri.Scheme != Uri.UriSchemeHttp && subUri.Scheme != Uri.UriSchemeHttps))
+            {
+                return Results.BadRequest(new { message = "请输入有效的 http:// 或 https:// 订阅链接" });
+            }
+
+            string group = string.IsNullOrWhiteSpace(req.DefaultGroup) ? "订阅导入池" : req.DefaultGroup.Trim();
+
+            async Task<string> DownloadSubAsync(string userAgent)
+            {
+                using var handler = new SocketsHttpHandler
+                {
+                    AutomaticDecompression = System.Net.DecompressionMethods.All,
+                    AllowAutoRedirect = true,
+                    MaxAutomaticRedirections = 5,
+                    ConnectTimeout = TimeSpan.FromSeconds(10)
+                };
+                if (!string.IsNullOrWhiteSpace(req.ProxyUrl))
+                {
+                    handler.Proxy = new System.Net.WebProxy(req.ProxyUrl.Trim());
+                    handler.UseProxy = true;
+                }
+                else
+                {
+                    handler.UseProxy = false;
+                }
+
+                using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(18) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
+                using var resp = await http.GetAsync(subUri, HttpCompletionOption.ResponseHeadersRead, ct);
+                resp.EnsureSuccessStatusCode();
+                await using var stream = await resp.Content.ReadAsStreamAsync(ct);
+                using var ms = new MemoryStream();
+                var buf = new byte[16384];
+                int total = 0;
+                const int maxBytes = 4 * 1024 * 1024;
+                int read;
+                while ((read = await stream.ReadAsync(buf, ct)) > 0)
+                {
+                    total += read;
+                    if (total > maxBytes) throw new InvalidOperationException("订阅内容超过 4MB 安全上限");
+                    ms.Write(buf, 0, read);
+                }
+                return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+            }
+
+            try
+            {
+                string raw = await DownloadSubAsync("clash.meta/1.18");
+                BatchParseResult parsed;
+                lock (stateLock)
+                {
+                    parsed = ProxyNodeImporter.Parse(raw, ProxyProtocol.SOCKS5, group, doc.Nodes);
+                }
+
+                // 若 clash.meta UA 未解析出有效节点，则自动尝试 v2rayN UA 拉取 Base64 订阅
+                if (parsed.ValidCount == 0 && parsed.DuplicateCount == 0)
+                {
+                    string fallbackRaw = await DownloadSubAsync("v2rayN/6.45");
+                    BatchParseResult fallbackParsed;
+                    lock (stateLock)
+                    {
+                        fallbackParsed = ProxyNodeImporter.Parse(fallbackRaw, ProxyProtocol.SOCKS5, group, doc.Nodes);
+                    }
+                    if (fallbackParsed.ValidCount > 0 || fallbackParsed.DuplicateCount > 0)
+                    {
+                        raw = fallbackRaw;
+                        parsed = fallbackParsed;
+                    }
+                }
+
+                string format = ProxyNodeImporter.LooksLikeClashYaml(raw) ? "Clash YAML" : "URI / Base64";
+                return Results.Ok(new
+                {
+                    rawText = raw,
+                    preview = parsed,
+                    detectedFormat = format
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { message = $"拉取订阅失败：{ex.Message}（若订阅域名被拦截，可在右侧填写本机代理如 http://127.0.0.1:7897）" });
+            }
         });
 
         app.MapPost("/api/nodes/batch-preview", (BatchPreviewRequest req) =>

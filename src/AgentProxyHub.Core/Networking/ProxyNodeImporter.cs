@@ -31,15 +31,22 @@ public static partial class ProxyNodeImporter
         IEnumerable<ProxyNode>? existingNodes = null)
     {
         string normalized = TryDecodeBase64Block(rawText);
+
+        var existingFingerprints = existingNodes?
+            .Select(n => n.Fingerprint)
+            .ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
+
+        // 优先识别 Clash / Mihomo YAML 订阅（包含 proxies: 段落）
+        if (LooksLikeClashYaml(normalized))
+        {
+            return ParseClashYaml(normalized, defaultGroup, existingFingerprints);
+        }
+
         var rawLines = normalized
             .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
             .Select(l => l.Trim())
             .Where(l => !string.IsNullOrWhiteSpace(l) && !l.StartsWith('#') && !l.StartsWith("//"))
             .ToList();
-
-        var existingFingerprints = existingNodes?
-            .Select(n => n.Fingerprint)
-            .ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
 
         var seenInBatch = new HashSet<string>(StringComparer.Ordinal);
         var result = new BatchParseResult { TotalLines = rawLines.Count };
@@ -562,4 +569,433 @@ public static partial class ProxyNodeImporter
 
     private static string? NullIfEmpty(string? s) =>
         string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+    /// <summary>
+    /// 检测文本是否为 Clash / Mihomo YAML 订阅配置
+    /// </summary>
+    public static bool LooksLikeClashYaml(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return false;
+        return Regex.IsMatch(text, @"(?m)^\s*proxies\s*:\s*$");
+    }
+
+    private static BatchParseResult ParseClashYaml(
+        string yaml,
+        string defaultGroup,
+        HashSet<string> existingFingerprints)
+    {
+        var entries = ExtractClashProxyMaps(yaml);
+        var seenInBatch = new HashSet<string>(StringComparer.Ordinal);
+        var result = new BatchParseResult { TotalLines = entries.Count };
+
+        for (int i = 0; i < entries.Count; i++)
+        {
+            var (rawSummary, map) = entries[i];
+            int lineNo = i + 1;
+            if (TryBuildNodeFromClashMap(map, defaultGroup, out var node, out string? error))
+            {
+                bool isDup = existingFingerprints.Contains(node!.Fingerprint) || !seenInBatch.Add(node.Fingerprint);
+                result.Items.Add(new BatchParseItem
+                {
+                    LineNumber = lineNo,
+                    RawLine = rawSummary,
+                    Valid = !isDup,
+                    IsDuplicate = isDup,
+                    ErrorReason = isDup ? "与已有或同批节点重复，已自动跳过" : null,
+                    Node = node
+                });
+                if (isDup) result.DuplicateCount++;
+                else result.ValidCount++;
+            }
+            else
+            {
+                result.Items.Add(new BatchParseItem
+                {
+                    LineNumber = lineNo,
+                    RawLine = rawSummary,
+                    Valid = false,
+                    IsDuplicate = false,
+                    ErrorReason = error ?? "Clash 节点格式不受支持"
+                });
+                result.ErrorCount++;
+            }
+        }
+
+        return result;
+    }
+
+    private static List<(string Summary, Dictionary<string, string> Map)> ExtractClashProxyMaps(string yaml)
+    {
+        var list = new List<(string, Dictionary<string, string>)>();
+        var lines = yaml.Split(['\r', '\n']);
+        bool inProxies = false;
+        int proxiesIndent = -1;
+
+        Dictionary<string, string>? current = null;
+        string? currentParentKey = null;
+        int currentItemIndent = -1;
+
+        void FlushCurrent()
+        {
+            if (current != null && current.Count > 0)
+            {
+                string summary = current.TryGetValue("name", out string? nm) && !string.IsNullOrWhiteSpace(nm)
+                    ? nm
+                    : $"{current.GetValueOrDefault("type", "proxy")}://{current.GetValueOrDefault("server", "?")}:{current.GetValueOrDefault("port", "?")}";
+                list.Add((summary, current));
+            }
+            current = null;
+            currentParentKey = null;
+        }
+
+        foreach (string rawLine in lines)
+        {
+            string trimmed = rawLine.Trim();
+            if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith('#'))
+                continue;
+
+            int indent = 0;
+            while (indent < rawLine.Length && rawLine[indent] == ' ') indent++;
+
+            if (!inProxies)
+            {
+                if (trimmed.Equals("proxies:", StringComparison.Ordinal))
+                {
+                    inProxies = true;
+                    proxiesIndent = indent;
+                }
+                continue;
+            }
+
+            // 遇到新的顶层段落（如 proxy-groups: / rules:）则结束 proxies 解析
+            if (indent <= proxiesIndent && !trimmed.StartsWith('-'))
+            {
+                FlushCurrent();
+                break;
+            }
+
+            // 1. 流式单行对象：- { name: "HK 01", type: trojan, server: ..., port: 443, ... }
+            if (trimmed.StartsWith("- {", StringComparison.Ordinal) || trimmed.StartsWith("-{", StringComparison.Ordinal))
+            {
+                FlushCurrent();
+                int braceStart = trimmed.IndexOf('{');
+                int braceEnd = trimmed.LastIndexOf('}');
+                if (braceStart >= 0 && braceEnd > braceStart)
+                {
+                    var map = ParseYamlInlineMap(trimmed[(braceStart + 1)..braceEnd]);
+                    if (map.Count > 0)
+                    {
+                        string summary = map.TryGetValue("name", out string? nm) && !string.IsNullOrWhiteSpace(nm)
+                            ? nm
+                            : trimmed;
+                        list.Add((summary, map));
+                    }
+                }
+                continue;
+            }
+
+            // 2. 多行缩进块起点：- name: ...
+            if (trimmed.StartsWith("- ", StringComparison.Ordinal))
+            {
+                FlushCurrent();
+                current = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                currentItemIndent = indent;
+                currentParentKey = null;
+                string firstKv = trimmed[2..].Trim();
+                ParseYamlKeyValueInto(firstKv, null, current);
+                continue;
+            }
+
+            // 3. 多行缩进块内部属性与嵌套子块（如 reality-opts / ws-opts / grpc-opts）
+            if (current != null)
+            {
+                if (indent > currentItemIndent + 2 && currentParentKey != null)
+                {
+                    ParseYamlKeyValueInto(trimmed, currentParentKey, current);
+                }
+                else
+                {
+                    int colon = trimmed.IndexOf(':');
+                    if (colon > 0)
+                    {
+                        string key = UnquoteYaml(trimmed[..colon].Trim());
+                        string val = trimmed[(colon + 1)..].Trim();
+                        if (string.IsNullOrEmpty(val))
+                        {
+                            currentParentKey = key;
+                        }
+                        else if (val.StartsWith('{') && val.EndsWith('}'))
+                        {
+                            currentParentKey = null;
+                            var nested = ParseYamlInlineMap(val[1..^1]);
+                            foreach (var (nk, nv) in nested)
+                                current[$"{key}.{nk}"] = nv;
+                        }
+                        else
+                        {
+                            currentParentKey = null;
+                            current[key] = UnquoteYaml(val);
+                        }
+                    }
+                }
+            }
+        }
+
+        FlushCurrent();
+        return list;
+    }
+
+    private static Dictionary<string, string> ParseYamlInlineMap(string body)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var tokens = SplitTopLevel(body, ',');
+        foreach (string tok in tokens)
+        {
+            int colon = FindUnquotedColon(tok);
+            if (colon <= 0) continue;
+            string key = UnquoteYaml(tok[..colon].Trim());
+            string val = tok[(colon + 1)..].Trim();
+            if (val.StartsWith('{') && val.EndsWith('}'))
+            {
+                var nested = ParseYamlInlineMap(val[1..^1]);
+                foreach (var (nk, nv) in nested)
+                    map[$"{key}.{nk}"] = nv;
+            }
+            else if (val.StartsWith('[') && val.EndsWith(']'))
+            {
+                map[key] = UnquoteYaml(val[1..^1].Trim());
+            }
+            else
+            {
+                map[key] = UnquoteYaml(val);
+            }
+        }
+        return map;
+    }
+
+    private static void ParseYamlKeyValueInto(string line, string? parentKey, Dictionary<string, string> map)
+    {
+        int colon = FindUnquotedColon(line);
+        if (colon <= 0) return;
+        string key = UnquoteYaml(line[..colon].Trim());
+        string val = line[(colon + 1)..].Trim();
+        string fullKey = string.IsNullOrEmpty(parentKey) ? key : $"{parentKey}.{key}";
+        if (val.StartsWith('{') && val.EndsWith('}'))
+        {
+            var nested = ParseYamlInlineMap(val[1..^1]);
+            foreach (var (nk, nv) in nested)
+                map[$"{fullKey}.{nk}"] = nv;
+        }
+        else
+        {
+            map[fullKey] = UnquoteYaml(val);
+        }
+    }
+
+    private static List<string> SplitTopLevel(string input, char sep)
+    {
+        var res = new List<string>();
+        var sb = new StringBuilder();
+        int braceDepth = 0;
+        int bracketDepth = 0;
+        char quote = '\0';
+        for (int i = 0; i < input.Length; i++)
+        {
+            char c = input[i];
+            if (quote != '\0')
+            {
+                sb.Append(c);
+                if (c == '\\' && i + 1 < input.Length)
+                {
+                    sb.Append(input[++i]);
+                }
+                else if (c == quote)
+                {
+                    quote = '\0';
+                }
+                continue;
+            }
+            if (c is '"' or '\'') { quote = c; sb.Append(c); continue; }
+            if (c == '{') { braceDepth++; sb.Append(c); continue; }
+            if (c == '}') { if (braceDepth > 0) braceDepth--; sb.Append(c); continue; }
+            if (c == '[') { bracketDepth++; sb.Append(c); continue; }
+            if (c == ']') { if (bracketDepth > 0) bracketDepth--; sb.Append(c); continue; }
+            if (c == sep && braceDepth == 0 && bracketDepth == 0)
+            {
+                res.Add(sb.ToString());
+                sb.Clear();
+                continue;
+            }
+            sb.Append(c);
+        }
+        if (sb.Length > 0) res.Add(sb.ToString());
+        return res;
+    }
+
+    private static int FindUnquotedColon(string s)
+    {
+        char quote = '\0';
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (quote != '\0')
+            {
+                if (c == '\\' && i + 1 < s.Length) { i++; continue; }
+                if (c == quote) quote = '\0';
+                continue;
+            }
+            if (c is '"' or '\'') { quote = c; continue; }
+            if (c == ':') return i;
+        }
+        return -1;
+    }
+
+    private static string UnquoteYaml(string s)
+    {
+        s = s.Trim();
+        if (s.Length >= 2 && ((s[0] == '"' && s[^1] == '"') || (s[0] == '\'' && s[^1] == '\'')))
+            return s[1..^1].Replace("\\\"", "\"").Replace("\\\\", "\\");
+        return s;
+    }
+
+    private static bool TryBuildNodeFromClashMap(
+        Dictionary<string, string> m,
+        string group,
+        out ProxyNode? node,
+        out string? error)
+    {
+        node = null;
+        error = null;
+
+        string type = m.GetValueOrDefault("type", string.Empty).Trim().ToLowerInvariant();
+        string server = m.GetValueOrDefault("server", string.Empty).Trim();
+        string portStr = m.GetValueOrDefault("port", string.Empty).Trim();
+        string name = m.GetValueOrDefault("name", string.Empty).Trim();
+
+        if (string.IsNullOrWhiteSpace(server) || !TryValidPort(portStr, out int port))
+        {
+            error = $"节点 {name} 缺少有效 server 或 port";
+            return false;
+        }
+
+        bool insecure = IsTruthy(m, "skip-cert-verify") || IsTruthy(m, "allowInsecure");
+        string? sni = GetFirstNonEmpty(m, "sni", "servername");
+
+        switch (type)
+        {
+            case "trojan":
+            {
+                string? pass = NullIfEmpty(m.GetValueOrDefault("password"));
+                if (pass == null) { error = $"Trojan 节点 {name} 缺少 password"; return false; }
+                node = BuildNode(ProxyProtocol.TROJAN, server, port, null, pass, name, group);
+                node.Sni = sni ?? server;
+                node.AllowInsecure = insecure;
+                node.IspSummary = $"Trojan TLS · SNI {node.Sni}";
+                return true;
+            }
+            case "ss" or "shadowsocks":
+            {
+                string? cipher = NullIfEmpty(m.GetValueOrDefault("cipher"));
+                string? pass = NullIfEmpty(m.GetValueOrDefault("password"));
+                if (cipher == null || pass == null) { error = $"SS 节点 {name} 缺少 cipher 或 password"; return false; }
+                node = BuildNode(ProxyProtocol.SHADOWSOCKS, server, port, null, pass, name, group);
+                node.Method = cipher.ToLowerInvariant();
+                node.IspSummary = $"Shadowsocks · {node.Method}";
+                return true;
+            }
+            case "vless":
+            {
+                string? uuid = NullIfEmpty(m.GetValueOrDefault("uuid"));
+                if (uuid == null) { error = $"VLESS 节点 {name} 缺少 uuid"; return false; }
+                node = BuildNode(ProxyProtocol.VLESS, server, port, uuid, null, name, group);
+                node.Sni = sni ?? server;
+                node.AllowInsecure = insecure;
+                var extra = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (m.TryGetValue("reality-opts.public-key", out string? pbk) && !string.IsNullOrWhiteSpace(pbk))
+                {
+                    extra["security"] = "reality";
+                    extra["pbk"] = pbk;
+                    if (m.TryGetValue("reality-opts.short-id", out string? sid) && !string.IsNullOrWhiteSpace(sid))
+                        extra["sid"] = sid;
+                }
+                else if (IsTruthy(m, "tls"))
+                {
+                    extra["security"] = "tls";
+                }
+                if (m.TryGetValue("flow", out string? flow) && !string.IsNullOrWhiteSpace(flow)) extra["flow"] = flow;
+                if (m.TryGetValue("client-fingerprint", out string? fp) && !string.IsNullOrWhiteSpace(fp)) extra["fp"] = fp;
+                if (m.TryGetValue("network", out string? net) && !string.IsNullOrWhiteSpace(net)) extra["type"] = net;
+                if (m.TryGetValue("ws-opts.path", out string? wsPath) && !string.IsNullOrWhiteSpace(wsPath)) extra["path"] = wsPath;
+                if (m.TryGetValue("ws-opts.headers.Host", out string? wsHost) && !string.IsNullOrWhiteSpace(wsHost)) extra["host"] = wsHost;
+                if (m.TryGetValue("grpc-opts.grpc-service-name", out string? grpcSvc) && !string.IsNullOrWhiteSpace(grpcSvc)) extra["serviceName"] = grpcSvc;
+                if (extra.Count > 0) node.Extra = extra;
+                node.IspSummary = $"VLESS ({extra.GetValueOrDefault("security", "tls")}) · sing-box";
+                return true;
+            }
+            case "hysteria2" or "hy2":
+            {
+                string? pass = NullIfEmpty(m.GetValueOrDefault("password"));
+                if (pass == null) { error = $"Hysteria2 节点 {name} 缺少 password"; return false; }
+                node = BuildNode(ProxyProtocol.HYSTERIA2, server, port, null, pass, name, group);
+                node.Sni = sni ?? server;
+                node.AllowInsecure = insecure;
+                var extra = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (m.TryGetValue("obfs", out string? obfs) && !string.IsNullOrWhiteSpace(obfs)) extra["obfs"] = obfs;
+                if (m.TryGetValue("obfs-password", out string? obfsPass) && !string.IsNullOrWhiteSpace(obfsPass)) extra["obfs-password"] = obfsPass;
+                if (extra.Count > 0) node.Extra = extra;
+                node.IspSummary = "Hysteria2 QUIC · sing-box";
+                return true;
+            }
+            case "tuic":
+            {
+                string? uuid = NullIfEmpty(m.GetValueOrDefault("uuid"));
+                string? pass = NullIfEmpty(m.GetValueOrDefault("password"));
+                if (uuid == null) { error = $"TUIC 节点 {name} 缺少 uuid"; return false; }
+                node = BuildNode(ProxyProtocol.TUIC, server, port, uuid, pass, name, group);
+                node.Sni = sni ?? server;
+                node.AllowInsecure = insecure;
+                var extra = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (m.TryGetValue("congestion-controller", out string? cc) && !string.IsNullOrWhiteSpace(cc)) extra["congestion_control"] = cc;
+                if (extra.Count > 0) node.Extra = extra;
+                node.IspSummary = "TUIC v5 · sing-box";
+                return true;
+            }
+            case "wireguard" or "wg":
+            {
+                string? priv = NullIfEmpty(m.GetValueOrDefault("private-key"));
+                if (priv == null) { error = $"WireGuard 节点 {name} 缺少 private-key"; return false; }
+                node = BuildNode(ProxyProtocol.WIREGUARD, server, port, null, priv, name, group);
+                var extra = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                if (m.TryGetValue("public-key", out string? pub) && !string.IsNullOrWhiteSpace(pub)) extra["publickey"] = pub;
+                if (m.TryGetValue("ip", out string? ip) && !string.IsNullOrWhiteSpace(ip)) extra["address"] = ip;
+                if (m.TryGetValue("mtu", out string? mtu) && !string.IsNullOrWhiteSpace(mtu)) extra["mtu"] = mtu;
+                if (extra.Count > 0) node.Extra = extra;
+                node.IspSummary = "WireGuard · sing-box";
+                return true;
+            }
+            case "socks5":
+            {
+                node = BuildNode(ProxyProtocol.SOCKS5, server, port,
+                    NullIfEmpty(m.GetValueOrDefault("username")),
+                    NullIfEmpty(m.GetValueOrDefault("password")),
+                    name, group);
+                return true;
+            }
+            case "http":
+            {
+                bool useTls = IsTruthy(m, "tls");
+                node = BuildNode(useTls ? ProxyProtocol.HTTPS : ProxyProtocol.HTTP, server, port,
+                    NullIfEmpty(m.GetValueOrDefault("username")),
+                    NullIfEmpty(m.GetValueOrDefault("password")),
+                    name, group);
+                if (useTls) { node.Sni = sni ?? server; node.AllowInsecure = insecure; }
+                return true;
+            }
+            default:
+            {
+                error = $"协议 type={type} 暂不支持（支持 trojan/ss/vless/hysteria2/tuic/wireguard/socks5/http）";
+                return false;
+            }
+        }
+    }
 }
