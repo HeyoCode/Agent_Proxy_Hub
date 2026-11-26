@@ -9,8 +9,18 @@ import {
   NodesNavIcon,
   OverviewNavIcon,
   SunIcon,
+  SystemThemeIcon,
   UsageNavIcon
 } from './components/Icons';
+import {
+  ResolvedTheme,
+  ThemePreference,
+  applyResolvedTheme,
+  loadThemePreference,
+  nextThemePreference,
+  resolveTheme,
+  saveThemePreference
+} from './theme';
 import { RightInspector } from './components/RightInspector';
 import { AppsCliView } from './views/AppsCliView';
 import { IsolationView } from './views/IsolationView';
@@ -30,7 +40,7 @@ type TabKey = 'overview' | 'usage' | 'nodes' | 'apps' | 'isolation';
 
 const FALLBACK_PROJECT = {
   name: 'Agent Proxy Hub',
-  version: '0.3.4',
+  version: '0.4.0',
   repoOwner: 'HeyoCode',
   repoName: 'Agent_Proxy_Hub',
   repoSlug: 'HeyoCode/Agent_Proxy_Hub',
@@ -51,12 +61,12 @@ const TAB_TITLES: Record<TabKey, string> = {
 export const App: React.FC = () => {
   const query = new URLSearchParams(window.location.search);
   const initialTab = (query.get('view') as TabKey) || 'overview';
-  const initialTheme = query.get('theme') === 'dark' ? 'dark' : 'light';
 
   const [tab, setTab] = useState<TabKey>(
     ['overview', 'usage', 'nodes', 'apps', 'isolation'].includes(initialTab) ? initialTab : 'overview'
   );
-  const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme);
+  const [themePref, setThemePref] = useState<ThemePreference>(() => loadThemePreference());
+  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => resolveTheme(loadThemePreference()));
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [selectedSeatId, setSelectedSeatId] = useState<string>('claude');
   const [throughputMode, setThroughputMode] = useState<'realtime' | 'cumulative'>(() => {
@@ -73,8 +83,17 @@ export const App: React.FC = () => {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
-  }, [theme]);
+    const apply = () => {
+      const next = resolveTheme(themePref);
+      setResolvedTheme(next);
+      applyResolvedTheme(next);
+    };
+    apply();
+    if (themePref !== 'system' || !window.matchMedia) return;
+    const mql = window.matchMedia('(prefers-color-scheme: dark)');
+    mql.addEventListener?.('change', apply);
+    return () => mql.removeEventListener?.('change', apply);
+  }, [themePref]);
 
   useEffect(() => {
     return subscribeMaximizedState(setMaximized);
@@ -224,11 +243,34 @@ export const App: React.FC = () => {
           <button
             type="button"
             className="rail-utility-btn"
-            aria-label="切换浅色或深色界面"
-            onClick={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))}
+            aria-label="切换主题模式（跟随系统 / 浅色 / 深色）"
+            onClick={() => {
+              const next = nextThemePreference(themePref);
+              setThemePref(next);
+              saveThemePreference(next);
+              toast(
+                next === 'system'
+                  ? `已切换：跟随系统（当前${resolveTheme('system') === 'dark' ? '深色' : '浅色'}）`
+                  : next === 'light'
+                    ? '已切换：浅色模式'
+                    : '已切换：深色模式'
+              );
+            }}
           >
-            {theme === 'light' ? <MoonIcon size={17} /> : <SunIcon size={17} />}
-            <span className="rail-tooltip">{theme === 'light' ? '切换深色模式' : '切换浅色模式'}</span>
+            {themePref === 'system' ? (
+              <SystemThemeIcon size={17} />
+            ) : themePref === 'light' ? (
+              <SunIcon size={17} />
+            ) : (
+              <MoonIcon size={17} />
+            )}
+            <span className="rail-tooltip">
+              {themePref === 'system'
+                ? `跟随系统（当前${resolvedTheme === 'dark' ? '深色' : '浅色'}）· 点按切浅色`
+                : themePref === 'light'
+                  ? '浅色模式 · 点按切深色'
+                  : '深色模式 · 点按跟随系统'}
+            </span>
           </button>
         </div>
       </aside>

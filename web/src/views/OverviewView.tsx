@@ -581,8 +581,8 @@ export const OverviewView: React.FC<Props> = ({
               className={`seat-gauge-card ${isSelected ? 'selected' : ''}`}
               onClick={() => onSelectSeat(seat.id)}
             >
-              <div style={{ color: isSelected ? 'var(--accent-indigo)' : 'var(--text-muted)', transition: 'color 0.18s ease' }}>
-                <SeatBrandIcon seatId={seat.id} size={18} />
+              <div style={{ color: 'var(--text-primary)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', height: 24 }}>
+                <SeatBrandIcon seatId={seat.id} size={22} />
               </div>
               <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text-primary)', marginTop: 8 }}>
                 {seat.name}

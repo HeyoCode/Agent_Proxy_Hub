@@ -74,8 +74,18 @@
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>🧊 原生无边框三栏美学 & 真托盘快捷窗</h3>
-      <p>Windows 11 DWM 原生圆角无外边框窗口 + 共享 WebView2 预热的<strong>系统托盘圆角悬浮面板</strong>（macOS 使用原生 <code>NSPopover</code>），彻底告别传统灰底右键菜单，单击托盘即可启停席位、一键接管与复制变量。</p>
+      <h3>🌐 L1 原生多协议 + L2 按需 <code>sing-box</code> 扩展</h3>
+      <p><strong>L1 核心层</strong>纯 .NET 零依赖原生支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code> Sidecar 支持 <code>VLESS (Reality) / Hysteria2 / TUIC / WireGuard</code>，无 L2 节点时 0 后台进程、0 额外内存占用。</p>
+    </td>
+    <td width="50%" valign="top">
+      <h3>🔀 双跳链式加速（高速中转 → 静态住宅落地）</h3>
+      <p>每个 AI 席位均可独立配置可选<strong>「前置中转」</strong>节点（如港/日低延迟专线中转 → 美国干净住宅 IP 落地），在享受大陆毫秒级响应的同时，严格保持 AI 服务端看到的出口为独享静态住宅 IP。</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>🧊 全窗浅色/深色统一主题 · 跟随系统实时联动</h3>
+      <p>Windows 11 DWM 原生圆角无外边框窗口 + <strong>跟随系统 / 浅色 / 深色三态切换</strong>（主窗与托盘浮层实时同步），内置 Claude / ChatGPT / Antigravity / Cursor <strong>官方原版矢量品牌标</strong>，彻底告别传统灰底右键菜单。</p>
     </td>
     <td width="50%" valign="top">
       <h3>🔒 防串 IP 熔断锁 & IPv6 双栈独立开关</h3>
@@ -91,9 +101,9 @@
 <table>
   <tr>
     <td width="50%" align="center">
-      <img src="docs/screenshots/dashboard-light.png" alt="Nordic Mist 主控制台（浅色）" />
+      <img src="docs/screenshots/dashboard-light.png" alt="Nordic Mist 主控制台（浅色统一风格）" />
       <br />
-      <sub><strong>主控制台（浅色 Nordic Mist）</strong> · 三栏拓扑总控、Token 趋势与右栏实时/累计吞吐切换</sub>
+      <sub><strong>主控制台（浅色统一风格）</strong> · 官方 AI 品牌矢量标、前置中转选择、浅色统一右侧观测栏与坐标星图</sub>
     </td>
     <td width="50%" align="center">
       <img src="docs/screenshots/usage-stats.png" alt="双源用量统计大盘" />
@@ -139,20 +149,22 @@ flowchart LR
     subgraph CORE["Agent Proxy Hub Core (.NET 10)"]
         IN["多端口混合入站引擎<br/>SOCKS5 / SOCKS4 / HTTP(S)"]
         SNI["TLS SNI 还原<br/>剥离 198.18.x.x Fake-IP"]
-        KS["Fail-Close 熔断锁<br/>+ IPv6 独立开关 + 1s 速率采样"]
-        NIC["物理网卡 Socket 直绑<br/>IP_UNICAST_IF / IP_BOUND_IF"]
+        KS["Fail-Close 熔断锁 + 双跳链式路由<br/>L1 原生 (Trojan/SS/SOCKS/HTTP) · L2 按需 sing-box"]
+        NIC["物理网卡 Socket 直绑<br/>IP_UNICAST_IF / IP_BOUND_IF / bind_interface"]
     end
 
     subgraph NET["物理硬件出口（自动绕过虚拟隧道）"]
-        N1["🇺🇸 US 静态住宅专线"]
-        N2["🇯🇵 JP 独立原生专线"]
-        N3["🇸🇬 SG 独立代理线路"]
+        R1["⚡ 可选前置高速中转<br/>港 / 日 CN2 / Trojan / Reality / Hy2"]
+        N1["🇺🇸 US 静态住宅落地"]
+        N2["🇯🇵 JP 独立原生落地"]
+        N3["🇸🇬 SG 独立代理落地"]
     end
 
     TUN["🚫 Clash / Mihomo / Wintun / utun<br/>已自动识别并彻底绕过"] -. 零字节经过 .-x NIC
 
     A1 & A2 & A3 & A4 --> IN --> SNI --> KS --> NIC
-    NIC --> N1 & N2 & N3
+    NIC --> R1 --> N1
+    NIC --> N2 & N3
 
     style TUN fill:#fff1f0,stroke:#f27973,stroke-dasharray: 5 5,color:#b42318
     style NIC fill:#eef2ff,stroke:#4a56e2,color:#1e293b
@@ -182,28 +194,34 @@ flowchart LR
 ### 方式一：直接下载安装程序（推荐）
 
 前往 [**GitHub Releases**](https://github.com/HeyoCode/Agent_Proxy_Hub/releases) 下载对应平台最新安装包：
-- **Windows x64**：`AgentProxyHub-Setup-v0.3.4-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
-- **macOS**：`AgentProxyHub-v0.3.4-osx-arm64.dmg` / `osx-x64.dmg`
+- **Windows x64**：`AgentProxyHub-Setup-v0.4.0-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
+- **macOS**：`AgentProxyHub-v0.4.0-macos-arm64.dmg`
 
 ### 方式二：3 步完成首次配置
 
-1. **导入独立专线**：点击左侧「独立线路池」→「批量导入」，粘贴你的静态 SOCKS5 / HTTP(S) 代理线路并点击「全部验真」。
-2. **绑定席位并接管**：在控制台为每个 AI 应用选择独立出口线路，点击右侧 **「一键接管」**（或点击 **「全链路验真」** 实流测试通道并刷新吞吐）。
+1. **导入独立专线**：点击左侧「独立线路池」→「批量导入」，粘贴你的静态 `SOCKS5 / HTTP(S) / Trojan / Shadowsocks / VLESS / Hysteria2 / TUIC / WireGuard` 节点链接并点击「全部验真」。
+2. **绑定席位（可选前置中转）并接管**：在控制台为每个 AI 应用选择落地出口线路（需要加速时再选一个「前置中转」），点击右侧 **「一键接管」**（或点击 **「全链路验真」** 实流测试通道并刷新吞吐）。
 3. **日常托盘操控**：关闭主窗口后自动常驻系统托盘；左键或右键单击托盘图标即可呼出圆角快捷面板，双击托盘图标直达主控制台。
 
 <details>
-<summary>📋 <strong>批量导入支持的代理格式示例（自动去重与 IPv6 支持）</strong></summary>
+<summary>📋 <strong>批量导入支持的全协议格式示例（自动识别 L1/L2、去重与 IPv6）</strong></summary>
 
 ```text
-# 标准 URI 格式（SOCKS5 / SOCKS4 / HTTP / HTTPS）
+# L1 原生内核直出协议（零外部依赖）
 socks5://user1:pass1@38.154.227.14:1080#US-静态住宅-01
 http://user2:pass2@104.221.88.19:8080#US-独享HTTP-02
 https://user3:pass3@proxy.example.com:443#JP-TLS专线
+trojan://your-password@hk.example.com:443?sni=hk.example.com#HK-CN2-Trojan中转
+ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@jp.example.com:8388#JP-SS2022中转
 
-# 四段冒号简写格式（默认按所选协议解析）
+# L2 现代协议（按需自动拉起 sing-box Sidecar，物理网卡直绑）
+vless://uuid@example.com:443?security=reality&sni=www.apple.com&pbk=xxx&sid=01#JP-Reality
+hysteria2://auth@hy2.example.com:443/?sni=hy2.example.com#US-Hy2高速
+tuic://uuid:pass@tuic.example.com:443?congestion_control=bbr#SG-TUIC
+wireguard://privkey@wg.example.com:51820?publickey=pubkey&address=10.0.0.2/32#Home-WG
+
+# 四段冒号简写格式 & 方括号 IPv6 地址格式
 133.167.44.91:10808:agy:jp999#JP-NTT-03
-
-# 方括号 IPv6 地址格式
 socks5://u6:p6@[2001:db8::1]:1080#IPv6-双栈节点
 ```
 
@@ -236,7 +254,7 @@ Agent_Proxy_Hub/
 pnpm --dir web install
 pnpm --dir web build
 
-# 2. 运行全套 xUnit 单元测试（10 项全绿）
+# 2. 运行全套 xUnit 单元测试（13 项全绿）
 dotnet test AgentProxyHub.sln -c Release
 
 # 3. 启动 Windows 无边框托盘客户端
@@ -251,16 +269,16 @@ dotnet run --project src/AgentProxyHub.Host/AgentProxyHub.Host.csproj -c Release
 
 ```powershell
 # Windows 轻量安装程序（需安装 Inno Setup 6）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.3.4
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.0
 
 # Windows 离线独立版（内置完整 .NET 10 运行时）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.3.4 -SelfContained
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.0 -SelfContained
 ```
 
 ```bash
 # macOS Apple Silicon / Intel DMG 镜像
 chmod +x installer/macos/build-dmg.sh
-./installer/macos/build-dmg.sh osx-arm64 0.3.4
+./installer/macos/build-dmg.sh osx-arm64 0.4.0
 ```
 
 </details>
@@ -273,10 +291,12 @@ chmod +x installer/macos/build-dmg.sh
 | `GET` | `/api/overview` | 获取物理网卡、绕过隧道、席位配置、节点池、实时吞吐/速率与接管状态 |
 | `POST` | `/api/nodes/batch-import` | 批量解析并去重导入多协议代理节点 |
 | `POST` | `/api/nodes/{id}/verify` | 物理网卡直连并发验真单个节点（单次最快 RTT + 出口 IP） |
-| `PUT` | `/api/seats/{id}` | 更新席位启停、绑定线路、本地端口与防串熔断锁 |
+| `PUT` | `/api/seats/{id}` | 更新席位启停、绑定线路、前置中转 (`relayNodeId`)、本地端口与防串熔断锁 |
 | `POST` | `/api/seats/{id}/takeover` | 对目标 AI 应用执行一键无损代理接管或还原默认配置 |
 | `POST` | `/api/seats/{id}/launch` | 注入席位独立代理环境变量受控启动目标应用或终端 |
 | `POST` | `/api/seats/{id}/verify-tunnel` | 经由 `127.0.0.1:{localPort}` 发起全链路实流验真并刷新吞吐 |
+| `GET` | `/api/engine/singbox` | 查询 L2 `sing-box` Sidecar 安装状态、版本、运行 PID 与托管节点数 |
+| `POST` | `/api/engine/singbox/install` | 一键从官方 Release 下载安装 `sing-box` 至本地隔离目录 |
 | `PUT` | `/api/isolation` | 切换锁定物理网卡、SNI 还原、全局熔断锁与 IPv6 双栈开关 |
 | `GET` | `/api/stats/dashboard` | 查询双源 AI 用量统计（支持 `today / 24h / 7d / 30d / all` 与分页筛选） |
 | `POST` | `/api/stats/sync` | 立即触发一次增量会话日志同步（后台默认每 5 秒自动执行） |

@@ -1,4 +1,15 @@
-export type ProxyProtocol = 'SOCKS5' | 'SOCKS4' | 'HTTP' | 'HTTPS' | 'DIRECT_PHYSICAL';
+export type ProxyProtocol =
+  | 'SOCKS5'
+  | 'SOCKS4'
+  | 'HTTP'
+  | 'HTTPS'
+  | 'DIRECT_PHYSICAL'
+  | 'TROJAN'
+  | 'SHADOWSOCKS'
+  | 'VLESS'
+  | 'HYSTERIA2'
+  | 'TUIC'
+  | 'WIREGUARD';
 
 export interface ProxyNode {
   id: string;
@@ -9,6 +20,11 @@ export interface ProxyNode {
   port: number;
   username?: string | null;
   password?: string | null;
+  method?: string | null;
+  sni?: string | null;
+  allowInsecure?: boolean;
+  requiresSidecarEngine?: boolean;
+  engineKind?: 'native' | 'sing-box';
   enabled: boolean;
   status: 'online' | 'offline' | 'unverified';
   latencyMs?: number | null;
@@ -26,6 +42,7 @@ export interface AppSeat {
   processMac: string;
   localPort: number;
   boundNodeId?: string | null;
+  relayNodeId?: string | null;
   enabled: boolean;
   killSwitchEnabled: boolean;
   allowSameGroupFailover: boolean;
@@ -59,6 +76,17 @@ export interface IsolationSettings {
   dohServerIp: string;
   globalKillSwitch: boolean;
   enableIpv6: boolean;
+  customSingBoxPath?: string | null;
+}
+
+export interface SidecarEngineStatus {
+  installed: boolean;
+  running: boolean;
+  binaryPath?: string | null;
+  version?: string | null;
+  activeL2NodeCount: number;
+  boundInterface?: string | null;
+  lastError?: string | null;
 }
 
 export interface SeatTrafficSnapshot {
@@ -127,6 +155,7 @@ export interface OverviewResponse {
   nodes: ProxyNode[];
   trafficSnapshots: SeatTrafficSnapshot[];
   seatTakeovers?: SeatTakeoverStatus[];
+  sidecarEngine?: SidecarEngineStatus;
   cliSnippets: Record<string, string>;
 }
 
@@ -263,6 +292,9 @@ export const api = {
     port: number;
     username?: string;
     password?: string;
+    method?: string;
+    sni?: string;
+    allowInsecure?: boolean;
   }) => requestJson<ProxyNode>('/api/nodes/manual', { method: 'POST', body: JSON.stringify(body) }),
   previewBatch: (rawText: string, defaultProtocol: ProxyProtocol, defaultGroup: string) =>
     requestJson<BatchParseResult>('/api/nodes/batch-preview', {
@@ -277,7 +309,7 @@ export const api = {
   deleteNode: (id: string) => requestJson<{ removed: number }>(`/api/nodes/${id}`, { method: 'DELETE' }),
   verifyNode: (id: string) => requestJson<ProxyNode>(`/api/nodes/${id}/verify`, { method: 'POST' }),
   verifyAllNodes: () => requestJson<ProxyNode[]>('/api/nodes/verify-all', { method: 'POST' }),
-  updateSeat: (id: string, body: { enabled?: boolean; boundNodeId?: string; killSwitchEnabled?: boolean }) =>
+  updateSeat: (id: string, body: { enabled?: boolean; boundNodeId?: string; relayNodeId?: string; killSwitchEnabled?: boolean }) =>
     requestJson<AppSeat>(`/api/seats/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   toggleAllSeats: (enabled: boolean) =>
     requestJson<AppSeat[]>('/api/seats/toggle-all', { method: 'POST', body: JSON.stringify({ enabled }) }),
@@ -294,13 +326,38 @@ export const api = {
   verifySeatTunnel: (id: string) =>
     requestJson<TunnelVerificationResult>(`/api/seats/${id}/verify-tunnel`, { method: 'POST' }),
   getIsolation: () =>
-    requestJson<{ settings: IsolationSettings; adapters: NetworkAdapterInfo[]; lockedAdapter?: NetworkAdapterInfo | null }>('/api/isolation'),
+    requestJson<{
+      settings: IsolationSettings;
+      adapters: NetworkAdapterInfo[];
+      lockedAdapter?: NetworkAdapterInfo | null;
+      sidecarEngine?: SidecarEngineStatus;
+    }>('/api/isolation'),
   rescanNics: () =>
     requestJson<{ adapters: NetworkAdapterInfo[]; lockedAdapter?: NetworkAdapterInfo | null }>('/api/isolation/rescan', { method: 'POST' }),
   updateIsolation: (body: Partial<IsolationSettings>) =>
-    requestJson<{ settings: IsolationSettings; adapters: NetworkAdapterInfo[]; lockedAdapter?: NetworkAdapterInfo | null }>('/api/isolation', {
+    requestJson<{
+      settings: IsolationSettings;
+      adapters: NetworkAdapterInfo[];
+      lockedAdapter?: NetworkAdapterInfo | null;
+      sidecarEngine?: SidecarEngineStatus;
+    }>('/api/isolation', {
       method: 'PUT',
       body: JSON.stringify(body)
+    }),
+  getSingBoxStatus: () => requestJson<SidecarEngineStatus>('/api/engine/singbox'),
+  installSingBox: (proxyUrl?: string) =>
+    requestJson<{ ok: boolean; message: string; status: SidecarEngineStatus }>('/api/engine/singbox/install', {
+      method: 'POST',
+      body: JSON.stringify({ proxyUrl: proxyUrl || null })
+    }),
+  setSingBoxPath: (binaryPath: string) =>
+    requestJson<{ ok: boolean; message: string; status: SidecarEngineStatus }>('/api/engine/singbox/path', {
+      method: 'PUT',
+      body: JSON.stringify({ binaryPath })
+    }),
+  stopSingBox: () =>
+    requestJson<{ ok: boolean; message: string; status: SidecarEngineStatus }>('/api/engine/singbox/stop', {
+      method: 'POST'
     }),
   getStatsDashboard: (params: { range: string; appFilter: string; modelFilter: string; page: number; pageSize: number }) => {
     const qs = new URLSearchParams({

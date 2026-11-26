@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { IsolationSettings, NetworkAdapterInfo, api } from '../api';
+import { IsolationSettings, NetworkAdapterInfo, SidecarEngineStatus, api } from '../api';
+import { RefreshSpinIcon } from '../components/Icons';
 
 interface Props {
   onReloadOverview: () => Promise<void>;
@@ -9,11 +10,50 @@ interface Props {
 export const IsolationView: React.FC<Props> = ({ onReloadOverview, onToast }) => {
   const [settings, setSettings] = useState<IsolationSettings | null>(null);
   const [adapters, setAdapters] = useState<NetworkAdapterInfo[]>([]);
+  const [sidecar, setSidecar] = useState<SidecarEngineStatus | null>(null);
+  const [installingSb, setInstallingSb] = useState(false);
+  const [downloadProxy, setDownloadProxy] = useState('');
+  const [customPathInput, setCustomPathInput] = useState('');
 
   async function load() {
     const res = await api.getIsolation();
     setSettings(res.settings);
     setAdapters(res.adapters);
+    if (res.sidecarEngine) setSidecar(res.sidecarEngine);
+    setCustomPathInput(res.settings.customSingBoxPath ?? '');
+  }
+
+  async function handleInstallSingBox() {
+    setInstallingSb(true);
+    try {
+      onToast('正在从 GitHub SagerNet/sing-box 获取并安装最新扩展内核...');
+      const res = await api.installSingBox(downloadProxy.trim() || undefined);
+      setSidecar(res.status);
+      await onReloadOverview();
+      onToast(res.message);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '安装 sing-box 失败');
+    } finally {
+      setInstallingSb(false);
+    }
+  }
+
+  async function handleSaveSingBoxPath() {
+    try {
+      const res = await api.setSingBoxPath(customPathInput.trim());
+      setSidecar(res.status);
+      await onReloadOverview();
+      onToast(res.message);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '路径校验失败');
+    }
+  }
+
+  async function handleStopSingBox() {
+    const res = await api.stopSingBox();
+    setSidecar(res.status);
+    await onReloadOverview();
+    onToast(res.message);
   }
 
   useEffect(() => {
@@ -199,6 +239,79 @@ export const IsolationView: React.FC<Props> = ({ onReloadOverview, onToast }) =>
             <span className="nordic-slider" />
           </label>
         </div>
+      </div>
+
+      {/* L2 sing-box 现代高抗干扰协议扩展引擎卡片（跨两列展示） */}
+      <div className="surface-card surface-card-pad" style={{ gridColumn: 'span 2' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="card-title-sm">L2 现代协议扩展引擎 (sing-box Sidecar)</span>
+              <span className={`pill-tag ${sidecar?.installed ? 'tag-emerald' : 'tag-amber'}`}>
+                {sidecar?.installed ? `已安装 ${sidecar.version ?? ''}`.trim() : '未安装（按需下载）'}
+              </span>
+              <span className={`pill-tag ${sidecar?.running ? 'tag-indigo' : 'tag-neutral'}`}>
+                {sidecar?.running ? `运行中 · ${sidecar.activeL2NodeCount} 节点 · 绑定 ${sidecar.boundInterface ?? '自动'}` : '懒加载待机（0 进程）'}
+              </span>
+            </div>
+            <div className="card-subtitle-sm" style={{ marginTop: 4 }}>
+              用于承载 <span className="mono">VLESS Reality / Hysteria2 / TUIC / WireGuard</span>；仅当活跃席位或前置中转使用这些协议时自动按需拉起，并强制注入物理网卡 <span className="mono">bind_interface</span>。
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              type="button"
+              className="btn-pill btn-indigo btn-sm"
+              disabled={installingSb}
+              onClick={handleInstallSingBox}
+            >
+              <RefreshSpinIcon size={12} spinning={installingSb} />
+              <span>{installingSb ? '下载安装中...' : (sidecar?.installed ? '更新内核' : '一键安装 sing-box')}</span>
+            </button>
+            {sidecar?.running && (
+              <button type="button" className="btn-pill btn-soft btn-sm" onClick={handleStopSingBox}>
+                停止子进程
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.35fr', gap: 12, marginTop: 14 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>
+              在线下载加速代理（可选，例如 http://127.0.0.1:7897）
+            </div>
+            <input
+              className="clean-input mono"
+              placeholder="留空则直连 GitHub Releases 下载"
+              value={downloadProxy}
+              onChange={e => setDownloadProxy(e.target.value)}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>
+              自定义本地 sing-box 路径（离线手动导入，留空使用托管目录）
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                className="clean-input mono"
+                placeholder={sidecar?.binaryPath ?? '例如 C:\\Tools\\sing-box.exe'}
+                value={customPathInput}
+                onChange={e => setCustomPathInput(e.target.value)}
+              />
+              <button type="button" className="btn-pill btn-soft btn-sm" onClick={handleSaveSingBoxPath}>
+                保存路径
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {sidecar?.lastError && (
+          <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--accent-coral-text)' }}>
+            最近状态提示：{sidecar.lastError}
+          </div>
+        )}
       </div>
     </div>
   );

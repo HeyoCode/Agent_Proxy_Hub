@@ -12,7 +12,13 @@ public enum ProxyProtocol
     SOCKS4,
     HTTP,
     HTTPS,
-    DIRECT_PHYSICAL
+    DIRECT_PHYSICAL,
+    TROJAN,
+    SHADOWSOCKS,
+    VLESS,
+    HYSTERIA2,
+    TUIC,
+    WIREGUARD
 }
 
 /// <summary>
@@ -28,6 +34,10 @@ public sealed class ProxyNode
     public int Port { get; set; }
     public string? Username { get; set; }
     public string? Password { get; set; }
+    public string? Method { get; set; }
+    public string? Sni { get; set; }
+    public bool AllowInsecure { get; set; }
+    public Dictionary<string, string>? Extra { get; set; }
     public bool Enabled { get; set; } = true;
 
     // 验真与运行状态
@@ -39,10 +49,21 @@ public sealed class ProxyNode
     public DateTimeOffset? LastCheckedAt { get; set; }
 
     /// <summary>
-    /// 用于去重的唯一指纹（协议 + 主机 + 端口 + 用户名）
+    /// 是否需要 L2 sing-box 懒加载扩展引擎承载
+    /// </summary>
+    public bool RequiresSidecarEngine => Protocol is
+        ProxyProtocol.VLESS or
+        ProxyProtocol.HYSTERIA2 or
+        ProxyProtocol.TUIC or
+        ProxyProtocol.WIREGUARD;
+
+    public string EngineKind => RequiresSidecarEngine ? "sing-box" : "native";
+
+    /// <summary>
+    /// 用于去重的唯一指纹（协议 + 主机 + 端口 + 用户名/方法）
     /// </summary>
     public string Fingerprint =>
-        $"{Protocol}|{Host.Trim().ToLowerInvariant()}|{Port}|{Username?.Trim() ?? string.Empty}";
+        $"{Protocol}|{Host.Trim().ToLowerInvariant()}|{Port}|{Username?.Trim() ?? string.Empty}|{Method?.Trim().ToLowerInvariant() ?? string.Empty}";
 }
 
 /// <summary>
@@ -58,6 +79,7 @@ public sealed class AppSeat
     public string ProcessMac { get; set; } = string.Empty;
     public int LocalPort { get; set; }
     public string? BoundNodeId { get; set; }
+    public string? RelayNodeId { get; set; }
     public bool Enabled { get; set; } = true;
     public bool KillSwitchEnabled { get; set; } = true;
     public bool AllowSameGroupFailover { get; set; } = true;
@@ -99,6 +121,7 @@ public sealed class IsolationSettings
     public string DohServerIp { get; set; } = "223.5.5.5";
     public bool GlobalKillSwitch { get; set; } = true;
     public bool EnableIpv6 { get; set; } = false;
+    public string? CustomSingBoxPath { get; set; }
 }
 
 /// <summary>
@@ -171,12 +194,26 @@ public sealed class TunnelVerificationResult
 }
 
 /// <summary>
+/// L2 sing-box 懒加载扩展引擎运行状态
+/// </summary>
+public sealed class SidecarEngineStatus
+{
+    public bool Installed { get; set; }
+    public bool Running { get; set; }
+    public string? BinaryPath { get; set; }
+    public string? Version { get; set; }
+    public int ActiveL2NodeCount { get; set; }
+    public string? BoundInterface { get; set; }
+    public string? LastError { get; set; }
+}
+
+/// <summary>
 /// 项目仓库与版本单一元数据中心
 /// </summary>
 public static class ProjectMetadata
 {
     public const string Name = "Agent Proxy Hub";
-    public const string Version = "0.3.4";
+    public const string Version = "0.4.0";
     public const string RepoOwner = "HeyoCode";
     public const string RepoName = "Agent_Proxy_Hub";
     public const string RepoSlug = "HeyoCode/Agent_Proxy_Hub";

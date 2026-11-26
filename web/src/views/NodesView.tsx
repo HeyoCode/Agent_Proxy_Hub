@@ -16,16 +16,24 @@ interface Props {
 }
 
 const PROTOCOL_OPTIONS = [
-  { value: 'SOCKS5', label: 'SOCKS5 / SOCKS5h', sublabel: '远端域名解析 · 推荐静态住宅' },
-  { value: 'HTTP', label: 'HTTP CONNECT', sublabel: '标准 HTTPS 隧道握手' },
-  { value: 'HTTPS', label: 'HTTPS (TLS)', sublabel: '上游代理 TLS 加密连接' },
-  { value: 'SOCKS4', label: 'SOCKS4a', sublabel: '轻量兼容型 SOCKS 协议' }
+  { value: 'SOCKS5', label: 'SOCKS5 / SOCKS5h', sublabel: 'L1 原生 · 远端解析 · 静态住宅推荐' },
+  { value: 'HTTPS', label: 'HTTPS (TLS)', sublabel: 'L1 原生 · TLS 加密 · 支持自定义 SNI' },
+  { value: 'TROJAN', label: 'Trojan (TLS 1.3)', sublabel: 'L1 原生 · 强抗干扰加密隧道' },
+  { value: 'SHADOWSOCKS', label: 'Shadowsocks AEAD', sublabel: 'L1 原生 · AES-GCM / ChaCha20' },
+  { value: 'HTTP', label: 'HTTP CONNECT', sublabel: 'L1 原生 · 标准 HTTPS 隧道握手' },
+  { value: 'SOCKS4', label: 'SOCKS4a', sublabel: 'L1 原生 · 轻量兼容协议' }
+];
+
+const SS_METHOD_OPTIONS = [
+  { value: 'aes-256-gcm', label: 'aes-256-gcm' },
+  { value: 'chacha20-ietf-poly1305', label: 'chacha20-ietf-poly1305' },
+  { value: 'aes-128-gcm', label: 'aes-128-gcm' }
 ];
 
 export const NodesView: React.FC<Props> = ({
   nodes, showManual, showBatch, onCloseModals, onOpenManual, onOpenBatch, onReload, onToast
 }) => {
-  const [filter, setFilter] = useState<'all' | 'SOCKS' | 'HTTP'>('all');
+  const [filter, setFilter] = useState<'all' | 'NATIVE' | 'SIDECAR'>('all');
   const [testingAll, setTestingAll] = useState(false);
 
   const [mProto, setMProto] = useState<ProxyProtocol>('SOCKS5');
@@ -35,9 +43,11 @@ export const NodesView: React.FC<Props> = ({
   const [mPort, setMPort] = useState('1080');
   const [mUser, setMUser] = useState('');
   const [mPass, setMPass] = useState('');
+  const [mMethod, setMMethod] = useState('aes-256-gcm');
+  const [mSni, setMSni] = useState('');
 
   const [batchText, setBatchText] = useState(
-    'socks5://user:pass@127.0.0.1:1080#示例SOCKS5线路\nhttp://user:pass@127.0.0.1:8080#示例HTTP线路'
+    'socks5://user:pass@38.154.227.14:1080#US-静态住宅\ntrojan://your-pass@jp.example.com:443?sni=jp.example.com#JP-Trojan原生\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@us.example.com:8388#US-SS原生\nvless://uuid@edge.example.com:443?security=reality&sni=www.microsoft.com&pbk=pubkey&sid=01&fp=chrome#Reality-singbox\nhy2://your-pass@hk.example.com:443?sni=hk.example.com#Hy2-singbox'
   );
   const [batchProto, setBatchProto] = useState<ProxyProtocol>('SOCKS5');
   const [batchGroup, setBatchGroup] = useState('批量导入池');
@@ -52,8 +62,9 @@ export const NodesView: React.FC<Props> = ({
   }, [showBatch, batchText, batchProto, batchGroup]);
 
   const filtered = nodes.filter(n => {
-    if (filter === 'SOCKS') return n.protocol === 'SOCKS5' || n.protocol === 'SOCKS4';
-    if (filter === 'HTTP') return n.protocol === 'HTTP' || n.protocol === 'HTTPS';
+    const isL2 = n.requiresSidecarEngine || ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(n.protocol);
+    if (filter === 'NATIVE') return !isL2;
+    if (filter === 'SIDECAR') return isL2;
     return true;
   });
 
@@ -66,10 +77,13 @@ export const NodesView: React.FC<Props> = ({
       host: mHost,
       port: Number(mPort) || 1080,
       username: mUser || undefined,
-      password: mPass || undefined
+      password: mPass || undefined,
+      method: mProto === 'SHADOWSOCKS' ? mMethod : undefined,
+      sni: (mProto === 'TROJAN' || mProto === 'HTTPS') && mSni.trim() ? mSni.trim() : undefined
     });
     setMHost('');
     setMName('');
+    setMSni('');
     onCloseModals();
     await onReload();
     onToast('已添加独立线路到线路池');
@@ -110,13 +124,21 @@ export const NodesView: React.FC<Props> = ({
     <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       <div className="surface-card">
         <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-          <SegmentedTabs<'all' | 'SOCKS' | 'HTTP'>
+          <SegmentedTabs<'all' | 'NATIVE' | 'SIDECAR'>
             value={filter}
             onChange={setFilter}
             items={[
-              { value: 'all', label: '全部', count: nodes.length },
-              { value: 'SOCKS', label: 'SOCKS5 / 4', count: nodes.filter(n => n.protocol === 'SOCKS5' || n.protocol === 'SOCKS4').length },
-              { value: 'HTTP', label: 'HTTP / HTTPS', count: nodes.filter(n => n.protocol === 'HTTP' || n.protocol === 'HTTPS').length }
+              { value: 'all', label: '全部线路', count: nodes.length },
+              {
+                value: 'NATIVE',
+                label: 'L1 原生引擎',
+                count: nodes.filter(n => !(n.requiresSidecarEngine || ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(n.protocol))).length
+              },
+              {
+                value: 'SIDECAR',
+                label: 'L2 sing-box',
+                count: nodes.filter(n => n.requiresSidecarEngine || ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(n.protocol)).length
+              }
             ]}
           />
 
@@ -157,11 +179,18 @@ export const NodesView: React.FC<Props> = ({
                   <div style={{ fontWeight: 600 }}>{n.name}</div>
                   <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{n.group}</div>
                 </td>
-                <td className="nowrap"><span className="pill-tag tag-indigo mono">{n.protocol}</span></td>
+                <td className="nowrap">
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                    <span className={`pill-tag ${n.requiresSidecarEngine ? 'tag-amber' : 'tag-indigo'} mono`}>{n.protocol}</span>
+                    {n.requiresSidecarEngine && (
+                      <span className="pill-tag tag-neutral" style={{ fontSize: 10, padding: '1px 6px' }}>sing-box</span>
+                    )}
+                  </div>
+                </td>
                 <td className="nowrap">
                   <div className="mono" style={{ fontSize: 12 }}>{n.host}:{n.port}</div>
                   <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {n.username ? `认证：${n.username}` : '无认证'}
+                    {n.method ? `算法：${n.method}` : (n.sni ? `SNI：${n.sni}` : (n.username ? `认证：${n.username}` : '无认证'))}
                   </div>
                 </td>
                 <td>
@@ -235,12 +264,30 @@ export const NodesView: React.FC<Props> = ({
                 <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>端口 *</div>
                 <input className="clean-input num" required value={mPort} onChange={e => setMPort(e.target.value)} />
               </div>
+              {mProto === 'SHADOWSOCKS' ? (
+                <div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>AEAD 加密算法</div>
+                  <CustomSelect
+                    variant="light"
+                    value={mMethod}
+                    options={SS_METHOD_OPTIONS}
+                    onChange={setMMethod}
+                    ariaLabel="选择 Shadowsocks 加密算法"
+                  />
+                </div>
+              ) : (mProto === 'TROJAN' || mProto === 'HTTPS') ? (
+                <div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>TLS SNI（可选）</div>
+                  <input className="clean-input mono" placeholder="默认使用服务器域名" value={mSni} onChange={e => setMSni(e.target.value)} />
+                </div>
+              ) : (
+                <div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>用户名（可选）</div>
+                  <input className="clean-input mono" value={mUser} onChange={e => setMUser(e.target.value)} />
+                </div>
+              )}
               <div>
-                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>用户名（可选）</div>
-                <input className="clean-input mono" value={mUser} onChange={e => setMUser(e.target.value)} />
-              </div>
-              <div>
-                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>密码（可选）</div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>密码 / 密钥</div>
                 <input className="clean-input mono" type="password" value={mPass} onChange={e => setMPass(e.target.value)} />
               </div>
               <div style={{ gridColumn: 'span 2' }}>
@@ -264,7 +311,7 @@ export const NodesView: React.FC<Props> = ({
               <div>
                 <div style={{ fontSize: 15, fontWeight: 700 }}>批量导入独立代理线路</div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                  支持 <span className="mono">socks5://user:pass@ip:port#名称</span>、<span className="mono">http(s)://...</span>、<span className="mono">ip:port:user:pass</span>、CSV 与 Base64 订阅
+                  支持 <span className="mono">socks5 / http(s) / trojan / ss / vless / hy2 / tuic / wg</span> 链接、四段冒号与 Base64 订阅
                 </div>
               </div>
               <button type="button" className="btn-pill btn-soft btn-sm" onClick={onCloseModals}>关闭</button>

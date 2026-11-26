@@ -23,7 +23,10 @@ public static class HubHostFactory
         string Host,
         int Port,
         string? Username,
-        string? Password);
+        string? Password,
+        string? Method = null,
+        string? Sni = null,
+        bool AllowInsecure = false);
 
     public sealed record BatchPreviewRequest(
         string RawText,
@@ -33,6 +36,7 @@ public static class HubHostFactory
     public sealed record SeatUpdateRequest(
         bool? Enabled,
         string? BoundNodeId,
+        string? RelayNodeId,
         int? LocalPort,
         bool? KillSwitchEnabled,
         bool? AllowSameGroupFailover);
@@ -40,6 +44,10 @@ public static class HubHostFactory
     public sealed record ToggleAllSeatsRequest(bool Enabled);
 
     public sealed record SeatTakeoverRequest(bool Enabled);
+
+    public sealed record SingBoxInstallRequest(string? ProxyUrl);
+
+    public sealed record SingBoxPathRequest(string? BinaryPath);
 
     public sealed record IsolationUpdateRequest(
         string? LockedPhysicalNicId,
@@ -73,7 +81,9 @@ public static class HubHostFactory
 
         var nicManager = new PhysicalNicManager(doc.Isolation.LockedPhysicalNicId);
         var dnsResolver = new CleanDnsResolver(nicManager);
-        var connector = new UpstreamConnector(nicManager, dnsResolver);
+        var sidecar = new SingBoxSidecarManager();
+        sidecar.SetCustomBinaryPath(doc.Isolation.CustomSingBoxPath);
+        var connector = new UpstreamConnector(nicManager, dnsResolver, sidecar);
         var proxyServer = new MixedProxyServer(connector);
         var healthChecker = new NodeHealthChecker(connector);
         var pricingCatalog = new ModelPricingCatalog();
@@ -99,6 +109,7 @@ public static class HubHostFactory
         builder.Services.AddSingleton(store);
         builder.Services.AddSingleton(doc);
         builder.Services.AddSingleton(nicManager);
+        builder.Services.AddSingleton(sidecar);
         builder.Services.AddSingleton(proxyServer);
         builder.Services.AddSingleton(healthChecker);
         builder.Services.AddSingleton(pricingCatalog);
@@ -110,6 +121,10 @@ public static class HubHostFactory
 
         // 后台每 5 秒自动增量同步一次本地 AI 会话日志，新产生对话 5 秒内自动呈现在大盘中
         var stoppingToken = app.Lifetime.ApplicationStopping;
+        stoppingToken.Register(() =>
+        {
+            try { sidecar.Dispose(); } catch { }
+        });
         _ = Task.Run(async () =>
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
@@ -195,6 +210,7 @@ public static class HubHostFactory
                     nodes = doc.Nodes,
                     trafficSnapshots = traffic,
                     seatTakeovers,
+                    sidecarEngine = sidecar.GetStatus(),
                     cliSnippets
                 });
             }
@@ -223,6 +239,9 @@ public static class HubHostFactory
                 Port = req.Port,
                 Username = string.IsNullOrWhiteSpace(req.Username) ? null : req.Username.Trim(),
                 Password = string.IsNullOrWhiteSpace(req.Password) ? null : req.Password.Trim(),
+                Method = string.IsNullOrWhiteSpace(req.Method) ? null : req.Method.Trim().ToLowerInvariant(),
+                Sni = string.IsNullOrWhiteSpace(req.Sni) ? null : req.Sni.Trim(),
+                AllowInsecure = req.AllowInsecure,
                 Status = "unverified",
                 ExitIp = "—",
                 IspSummary = "手动添加 · 待物理直连验真"
@@ -345,6 +364,7 @@ public static class HubHostFactory
                 bool portChanged = req.LocalPort is >= 1024 and <= 65535 && req.LocalPort.Value != seat.LocalPort;
                 if (req.Enabled.HasValue) seat.Enabled = req.Enabled.Value;
                 if (req.BoundNodeId != null) seat.BoundNodeId = req.BoundNodeId;
+                if (req.RelayNodeId != null) seat.RelayNodeId = string.IsNullOrWhiteSpace(req.RelayNodeId) ? null : req.RelayNodeId;
                 if (req.LocalPort is >= 1024 and <= 65535) seat.LocalPort = req.LocalPort.Value;
                 if (req.KillSwitchEnabled.HasValue) seat.KillSwitchEnabled = req.KillSwitchEnabled.Value;
                 if (req.AllowSameGroupFailover.HasValue) seat.AllowSameGroupFailover = req.AllowSameGroupFailover.Value;
@@ -504,7 +524,8 @@ public static class HubHostFactory
                 {
                     settings = doc.Isolation,
                     adapters = nicManager.GetAdapters(),
-                    lockedAdapter = nicManager.GetLockedAdapter()
+                    lockedAdapter = nicManager.GetLockedAdapter(),
+                    sidecarEngine = sidecar.GetStatus()
                 });
             }
         });
@@ -543,9 +564,46 @@ public static class HubHostFactory
                 {
                     settings = doc.Isolation,
                     adapters = nicManager.GetAdapters(),
-                    lockedAdapter = nicManager.GetLockedAdapter()
+                    lockedAdapter = nicManager.GetLockedAdapter(),
+                    sidecarEngine = sidecar.GetStatus()
                 });
             }
+        });
+
+        // 4.5 L2 sing-box 懒加载扩展引擎管理 API
+        app.MapGet("/api/engine/singbox", () => Results.Ok(sidecar.GetStatus()));
+
+        app.MapPost("/api/engine/singbox/install", async (SingBoxInstallRequest? req, CancellationToken ct) =>
+        {
+            var (ok, message, status) = await sidecar.InstallLatestAsync(req?.ProxyUrl, ct);
+            if (ok && !isVerifyOnly)
+            {
+                lock (stateLock) proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+            }
+            return Results.Ok(new { ok, message, status = sidecar.GetStatus() });
+        });
+
+        app.MapPut("/api/engine/singbox/path", (SingBoxPathRequest req) =>
+        {
+            lock (stateLock)
+            {
+                string? clean = string.IsNullOrWhiteSpace(req.BinaryPath) ? null : req.BinaryPath.Trim().Trim('"');
+                if (clean != null && !File.Exists(clean))
+                    return Results.BadRequest(new { message = $"文件不存在：{clean}" });
+
+                doc.Isolation.CustomSingBoxPath = clean;
+                sidecar.SetCustomBinaryPath(clean);
+                store.Save(doc);
+                if (!isVerifyOnly)
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                return Results.Ok(new { ok = true, message = clean != null ? "已绑定自定义 sing-box 路径" : "已恢复默认路径探测", status = sidecar.GetStatus() });
+            }
+        });
+
+        app.MapPost("/api/engine/singbox/stop", () =>
+        {
+            sidecar.Stop();
+            return Results.Ok(new { ok = true, message = "已停止 sing-box 扩展引擎子进程", status = sidecar.GetStatus() });
         });
 
         // 5. CC Switch 级双源统计大盘、按需同步与模型定价 API

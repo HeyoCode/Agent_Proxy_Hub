@@ -67,11 +67,47 @@ export const RightInspector: React.FC<Props> = ({
     return nodes.map(n => ({
       value: n.id,
       label: n.name,
-      sublabel: n.protocol === 'DIRECT_PHYSICAL' ? '本机物理硬件直出' : `${n.host}:${n.port}`,
+      sublabel: n.protocol === 'DIRECT_PHYSICAL'
+        ? '本机物理硬件直出'
+        : `${n.host}:${n.port}${n.requiresSidecarEngine ? ' · sing-box' : ''}`,
       tag: n.protocol === 'DIRECT_PHYSICAL' ? 'DIRECT' : n.protocol,
       dotColor: n.status === 'offline' ? '#F27973' : (n.status === 'online' ? '#34D399' : '#94A3B8')
     }));
   }, [nodes]);
+
+  const relayOptions: SelectOption[] = useMemo(() => {
+    const base: SelectOption[] = [
+      {
+        value: '',
+        label: '直连落地（无中转）',
+        sublabel: '不经二次跳板，直接由物理网卡连向绑定线路',
+        dotColor: '#64748B'
+      }
+    ];
+    for (const n of nodes) {
+      if (n.protocol === 'DIRECT_PHYSICAL' || n.id === seat?.boundNodeId) continue;
+      base.push({
+        value: n.id,
+        label: n.name,
+        sublabel: `${n.protocol} · ${n.host}:${n.port}`,
+        tag: n.requiresSidecarEngine ? 'L2' : 'L1',
+        dotColor: n.status === 'offline' ? '#F27973' : (n.status === 'online' ? '#34D399' : '#94A3B8')
+      });
+    }
+    return base;
+  }, [nodes, seat?.boundNodeId]);
+
+  async function handleBindRelay(relayNodeId: string) {
+    if (!seat) return;
+    await api.updateSeat(seat.id, { relayNodeId });
+    await onReload();
+    if (!relayNodeId) {
+      onToast(`${seat.name} 已恢复直连落地（取消前置中转）`);
+    } else {
+      const target = nodes.find(n => n.id === relayNodeId);
+      onToast(`${seat.name} 已开启双跳链式加速：${target?.name ?? relayNodeId} → 落地线路`);
+    }
+  }
 
   async function handleToggleSeat(enabled: boolean) {
     if (!seat) return;
@@ -183,7 +219,7 @@ export const RightInspector: React.FC<Props> = ({
         onMouseDown={startWindowDrag}
         onDoubleClick={toggleWindowMaximizeOnDoubleClick}
       >
-        <span className="num" style={{ fontSize: 10.5, color: '#7883A8', letterSpacing: '0.03em' }}>
+        <span className="num" style={{ fontSize: 10.5, color: 'var(--insp-sub)', letterSpacing: '0.03em' }}>
           v{project.version} · <span className="mono">{directBindText}</span>
         </span>
         <div className="win-ctrl-group" data-no-drag="true">
@@ -223,10 +259,10 @@ export const RightInspector: React.FC<Props> = ({
           <div key={seat.id} className="inspector-swap-anim" style={{ display: 'flex', flexDirection: 'column', gap: 11 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
               <div>
-                <h2 style={{ fontSize: 18, fontWeight: 700, color: '#FFFFFF', letterSpacing: '-0.02em', lineHeight: 1.25 }}>
+                <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--insp-title)', letterSpacing: '-0.02em', lineHeight: 1.25 }}>
                   {seat.name}
                 </h2>
-                <div className="num" style={{ fontSize: 11.5, color: '#8691B3', marginTop: 3 }}>
+                <div className="num" style={{ fontSize: 11.5, color: 'var(--insp-sub)', marginTop: 3 }}>
                   <span className="mono">127.0.0.1:{seat.localPort}</span> · {seat.enabled ? '独立端口监听中' : '已暂停'}
                 </div>
               </div>
@@ -288,13 +324,26 @@ export const RightInspector: React.FC<Props> = ({
               <div className="spec-row">
                 <span className="spec-key">绑定线路</span>
                 <CustomSelect
-                  variant="midnight"
+                  variant="light"
                   size="sm"
                   minMenuWidth={252}
                   value={seat.boundNodeId ?? ''}
                   options={nodeOptions}
                   onChange={handleBindNode}
                   ariaLabel="为当前选中席位选择出口线路"
+                />
+              </div>
+
+              <div className="spec-row">
+                <span className="spec-key">前置中转</span>
+                <CustomSelect
+                  variant="light"
+                  size="sm"
+                  minMenuWidth={252}
+                  value={seat.relayNodeId ?? ''}
+                  options={relayOptions}
+                  onChange={handleBindRelay}
+                  ariaLabel="为当前席位选择可选前置高速中转节点"
                 />
               </div>
 
@@ -333,7 +382,7 @@ export const RightInspector: React.FC<Props> = ({
                 <span className="spec-key">延迟 / 状态</span>
                 <span
                   className="spec-val num"
-                  style={{ color: bound?.status === 'offline' ? '#FCA5A0' : (bound?.latencyMs ? '#6EE7B7' : '#D5DCEF') }}
+                  style={{ color: bound?.status === 'offline' ? 'var(--insp-latency-err)' : (bound?.latencyMs ? 'var(--insp-latency-ok)' : 'var(--insp-latency-idle)') }}
                 >
                   {bound?.latencyMs
                     ? `${bound.latencyMs} ms · 在线`
@@ -368,8 +417,8 @@ export const RightInspector: React.FC<Props> = ({
                 type="button"
                 className="btn-pill btn-sm"
                 style={{
-                  background: copied ? 'rgba(16, 185, 129, 0.22)' : 'rgba(255, 255, 255, 0.09)',
-                  color: copied ? '#6EE7B7' : '#E8ECF7'
+                  background: copied ? 'var(--insp-copy-ok-bg)' : 'var(--insp-copy-bg)',
+                  color: copied ? 'var(--insp-copy-ok-text)' : 'var(--insp-copy-text)'
                 }}
                 onClick={handleCopyEnv}
               >
@@ -380,7 +429,7 @@ export const RightInspector: React.FC<Props> = ({
                 type="button"
                 className="btn-pill btn-sm"
                 disabled={verifying}
-                style={{ background: 'rgba(255, 255, 255, 0.94)', color: '#171D38' }}
+                style={{ background: 'var(--insp-verify-bg)', color: 'var(--insp-verify-text)' }}
                 title={seat.enabled ? `通过 127.0.0.1:${seat.localPort} 实流验证全链路连通并测试直出吞吐` : '直绑物理网卡验真绑定线路'}
                 onClick={handleVerifyTunnelOrNode}
               >
@@ -390,16 +439,16 @@ export const RightInspector: React.FC<Props> = ({
             </div>
           </div>
         ) : (
-          <div style={{ color: '#8C97B8', fontSize: 12 }}>正在同步席位配置...</div>
+          <div style={{ color: 'var(--insp-sub)', fontSize: 12 }}>正在同步席位配置...</div>
         )}
       </div>
 
-      {/* 下半部：出口线路池深色坐标雷达 */}
+      {/* 下半部：出口线路池坐标雷达 */}
       <div className="inspector-radar-section">
         <div style={{ padding: '0 22px', display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <div>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#FFFFFF' }}>独立出口线路池</div>
-            <div style={{ fontSize: 11, color: '#7D88AA', marginTop: 2 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--insp-title)' }}>独立出口线路池</div>
+            <div style={{ fontSize: 11, color: 'var(--insp-sub)', marginTop: 2 }}>
               点击坐标直接绑定至 {seat?.name ?? '当前席位'}
             </div>
           </div>
@@ -409,7 +458,7 @@ export const RightInspector: React.FC<Props> = ({
             style={{
               border: 'none',
               background: 'transparent',
-              color: '#F27973',
+              color: 'var(--accent-coral-text)',
               fontSize: 12,
               fontWeight: 600,
               cursor: 'pointer',
@@ -428,15 +477,15 @@ export const RightInspector: React.FC<Props> = ({
           <svg
             viewBox="0 0 308 240"
             preserveAspectRatio="none"
-            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0.45 }}
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0.6 }}
             aria-hidden="true"
           >
-            <path d="M-10 42 L118 76 L210 34 L320 68" stroke="#1E274A" strokeWidth="1.2" fill="none" />
-            <path d="M-10 112 L94 96 L186 138 L320 105" stroke="#1E274A" strokeWidth="1.2" fill="none" />
-            <path d="M38 -10 L76 92 L58 210" stroke="#1B2342" strokeWidth="1.2" fill="none" />
-            <path d="M162 -10 L144 82 L206 168 L192 245" stroke="#222C52" strokeWidth="1.4" fill="none" />
-            <path d="M245 -10 L218 118 L278 210" stroke="#1B2342" strokeWidth="1.1" fill="none" />
-            <circle cx="154" cy="96" r="56" stroke="#1E284D" strokeDasharray="3 5" strokeWidth="1" fill="none" />
+            <path d="M-10 42 L118 76 L210 34 L320 68" stroke="var(--insp-radar-stroke)" strokeWidth="1.2" fill="none" />
+            <path d="M-10 112 L94 96 L186 138 L320 105" stroke="var(--insp-radar-stroke)" strokeWidth="1.2" fill="none" />
+            <path d="M38 -10 L76 92 L58 210" stroke="var(--insp-radar-stroke)" strokeWidth="1.2" fill="none" />
+            <path d="M162 -10 L144 82 L206 168 L192 245" stroke="var(--insp-radar-stroke)" strokeWidth="1.4" fill="none" />
+            <path d="M245 -10 L218 118 L278 210" stroke="var(--insp-radar-stroke)" strokeWidth="1.1" fill="none" />
+            <circle cx="154" cy="96" r="56" stroke="var(--insp-radar-stroke)" strokeDasharray="3 5" strokeWidth="1" fill="none" />
           </svg>
 
           {visibleRadarNodes.map((n, idx) => {
@@ -457,14 +506,14 @@ export const RightInspector: React.FC<Props> = ({
           {bound && (
             <div className="radar-floating-card">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                <strong style={{ fontSize: 12, fontWeight: 600, color: '#FFFFFF', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                <strong style={{ fontSize: 12, fontWeight: 600, color: 'var(--insp-title)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {bound.name}
                 </strong>
-                <span className="num" style={{ fontSize: 10.5, fontWeight: 600, color: bound.status === 'offline' ? '#FCA5A0' : '#6EE7B7', flexShrink: 0 }}>
+                <span className="num" style={{ fontSize: 10.5, fontWeight: 600, color: bound.status === 'offline' ? 'var(--insp-latency-err)' : 'var(--insp-latency-ok)', flexShrink: 0 }}>
                   {bound.latencyMs ? `${bound.latencyMs} ms` : bound.protocol}
                 </span>
               </div>
-              <div className="num" style={{ fontSize: 11, color: '#8F9BBF', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <div className="num" style={{ fontSize: 11, color: 'var(--insp-sub)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {bound.exitIp !== '—' ? `${bound.exitIp} · ${bound.ispSummary}` : `${bound.host}:${bound.port} · ${bound.ispSummary}`}
               </div>
             </div>

@@ -14,18 +14,61 @@ public sealed class UpstreamConnector
 {
     private readonly PhysicalNicManager _nicManager;
     private readonly CleanDnsResolver _dnsResolver;
+    private readonly SingBoxSidecarManager? _sidecar;
 
-    public UpstreamConnector(PhysicalNicManager nicManager, CleanDnsResolver dnsResolver)
+    public UpstreamConnector(PhysicalNicManager nicManager, CleanDnsResolver dnsResolver, SingBoxSidecarManager? sidecar = null)
     {
         _nicManager = nicManager;
         _dnsResolver = dnsResolver;
+        _sidecar = sidecar;
     }
+
+    public PhysicalNicManager NicManager => _nicManager;
+    public SingBoxSidecarManager? Sidecar => _sidecar;
 
     public static bool IsIpv6Literal(string host)
     {
         if (string.IsNullOrWhiteSpace(host)) return false;
         string clean = host.Trim().Trim('[', ']');
         return IPAddress.TryParse(clean, out var parsed) && parsed.AddressFamily == AddressFamily.InterNetworkV6;
+    }
+
+    /// <summary>
+    /// 双跳链式代理拨号：前置加速中转节点 (L1/L2) -> 落地干净代理节点 (L1) -> 目标 AI 服务器
+    /// </summary>
+    public async Task<Stream> ConnectChainAsync(
+        ProxyNode? relayNode,
+        ProxyNode landingNode,
+        string targetHost,
+        int targetPort,
+        IsolationSettings settings,
+        CancellationToken ct = default)
+    {
+        if (relayNode == null ||
+            relayNode.Id == landingNode.Id ||
+            relayNode.Protocol == ProxyProtocol.DIRECT_PHYSICAL ||
+            landingNode.Protocol == ProxyProtocol.DIRECT_PHYSICAL)
+        {
+            return await ConnectViaNodeAsync(landingNode, targetHost, targetPort, settings, ct);
+        }
+
+        if (landingNode.RequiresSidecarEngine)
+        {
+            throw new NotSupportedException("VLESS / Hysteria2 / TUIC / WireGuard 请作为「前置中转」或直连出口使用，二级落地请搭配 SOCKS5 / HTTP / Trojan / Shadowsocks");
+        }
+
+        Stream relayStream = await ConnectViaNodeAsync(relayNode, landingNode.Host, landingNode.Port, settings, ct);
+        try
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
+            return await HandshakeOverTransportAsync(relayStream, landingNode, targetHost, targetPort, timeoutCts.Token);
+        }
+        catch
+        {
+            relayStream.Dispose();
+            throw;
+        }
     }
 
     /// <summary>
@@ -44,6 +87,12 @@ public sealed class UpstreamConnector
         if (node.Protocol == ProxyProtocol.DIRECT_PHYSICAL)
         {
             return await ConnectDirectPhysicalAsync(targetHost, targetPort, settings, ct);
+        }
+
+        // L2 现代高抗干扰协议（VLESS / Hysteria2 / TUIC / WireGuard）自动路由至受控 sing-box 本地环回桥
+        if (node.RequiresSidecarEngine)
+        {
+            return await ConnectViaSidecarBridgeAsync(node, targetHost, targetPort, settings, ct);
         }
 
         string cleanProxyHost = node.Host.Trim().Trim('[', ']');
@@ -81,40 +130,125 @@ public sealed class UpstreamConnector
             await socket.ConnectAsync(new IPEndPoint(proxyIp, node.Port), timeoutCts.Token);
 
             Stream transport = new NetworkStream(socket, ownsSocket: true);
-
-            if (node.Protocol == ProxyProtocol.HTTPS)
-            {
-                var ssl = new SslStream(transport, leaveInnerStreamOpen: false);
-                await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
-                {
-                    TargetHost = node.Host
-                }, timeoutCts.Token);
-                transport = ssl;
-            }
-
-            switch (node.Protocol)
-            {
-                case ProxyProtocol.DIRECT_PHYSICAL:
-                    return transport;
-                case ProxyProtocol.SOCKS5:
-                    await HandshakeSocks5Async(transport, node, targetHost, targetPort, timeoutCts.Token);
-                    return transport;
-                case ProxyProtocol.SOCKS4:
-                    await HandshakeSocks4Async(transport, targetHost, targetPort, timeoutCts.Token);
-                    return transport;
-                case ProxyProtocol.HTTP:
-                case ProxyProtocol.HTTPS:
-                    await HandshakeHttpConnectAsync(transport, node, targetHost, targetPort, timeoutCts.Token);
-                    return transport;
-                default:
-                    throw new NotSupportedException($"不支持的代理协议: {node.Protocol}");
-            }
+            return await HandshakeOverTransportAsync(transport, node, targetHost, targetPort, timeoutCts.Token);
         }
         catch
         {
             socket.Dispose();
             throw;
         }
+    }
+
+    private async Task<Stream> ConnectViaSidecarBridgeAsync(
+        ProxyNode node,
+        string targetHost,
+        int targetPort,
+        IsolationSettings settings,
+        CancellationToken ct)
+    {
+        if (_sidecar == null)
+            throw new InvalidOperationException("sing-box 扩展引擎未初始化");
+
+        int? bridgePort = _sidecar.GetBridgePort(node.Id);
+        if (!bridgePort.HasValue)
+        {
+            string? boundNic = _nicManager.GetLockedAdapter()?.Name;
+            if (!_sidecar.EnsureNodesReady([node], boundNic, settings, out string? err))
+                throw new InvalidOperationException(err ?? "请先在「网卡隔离」页一键安装 sing-box 扩展内核");
+            bridgePort = _sidecar.GetBridgePort(node.Id)
+                ?? throw new InvalidOperationException("sing-box 本地桥接端口尚未就绪");
+        }
+
+        var client = new TcpClient { NoDelay = true };
+        try
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
+            await client.ConnectAsync(IPAddress.Loopback, bridgePort.Value, timeoutCts.Token);
+            Stream stream = client.GetStream();
+            var bridgeNode = new ProxyNode { Protocol = ProxyProtocol.SOCKS5, Host = "127.0.0.1", Port = bridgePort.Value };
+            await HandshakeSocks5Async(stream, bridgeNode, targetHost, targetPort, timeoutCts.Token);
+            return stream;
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
+    }
+
+    private static async Task<Stream> HandshakeOverTransportAsync(
+        Stream transport,
+        ProxyNode node,
+        string targetHost,
+        int targetPort,
+        CancellationToken ct)
+    {
+        switch (node.Protocol)
+        {
+            case ProxyProtocol.DIRECT_PHYSICAL:
+                return transport;
+
+            case ProxyProtocol.SOCKS5:
+                await HandshakeSocks5Async(transport, node, targetHost, targetPort, ct);
+                return transport;
+
+            case ProxyProtocol.SOCKS4:
+                await HandshakeSocks4Async(transport, targetHost, targetPort, ct);
+                return transport;
+
+            case ProxyProtocol.HTTP:
+                await HandshakeHttpConnectAsync(transport, node, targetHost, targetPort, ct);
+                return transport;
+
+            case ProxyProtocol.HTTPS:
+            {
+                var ssl = CreateClientSslStream(transport, node);
+                await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                {
+                    TargetHost = string.IsNullOrWhiteSpace(node.Sni) ? node.Host : node.Sni
+                }, ct);
+                await HandshakeHttpConnectAsync(ssl, node, targetHost, targetPort, ct);
+                return ssl;
+            }
+
+            case ProxyProtocol.TROJAN:
+            {
+                var ssl = CreateClientSslStream(transport, node);
+                await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+                {
+                    TargetHost = string.IsNullOrWhiteSpace(node.Sni) ? node.Host : node.Sni
+                }, ct);
+                byte[] header = NativeCryptoProtocols.BuildTrojanConnectHeader(node.Password ?? string.Empty, targetHost, targetPort);
+                await ssl.WriteAsync(header, ct);
+                await ssl.FlushAsync(ct);
+                return ssl;
+            }
+
+            case ProxyProtocol.SHADOWSOCKS:
+            {
+                var ssStream = new ShadowsocksAeadStream(
+                    transport,
+                    string.IsNullOrWhiteSpace(node.Method) ? "aes-256-gcm" : node.Method,
+                    node.Password ?? string.Empty);
+                byte[] addrHdr = NativeCryptoProtocols.EncodeSocksAddress(targetHost, targetPort);
+                await ssStream.WriteAsync(addrHdr, ct);
+                await ssStream.FlushAsync(ct);
+                return ssStream;
+            }
+
+            default:
+                throw new NotSupportedException($"不支持的代理协议: {node.Protocol}");
+        }
+    }
+
+    private static SslStream CreateClientSslStream(Stream transport, ProxyNode node)
+    {
+        if (node.AllowInsecure)
+        {
+            return new SslStream(transport, leaveInnerStreamOpen: false, (_, _, _, _) => true);
+        }
+        return new SslStream(transport, leaveInnerStreamOpen: false);
     }
 
     /// <summary>

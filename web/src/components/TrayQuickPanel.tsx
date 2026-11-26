@@ -270,7 +270,7 @@ export const TrayQuickPanel: React.FC = () => {
             }}
           >
             <GitHubIcon size={11} />
-            <span>v{project?.version ?? '0.3.4'}</span>
+            <span>v{project?.version ?? '0.4.0'}</span>
           </button>
         </div>
 

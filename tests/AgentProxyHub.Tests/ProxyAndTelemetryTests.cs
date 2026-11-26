@@ -705,6 +705,206 @@ public class ProxyAndTelemetryTests
         }
     }
 
+    [Fact]
+    public void ProxyNodeImporter_ShouldParseAllL1AndL2ProtocolUris()
+    {
+        string ssCred = Convert.ToBase64String(Encoding.UTF8.GetBytes("aes-256-gcm:my-ss-pass"));
+        string raw = $"""
+                     trojan://tr-pass-1@jp.example.com:443?sni=cdn.example.com&allowInsecure=1#JP-Trojan
+                     ss://{ssCred}@us.example.com:8388#US-SS
+                     vless://11111111-2222-3333-4444-555555555555@edge.example.com:443?security=reality&sni=www.microsoft.com&pbk=PUBKEY123&sid=0a1b&fp=chrome&flow=xtls-rprx-vision#Reality-Edge
+                     hy2://hy2-secret@hk.example.com:8443?sni=hk.example.com&obfs=salamander&obfs-password=obfspw#HK-Hy2
+                     tuic://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:tuicpass@sg.example.com:443?sni=sg.example.com&congestion_control=bbr&alpn=h3#SG-TUIC
+                     wg://PRIVKEY123@de.example.com:51820?publickey=PEERPUB&address=10.0.0.2/32&mtu=1280#DE-WG
+                     """;
+
+        var parsed = ProxyNodeImporter.Parse(raw, ProxyProtocol.SOCKS5, "全协议测试池");
+        Assert.Equal(6, parsed.TotalLines);
+        Assert.Equal(6, parsed.ValidCount);
+        Assert.Equal(0, parsed.ErrorCount);
+
+        var tr = parsed.Items[0].Node!;
+        Assert.Equal(ProxyProtocol.TROJAN, tr.Protocol);
+        Assert.Equal("native", tr.EngineKind);
+        Assert.Equal("cdn.example.com", tr.Sni);
+        Assert.True(tr.AllowInsecure);
+
+        var ss = parsed.Items[1].Node!;
+        Assert.Equal(ProxyProtocol.SHADOWSOCKS, ss.Protocol);
+        Assert.Equal("aes-256-gcm", ss.Method);
+        Assert.Equal("my-ss-pass", ss.Password);
+        Assert.Equal("native", ss.EngineKind);
+
+        var vless = parsed.Items[2].Node!;
+        Assert.Equal(ProxyProtocol.VLESS, vless.Protocol);
+        Assert.True(vless.RequiresSidecarEngine);
+        Assert.Equal("PUBKEY123", vless.Extra!["pbk"]);
+
+        var hy2 = parsed.Items[3].Node!;
+        Assert.Equal(ProxyProtocol.HYSTERIA2, hy2.Protocol);
+        Assert.True(hy2.RequiresSidecarEngine);
+        Assert.Equal("salamander", hy2.Extra!["obfs"]);
+
+        var tuic = parsed.Items[4].Node!;
+        Assert.Equal(ProxyProtocol.TUIC, tuic.Protocol);
+        Assert.Equal("tuicpass", tuic.Password);
+
+        var wg = parsed.Items[5].Node!;
+        Assert.Equal(ProxyProtocol.WIREGUARD, wg.Protocol);
+        Assert.Equal("PRIVKEY123", wg.Password);
+    }
+
+    [Fact]
+    public async Task NativeCryptoProtocols_ShouldVerifySha224TrojanAndShadowsocksAeadRoundtrip()
+    {
+        // 1. 验证 FIPS 180-4 SHA-224 标准向量
+        Assert.Equal("d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f", NativeCryptoProtocols.ComputeSha224Hex(""));
+        Assert.Equal("23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7", NativeCryptoProtocols.ComputeSha224Hex("abc"));
+
+        byte[] trojanHdr = NativeCryptoProtocols.BuildTrojanConnectHeader("abc", "api.anthropic.com", 443);
+        Assert.StartsWith("23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7\r\n", Encoding.ASCII.GetString(trojanHdr, 0, 58));
+
+        // 2. 端到端验证 Shadowsocks AEAD (aes-256-gcm & chacha20-ietf-poly1305) 双工加密解密
+        foreach (string method in new[] { "aes-256-gcm", "chacha20-ietf-poly1305" })
+        {
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+            Task serverTask = Task.Run(async () =>
+            {
+                using var srvClient = await listener.AcceptTcpClientAsync();
+                using var ssServer = new ShadowsocksAeadStream(srvClient.GetStream(), method, "ss-secret-key");
+                var buf = new byte[128];
+                int n = await ssServer.ReadAsync(buf);
+                await ssServer.WriteAsync(buf.AsMemory(0, n));
+                await ssServer.FlushAsync();
+            });
+
+            using var cli = new TcpClient();
+            await cli.ConnectAsync(IPAddress.Loopback, port);
+            using var ssClient = new ShadowsocksAeadStream(cli.GetStream(), method, "ss-secret-key");
+            byte[] plain = Encoding.UTF8.GetBytes($"hello-ss-{method}-payload");
+            await ssClient.WriteAsync(plain);
+            await ssClient.FlushAsync();
+
+            var back = new byte[128];
+            int rn = await ssClient.ReadAsync(back);
+            Assert.Equal(Encoding.UTF8.GetString(plain), Encoding.UTF8.GetString(back, 0, rn));
+            await serverTask;
+        }
+    }
+
+    [Fact]
+    public async Task DoubleHopRelayChain_And_SingBoxBridgeConfig_ShouldWorkEndToEnd()
+    {
+        // 1. 构造：本地目标回显 -> 落地 SOCKS5 -> 前置中转 SOCKS5 -> MixedProxyServer
+        using var echo = new TcpListener(IPAddress.Loopback, 0);
+        echo.Start();
+        int echoPort = ((IPEndPoint)echo.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                TcpClient c;
+                try { c = await echo.AcceptTcpClientAsync(); }
+                catch { break; }
+                _ = Task.Run(async () =>
+                {
+                    using (c)
+                    using (var s = c.GetStream())
+                    {
+                        var buf = new byte[128];
+                        int n = await s.ReadAsync(buf);
+                        if (n > 0) await s.WriteAsync(buf.AsMemory(0, n));
+                    }
+                });
+            }
+        });
+
+        using var landingSocks = new TcpListener(IPAddress.Loopback, 0);
+        landingSocks.Start();
+        int landingPort = ((IPEndPoint)landingSocks.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                TcpClient c;
+                try { c = await landingSocks.AcceptTcpClientAsync(); }
+                catch { break; }
+                _ = Task.Run(() => HandleMockSocks5Async(c, "landU", "landP"));
+            }
+        });
+
+        using var relaySocks = new TcpListener(IPAddress.Loopback, 0);
+        relaySocks.Start();
+        int relayPort = ((IPEndPoint)relaySocks.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                TcpClient c;
+                try { c = await relaySocks.AcceptTcpClientAsync(); }
+                catch { break; }
+                _ = Task.Run(() => HandleMockSocks5Async(c, "relayU", "relayP"));
+            }
+        });
+
+        var nicMgr = new PhysicalNicManager();
+        var dns = new CleanDnsResolver(nicMgr);
+        var connector = new UpstreamConnector(nicMgr, dns);
+        using var server = new MixedProxyServer(connector);
+
+        var relayNode = new ProxyNode { Id = "n-relay", Name = "Relay", Protocol = ProxyProtocol.SOCKS5, Host = "127.0.0.1", Port = relayPort, Username = "relayU", Password = "relayP", Enabled = true };
+        var landNode = new ProxyNode { Id = "n-land", Name = "Landing", Protocol = ProxyProtocol.SOCKS5, Host = "127.0.0.1", Port = landingPort, Username = "landU", Password = "landP", Enabled = true };
+        int seatPort = GetFreeTcpPort();
+        var seat = new AppSeat
+        {
+            Id = "chain-seat",
+            Name = "ChainApp",
+            LocalPort = seatPort,
+            BoundNodeId = landNode.Id,
+            RelayNodeId = relayNode.Id,
+            Enabled = true,
+            KillSwitchEnabled = true,
+            AllowSameGroupFailover = false
+        };
+        server.UpdateTopology([seat], [relayNode, landNode], new IsolationSettings { GlobalKillSwitch = true });
+
+        using (var client = new TcpClient())
+        {
+            await client.ConnectAsync(IPAddress.Loopback, seatPort);
+            using var s = client.GetStream();
+            byte[] req = Encoding.ASCII.GetBytes($"CONNECT 127.0.0.1:{echoPort} HTTP/1.1\r\nHost: 127.0.0.1:{echoPort}\r\n\r\n");
+            await s.WriteAsync(req);
+            var respBuf = new byte[128];
+            int rn = await s.ReadAsync(respBuf);
+            Assert.Contains("200 Connection Established", Encoding.ASCII.GetString(respBuf, 0, rn));
+
+            byte[] msg = Encoding.UTF8.GetBytes("double-hop-chain-ok");
+            await s.WriteAsync(msg);
+            var back = new byte[64];
+            int bn = await s.ReadAsync(back);
+            Assert.Equal("double-hop-chain-ok", Encoding.UTF8.GetString(back, 0, bn));
+        }
+
+        var snap = server.GetTrafficSnapshots().First(x => x.SeatId == "chain-seat");
+        Assert.True(snap.BytesTx > 0 && snap.BytesRx > 0);
+
+        // 2. 验证 sing-box 隔离桥接配置生成与物理网卡 bind_interface 绑定
+        var parsedL2 = ProxyNodeImporter.Parse(
+            "vless://11111111-2222-3333-4444-555555555555@edge.example.com:443?security=reality&sni=www.microsoft.com&pbk=PK1&sid=01&fp=chrome#R1\n" +
+            "hy2://pw@hk.example.com:443?sni=hk.example.com#H1");
+        var l2Nodes = parsedL2.Items.Select(x => x.Node!).ToList();
+
+        var (json, portMap) = SingBoxSidecarManager.BuildBridgeConfigJson(l2Nodes, "以太网", new IsolationSettings { EnableIpv6 = false });
+        Assert.Equal(2, portMap.Count);
+        Assert.Contains("\"bind_interface\": \"\\u4EE5\\u592A\\u7F51\"", json);
+        Assert.Contains("\"type\": \"vless\"", json);
+        Assert.Contains("\"type\": \"hysteria2\"", json);
+        Assert.Contains("\"public_key\": \"PK1\"", json);
+    }
+
     private static async Task HandleMockSocks5Async(TcpClient client, string expectedUser, string expectedPass)
     {
         using (client)

@@ -84,6 +84,24 @@ public sealed class MixedProxyServer : IDisposable
                     StartListener(st);
                 }
             }
+
+            // 懒加载同步 L2 sing-box 扩展引擎：仅启动被活跃席位（主节点或前置中转）引用的 L2 节点
+            if (_connector.Sidecar != null)
+            {
+                var neededL2Ids = seats
+                    .Where(s => s.Enabled)
+                    .SelectMany(s => new[] { s.BoundNodeId, s.RelayNodeId })
+                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                    .ToHashSet(StringComparer.Ordinal);
+                var neededL2Nodes = _nodes
+                    .Where(n => n.Enabled && n.RequiresSidecarEngine && neededL2Ids.Contains(n.Id))
+                    .ToList();
+                _ = _connector.Sidecar.EnsureNodesReady(
+                    neededL2Nodes,
+                    _connector.NicManager.GetLockedAdapter()?.Name,
+                    isolation,
+                    out _);
+            }
         }
     }
 
@@ -527,6 +545,7 @@ public sealed class MixedProxyServer : IDisposable
     private async Task<Stream?> DialUpstreamOrBlockAsync(SeatListenerState st, string targetHost, int targetPort, CancellationToken ct)
     {
         List<ProxyNode> candidateNodes;
+        ProxyNode? relayNode;
         IsolationSettings iso;
         AppSeat seat = st.Seat;
         bool killSwitch = seat.KillSwitchEnabled || _isolation.GlobalKillSwitch;
@@ -534,6 +553,9 @@ public sealed class MixedProxyServer : IDisposable
         lock (_configLock)
         {
             iso = _isolation;
+            relayNode = string.IsNullOrWhiteSpace(seat.RelayNodeId)
+                ? null
+                : _nodes.FirstOrDefault(n => n.Id == seat.RelayNodeId && n.Enabled);
             var primary = _nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId && n.Enabled);
             candidateNodes = new List<ProxyNode>();
             if (primary != null) candidateNodes.Add(primary);
@@ -561,6 +583,8 @@ public sealed class MixedProxyServer : IDisposable
         {
             try
             {
+                if (relayNode != null && relayNode.Id != node.Id)
+                    return await _connector.ConnectChainAsync(relayNode, node, targetHost, targetPort, iso, ct);
                 return await _connector.ConnectViaNodeAsync(node, targetHost, targetPort, iso, ct);
             }
             catch

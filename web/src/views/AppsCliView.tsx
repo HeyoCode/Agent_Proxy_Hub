@@ -92,11 +92,11 @@ export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
                         display: 'flex',
                         alignItems: 'center',
                         justifyContent: 'center',
-                        color: 'var(--accent-indigo)',
+                        color: 'var(--text-primary)',
                         flexShrink: 0
                       }}
                     >
-                      <SeatBrandIcon seatId={seat.id} size={17} />
+                      <SeatBrandIcon seatId={seat.id} size={19} />
                     </div>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>

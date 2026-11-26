@@ -33,6 +33,21 @@ public sealed class NodeHealthChecker
             return node;
         }
 
+        if (node.RequiresSidecarEngine && _connector.Sidecar != null)
+        {
+            var status = _connector.Sidecar.GetStatus();
+            if (!status.Installed)
+            {
+                node.Status = "offline";
+                node.LatencyMs = null;
+                node.ExitIp = "—";
+                node.IspSummary = "需先在「网卡隔离」页一键安装 sing-box 扩展内核";
+                node.AiReachability = new List<string> { "缺少扩展内核" };
+                node.LastCheckedAt = DateTimeOffset.UtcNow;
+                return node;
+            }
+        }
+
         try
         {
             var exitTask = ProbeExitIpViaNodeAsync(node, settings, ct);
