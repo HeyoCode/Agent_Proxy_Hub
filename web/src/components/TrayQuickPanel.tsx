@@ -156,9 +156,14 @@ export const TrayQuickPanel: React.FC = () => {
         </span>
       </div>
 
-      {/* AI 席位独立开关列表 */}
-      <div className="tray-seat-list">
-        {seats.map(seat => {
+      {/* AI 席位独立开关列表（展示核心席位 + 所有已启用/已接管席位） */}
+      <div className="tray-seat-list" style={{ maxHeight: 332, overflowY: 'auto' }}>
+        {seats
+          .filter(s => {
+            const tk = overview?.seatTakeovers?.find(t => t.seatId === s.id);
+            return ['claude', 'chatgpt', 'agy', 'antigravity', 'cursor'].includes(s.id) || s.enabled || tk?.isTakenOver;
+          })
+          .map(seat => {
           const bound = nodes.find(n => n.id === seat.boundNodeId);
           const snap = overview?.trafficSnapshots.find(t => t.seatId === seat.id);
           const takeover = overview?.seatTakeovers?.find(t => t.seatId === seat.id);

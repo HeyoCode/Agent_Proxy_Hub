@@ -1051,4 +1051,66 @@ public class ProxyAndTelemetryTests
         Assert.Equal("salamander", hy2.Extra?["obfs"]);
         Assert.Equal("obfs-pw", hy2.Extra?["obfs-password"]);
     }
+
+    [Fact]
+    public void SessionLogScanner_AntigravityShouldComputeForwardDurationAndEstimatedTtft()
+    {
+        string tmp = Path.Combine(Path.GetTempPath(), $"aph_agy_ttft_{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            File.WriteAllLines(tmp, [
+                """{"step_index":1,"type":"GENERIC","created_at":"2026-11-26T17:05:54Z"}""",
+                """{"step_index":2,"type":"PLANNER_RESPONSE","created_at":"2026-11-26T17:05:57Z","model":"gemini-4-neon-medium","input_tokens":3505,"cache_read_tokens":273763,"output_tokens":2800,"thinking":"analyzing request carefully"}""",
+                """{"step_index":3,"type":"GENERIC","created_at":"2026-11-26T17:06:29Z"}"""
+            ]);
+
+            var entries = SessionLogScanner.ParseAntigravityTranscript(tmp);
+            var e = Assert.Single(entries);
+            Assert.Equal(32.0, e.DurationSeconds);
+            Assert.Equal(87.5, e.TokensPerSecond);
+            Assert.NotNull(e.FirstTokenSeconds);
+            Assert.InRange(e.FirstTokenSeconds!.Value, 0.5, 31.9);
+        }
+        finally
+        {
+            if (File.Exists(tmp)) File.Delete(tmp);
+        }
+    }
+
+    [Fact]
+    public void HubStateStore_ShouldMergeAll15SupportedAppsWithoutOverwritingExistingSeats()
+    {
+        string tmpDir = Path.Combine(Path.GetTempPath(), $"aph_apps15_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tmpDir);
+        try
+        {
+            var store = new AgentProxyHub.Core.Storage.HubStateStore(tmpDir);
+            var doc = store.LoadOrCreateDefault();
+            Assert.Equal(15, doc.Seats.Count);
+            string[] expectedIds =
+            [
+                "claude", "chatgpt", "agy", "cursor", "claude-desktop",
+                "gemini-cli", "grok-build", "opencode", "openclaw", "hermes",
+                "pi", "minimax-code", "kimi-code", "deepseek-harness", "oh-my-pi"
+            ];
+            foreach (string id in expectedIds)
+            {
+                Assert.Contains(doc.Seats, s => s.Id == id);
+            }
+
+            // 验证通用无损启动器接管与还原（以 gemini-cli 为例）
+            var svc = new AppProxyTakeoverService(tmpDir, tmpDir, tmpDir, _ => false, forceMacOs: false);
+            var gemini = doc.Seats.First(s => s.Id == "gemini-cli");
+            var (okOn, _, stOn) = svc.SetTakeover(gemini, true);
+            Assert.True(okOn);
+            Assert.True(stOn.IsTakenOver);
+            var (okOff, _, stOff) = svc.SetTakeover(gemini, false);
+            Assert.True(okOff);
+            Assert.False(stOff.IsTakenOver);
+        }
+        finally
+        {
+            if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true);
+        }
+    }
 }

@@ -73,6 +73,8 @@ export const OverviewView: React.FC<Props> = ({
   const [chartRange, setChartRange] = useState<'today' | '7d'>('today');
   const [stats, setStats] = useState<UsageDashboardResponse | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [showAllSeats, setShowAllSeats] = useState(false);
+  const [topoPage, setTopoPage] = useState(0);
   const [togglingAll, setTogglingAll] = useState(false);
   const [togglingIpv6, setTogglingIpv6] = useState(false);
 
@@ -195,10 +197,18 @@ export const OverviewView: React.FC<Props> = ({
   const activeCoord = svgCoords[activeIdx] ?? { x: 210, y: 80 };
   const activePoint = chartPoints[activeIdx];
 
-  const claudeSeat = data.seats.find(s => s.id === 'claude') ?? data.seats[0];
-  const chatgptSeat = data.seats.find(s => s.id === 'chatgpt') ?? data.seats[1];
-  const agySeat = data.seats.find(s => s.id === 'agy' || s.id === 'antigravity') ?? data.seats[2];
-  const cursorSeat = data.seats.find(s => s.id === 'cursor') ?? data.seats[3];
+  // 独立分流总控动态槽位：优先展示已启用席位，支持翻页总控全部 15 款应用
+  const orderedTopoSeats = useMemo(() => {
+    return [...data.seats].sort((a, b) => Number(b.enabled) - Number(a.enabled));
+  }, [data.seats]);
+  const topoPageSize = 4;
+  const topoTotalPages = Math.max(1, Math.ceil(orderedTopoSeats.length / topoPageSize));
+  const safeTopoPage = Math.min(topoPage, topoTotalPages - 1);
+  const topoSlice = orderedTopoSeats.slice(safeTopoPage * topoPageSize, safeTopoPage * topoPageSize + topoPageSize);
+  const slot0 = topoSlice[0];
+  const slot1 = topoSlice[1];
+  const slot2 = topoSlice[2];
+  const slot3 = topoSlice[3];
 
   const nicShort = data.lockedNic ? data.lockedNic.name : '物理网卡待命';
 
@@ -363,7 +373,69 @@ export const OverviewView: React.FC<Props> = ({
         {/* 3. 右侧：独立分流总控卡片 */}
         <div className="surface-card controls-card">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-            <div className="card-title-sm">独立分流总控</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div className="card-title-sm">独立分流总控</div>
+              {topoTotalPages > 1 && (
+                <div
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 2,
+                    background: 'var(--bg-subtle)',
+                    borderRadius: 7,
+                    padding: '2px 4px',
+                    fontSize: 11,
+                    color: 'var(--text-secondary)'
+                  }}
+                >
+                  <button
+                    type="button"
+                    aria-label="上一页应用"
+                    style={{
+                      border: 'none',
+                      background: 'transparent',
+                      color: 'var(--text-secondary)',
+                      width: 18,
+                      height: 18,
+                      borderRadius: 5,
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      lineHeight: 1,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}
+                    onClick={() => setTopoPage(p => (p <= 0 ? topoTotalPages - 1 : p - 1))}
+                  >
+                    ‹
+                  </button>
+                  <span className="num" style={{ padding: '0 3px', fontSize: 10.5, fontWeight: 600 }}>
+                    {safeTopoPage + 1}/{topoTotalPages}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label="下一页应用"
+                    style={{
+                      border: 'none',
+                      background: 'transparent',
+                      color: 'var(--text-secondary)',
+                      width: 18,
+                      height: 18,
+                      borderRadius: 5,
+                      cursor: 'pointer',
+                      fontSize: 12,
+                      lineHeight: 1,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}
+                    onClick={() => setTopoPage(p => (p + 1) % topoTotalPages)}
+                  >
+                    ›
+                  </button>
+                </div>
+              )}
+            </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 12, fontWeight: 600, color: data.isolation.enableIpv6 ? 'var(--accent-indigo)' : 'var(--text-secondary)' }}>
@@ -399,26 +471,26 @@ export const OverviewView: React.FC<Props> = ({
 
           <div className="controls-stage">
             <div className="ctrl-col">
-              {claudeSeat && renderControlNode(
-                claudeSeat.name,
-                `:${claudeSeat.localPort}`,
-                claudeSeat.enabled,
+              {slot0 ? renderControlNode(
+                slot0.name,
+                `:${slot0.localPort}`,
+                slot0.enabled,
                 '已启用',
                 '点击启用',
-                () => onSelectSeat(claudeSeat.id),
-                () => handleToggleSeat(claudeSeat),
-                selectedSeatId === claudeSeat.id
-              )}
-              {chatgptSeat && renderControlNode(
-                chatgptSeat.name,
-                `:${chatgptSeat.localPort}`,
-                chatgptSeat.enabled,
+                () => onSelectSeat(slot0.id),
+                () => handleToggleSeat(slot0),
+                selectedSeatId === slot0.id
+              ) : <div style={{ minHeight: 58 }} />}
+              {slot1 ? renderControlNode(
+                slot1.name,
+                `:${slot1.localPort}`,
+                slot1.enabled,
                 '已启用',
                 '点击启用',
-                () => onSelectSeat(chatgptSeat.id),
-                () => handleToggleSeat(chatgptSeat),
-                selectedSeatId === chatgptSeat.id
-              )}
+                () => onSelectSeat(slot1.id),
+                () => handleToggleSeat(slot1),
+                selectedSeatId === slot1.id
+              ) : <div style={{ minHeight: 58 }} />}
               {renderControlNode(
                 'SNI 域名还原',
                 data.isolation.tlsSniRecoveryEnabled ? '198.18 自动剥离' : '已暂停',
@@ -436,15 +508,15 @@ export const OverviewView: React.FC<Props> = ({
               <svg viewBox="0 0 240 220" style={{ width: '100%', height: '100%', overflow: 'visible' }} aria-hidden="true">
                 <path
                   d="M8 34 H58 L84 68"
-                  className={claudeSeat?.enabled ? 'ctrl-wire-active' : ''}
-                  stroke={claudeSeat?.enabled ? undefined : 'var(--divider)'}
+                  className={slot0?.enabled ? 'ctrl-wire-active' : ''}
+                  stroke={slot0?.enabled ? undefined : 'var(--divider)'}
                   strokeWidth="1.4"
                   fill="none"
                 />
                 <path
                   d="M8 110 H66"
-                  className={chatgptSeat?.enabled ? 'ctrl-wire-active' : ''}
-                  stroke={chatgptSeat?.enabled ? undefined : 'var(--divider)'}
+                  className={slot1?.enabled ? 'ctrl-wire-active' : ''}
+                  stroke={slot1?.enabled ? undefined : 'var(--divider)'}
                   strokeWidth="1.4"
                   fill="none"
                 />
@@ -458,15 +530,15 @@ export const OverviewView: React.FC<Props> = ({
 
                 <path
                   d="M232 34 H182 L156 68"
-                  className={agySeat?.enabled ? 'ctrl-wire-active' : ''}
-                  stroke={agySeat?.enabled ? undefined : 'var(--divider)'}
+                  className={slot2?.enabled ? 'ctrl-wire-active' : ''}
+                  stroke={slot2?.enabled ? undefined : 'var(--divider)'}
                   strokeWidth="1.4"
                   fill="none"
                 />
                 <path
                   d="M232 110 H174"
-                  className={cursorSeat?.enabled ? 'ctrl-wire-active' : ''}
-                  stroke={cursorSeat?.enabled ? undefined : 'var(--divider)'}
+                  className={slot3?.enabled ? 'ctrl-wire-active' : ''}
+                  stroke={slot3?.enabled ? undefined : 'var(--divider)'}
                   strokeWidth="1.4"
                   fill="none"
                 />
@@ -502,26 +574,26 @@ export const OverviewView: React.FC<Props> = ({
             </div>
 
             <div className="ctrl-col">
-              {agySeat && renderControlNode(
-                agySeat.name,
-                `:${agySeat.localPort}`,
-                agySeat.enabled,
+              {slot2 ? renderControlNode(
+                slot2.name,
+                `:${slot2.localPort}`,
+                slot2.enabled,
                 '已启用',
                 '点击启用',
-                () => onSelectSeat(agySeat.id),
-                () => handleToggleSeat(agySeat),
-                selectedSeatId === agySeat.id
-              )}
-              {cursorSeat && renderControlNode(
-                cursorSeat.name,
-                `:${cursorSeat.localPort}`,
-                cursorSeat.enabled,
+                () => onSelectSeat(slot2.id),
+                () => handleToggleSeat(slot2),
+                selectedSeatId === slot2.id
+              ) : <div style={{ minHeight: 58 }} />}
+              {slot3 ? renderControlNode(
+                slot3.name,
+                `:${slot3.localPort}`,
+                slot3.enabled,
                 '已启用',
                 '点击启用',
-                () => onSelectSeat(cursorSeat.id),
-                () => handleToggleSeat(cursorSeat),
-                selectedSeatId === cursorSeat.id
-              )}
+                () => onSelectSeat(slot3.id),
+                () => handleToggleSeat(slot3),
+                selectedSeatId === slot3.id
+              ) : <div style={{ minHeight: 58 }} />}
               {renderControlNode(
                 '防串熔断锁',
                 data.isolation.globalKillSwitch ? '断线绝不回退' : '未锁定',
@@ -537,9 +609,33 @@ export const OverviewView: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* 下半区：4 张圆弧席位卡片 */}
-      <div className="seat-gauges-grid">
-        {data.seats.map(seat => {
+      {/* 下半区：AI 应用席位卡片（默认展示核心 4 席位 + 所有已启用席位，支持一键展开全部） */}
+      {(() => {
+        const coreIds = new Set(['claude', 'chatgpt', 'agy', 'antigravity', 'cursor']);
+        const visibleSeats = showAllSeats
+          ? data.seats
+          : data.seats.filter(s => coreIds.has(s.id) || s.enabled || s.id === selectedSeatId);
+        const hiddenCount = data.seats.length - visibleSeats.length;
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {data.seats.length > 4 && (
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 2px' }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  AI 应用独立出口席位（共 {data.seats.length} 款支持应用）
+                </span>
+                <button
+                  type="button"
+                  className="btn-pill btn-soft btn-sm"
+                  style={{ height: 26, fontSize: 11.5 }}
+                  onClick={() => setShowAllSeats(v => !v)}
+                >
+                  {showAllSeats ? '收起未启用席位' : `展开全部 ${data.seats.length} 款应用${hiddenCount > 0 ? ` (+${hiddenCount})` : ''}`}
+                </button>
+              </div>
+            )}
+            <div className="seat-gauges-grid">
+              {visibleSeats.map(seat => {
           const bound = data.nodes.find(n => n.id === seat.boundNodeId);
           const isSelected = seat.id === selectedSeatId;
           const isOffline = seat.enabled && bound?.status === 'offline';
@@ -625,7 +721,10 @@ export const OverviewView: React.FC<Props> = ({
             </button>
           );
         })}
-      </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

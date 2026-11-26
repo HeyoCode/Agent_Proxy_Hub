@@ -13,7 +13,17 @@ export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
   const [cliTab, setCliTab] = useState<'ps' | 'zsh' | 'claude' | 'agy'>(data.os === 'mac' ? 'zsh' : 'ps');
   const [copied, setCopied] = useState(false);
   const [busySeat, setBusySeat] = useState<string | null>(null);
+  const [appSearch, setAppSearch] = useState('');
+  const [appFilter, setAppFilter] = useState<'all' | 'active'>('all');
   const codeText = data.cliSnippets[cliTab] ?? '';
+
+  const filteredSeats = data.seats.filter(seat => {
+    const tk = data.seatTakeovers?.find(t => t.seatId === seat.id);
+    if (appFilter === 'active' && !seat.enabled && !tk?.isTakenOver && !tk?.isProcessRunning) return false;
+    const kw = appSearch.trim().toLowerCase();
+    if (!kw) return true;
+    return `${seat.name} ${seat.id} ${seat.subtitle} ${seat.processWin} ${seat.localPort}`.toLowerCase().includes(kw);
+  });
 
   async function handleCopy() {
     await navigator.clipboard?.writeText(codeText);
@@ -53,16 +63,41 @@ export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
       <div className="surface-card surface-card-pad">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
           <span className="card-title-sm">AI 应用无损接管与独立端口映射</span>
-          <span className="pill-tag tag-neutral">
-            {data.os === 'mac' ? 'macOS 混合端口' : 'Windows 混合端口'}
+          <span className="pill-tag tag-indigo num">
+            支持 {data.seats.length} 款应用
           </span>
         </div>
-        <div className="card-subtitle-sm" style={{ marginBottom: 14 }}>
+        <div className="card-subtitle-sm" style={{ marginBottom: 12 }}>
           不改系统全局代理；点击「一键接管」即可自动备份并绑定对应软件配置（支持无损一键还原）。
         </div>
 
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
+          <input
+            className="clean-input"
+            style={{ flex: 1, minWidth: 160, height: 32, fontSize: 12 }}
+            placeholder="搜索应用名称、进程或端口（如 Gemini / OpenClaw / Kimi）..."
+            value={appSearch}
+            onChange={e => setAppSearch(e.target.value)}
+          />
+          <SegmentedTabs<'all' | 'active'>
+            value={appFilter}
+            onChange={setAppFilter}
+            items={[
+              { value: 'all', label: '全部', count: data.seats.length },
+              {
+                value: 'active',
+                label: '已启用/接管',
+                count: data.seats.filter(s => {
+                  const tk = data.seatTakeovers?.find(t => t.seatId === s.id);
+                  return s.enabled || tk?.isTakenOver || tk?.isProcessRunning;
+                }).length
+              }
+            ]}
+          />
+        </div>
+
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {data.seats.map(seat => {
+          {filteredSeats.map(seat => {
             const bound = data.nodes.find(n => n.id === seat.boundNodeId);
             const proc = data.os === 'mac' ? seat.processMac : seat.processWin;
             const takeover = data.seatTakeovers?.find(t => t.seatId === seat.id);

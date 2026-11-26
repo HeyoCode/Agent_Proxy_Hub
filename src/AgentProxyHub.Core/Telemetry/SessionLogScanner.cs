@@ -157,12 +157,14 @@ public sealed class SessionLogScanner
 
     /// <summary>
     /// 解析 Antigravity transcript.jsonl
+    /// 注意：PLANNER_RESPONSE 的 created_at 是该步开始创建时间，因此真实耗时应向后取「后续步骤 created_at - 当前步 created_at」
     /// </summary>
     public static List<UsageLogEntry> ParseAntigravityTranscript(string filePath)
     {
         var results = new List<UsageLogEntry>();
         string fileTag = Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(filePath)) ?? "agy");
-        DateTimeOffset? prevStepTime = null;
+        var pending = new List<(UsageLogEntry Entry, bool HasThinking, int ThinkingChars, double? ExplicitTtftSec)>();
+        var timeline = new List<(DateTimeOffset Ts, int PendingIdx)>();
         int lineIdx = 0;
 
         foreach (string line in ReadLinesShared(filePath))
@@ -173,7 +175,7 @@ public sealed class SessionLogScanner
             if (!line.Contains("\"PLANNER_RESPONSE\"", StringComparison.Ordinal))
             {
                 DateTimeOffset? quickTs = TryQuickExtractTimestamp(line, "\"created_at\"");
-                if (quickTs.HasValue) prevStepTime = quickTs;
+                if (quickTs.HasValue) timeline.Add((quickTs.Value, -1));
                 continue;
             }
 
@@ -193,19 +195,17 @@ public sealed class SessionLogScanner
 
                     if (input + cacheRead + output > 0 && ts.HasValue)
                     {
-                        double durationSec = 0;
-                        if (prevStepTime.HasValue)
-                        {
-                            double diff = (ts.Value - prevStepTime.Value).TotalSeconds;
-                            if (diff > 0.05 && diff <= 600) durationSec = Math.Round(diff, 1);
-                        }
+                        string? thinking = TryGetString(root, "thinking");
+                        bool hasThinking = !string.IsNullOrWhiteSpace(thinking);
+                        int thinkingChars = thinking?.Length ?? 0;
 
-                        double? tps = (durationSec >= 0.2 && output > 0)
-                            ? Math.Round(output / durationSec, 1)
-                            : null;
+                        double? explicitTtft = null;
+                        long ttftMs = TryGetInt64(root, "first_token_ms");
+                        if (ttftMs <= 0) ttftMs = TryGetInt64(root, "ttft_ms");
+                        if (ttftMs > 0) explicitTtft = Math.Round(ttftMs / 1000.0, 1);
 
                         int stepIndex = (int)TryGetInt64(root, "step_index");
-                        results.Add(new UsageLogEntry
+                        var entry = new UsageLogEntry
                         {
                             Id = $"agy:{fileTag}:{stepIndex}:{lineIdx}",
                             Timestamp = ts.Value,
@@ -215,14 +215,17 @@ public sealed class SessionLogScanner
                             EffectiveInputTokens = input,
                             OutputTokens = output,
                             CacheReadTokens = cacheRead,
-                            CacheWriteTokens = 0,
-                            DurationSeconds = durationSec,
-                            TokensPerSecond = tps
-                        });
+                            CacheWriteTokens = 0
+                        };
+
+                        int pIdx = pending.Count;
+                        pending.Add((entry, hasThinking, thinkingChars, explicitTtft));
+                        timeline.Add((ts.Value, pIdx));
+                        continue;
                     }
                 }
 
-                if (ts.HasValue) prevStepTime = ts;
+                if (ts.HasValue) timeline.Add((ts.Value, -1));
             }
             catch
             {
@@ -230,7 +233,66 @@ public sealed class SessionLogScanner
             }
         }
 
+        // 向后匹配后续步骤时间戳计算每条 PLANNER_RESPONSE 的估算总耗时、流速与首字时间
+        for (int i = 0; i < timeline.Count; i++)
+        {
+            int pIdx = timeline[i].PendingIdx;
+            if (pIdx < 0) continue;
+
+            var (entry, hasThinking, thinkingChars, explicitTtft) = pending[pIdx];
+            DateTimeOffset startTs = timeline[i].Ts;
+            double durationSec = 0;
+
+            for (int j = i + 1; j < timeline.Count; j++)
+            {
+                double diff = (timeline[j].Ts - startTs).TotalSeconds;
+                if (diff > 0.05)
+                {
+                    if (diff <= 600) durationSec = Math.Round(diff, 1);
+                    break;
+                }
+            }
+
+            entry.DurationSeconds = durationSec;
+            entry.TokensPerSecond = (durationSec >= 0.2 && entry.OutputTokens > 0)
+                ? Math.Round(entry.OutputTokens / durationSec, 1)
+                : null;
+            entry.FirstTokenSeconds = explicitTtft ?? EstimateFirstTokenSeconds(
+                durationSec,
+                entry.EffectiveInputTokens + entry.CacheReadTokens,
+                entry.OutputTokens,
+                hasThinking,
+                thinkingChars);
+
+            results.Add(entry);
+        }
+
         return results;
+    }
+
+    private static double? EstimateFirstTokenSeconds(
+        double durationSec,
+        long promptTokens,
+        long outputTokens,
+        bool hasThinking,
+        int thinkingChars)
+    {
+        if (durationSec < 0.2) return null;
+
+        // 依据上下文预填充与思考阶段占比推算首字时间（TTFT），并钳位在合理区间内
+        double prefillRatio = Math.Clamp(0.08 + Math.Log10(Math.Max(100, promptTokens)) * 0.05, 0.12, 0.35);
+        double thinkBoost = 0;
+        if (hasThinking)
+        {
+            double approxThinkTokens = thinkingChars / 3.5;
+            double totalGen = Math.Max(1, approxThinkTokens + outputTokens);
+            thinkBoost = Math.Clamp((approxThinkTokens / totalGen) * 0.52, 0.12, 0.45);
+        }
+
+        double ratio = Math.Clamp(prefillRatio + thinkBoost, 0.12, 0.78);
+        double est = Math.Round(durationSec * ratio, 1);
+        if (est >= durationSec) est = Math.Round(Math.Max(0.1, durationSec - 0.1), 1);
+        return Math.Max(0.1, est);
     }
 
     /// <summary>
@@ -297,6 +359,7 @@ public sealed class SessionLogScanner
                             CacheReadTokens = cacheRead,
                             OutputTokens = output,
                             DurationSeconds = durationSec,
+                            FirstTokenSeconds = EstimateFirstTokenSeconds(durationSec, input + cacheRead + cacheWrite, output, false, 0),
                             TokensPerSecond = tps
                         };
 

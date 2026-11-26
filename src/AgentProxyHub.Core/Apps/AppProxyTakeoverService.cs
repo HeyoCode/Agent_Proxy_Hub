@@ -114,7 +114,7 @@ public sealed class AppProxyTakeoverService
                     "cursor" => enable ? EnableCursorTakeover(seat) : RestoreCursorTakeover(),
                     "agy" or "antigravity" => enable ? EnableAntigravityTakeover(seat) : RestoreAntigravityTakeover(),
                     "chatgpt" => enable ? EnableChatGptLauncherTakeover(seat) : RestoreChatGptLauncherTakeover(),
-                    _ => (false, $"暂不支持未知席位 {seat.Id} 的自动接管")
+                    _ => enable ? EnableGenericLauncherTakeover(seat) : RestoreGenericLauncherTakeover(seat)
                 };
 
                 var status = InspectSeatInternal(seat);
@@ -229,9 +229,35 @@ public sealed class AppProxyTakeoverService
                 return (false, "未在常见路径找到 Cursor.exe；您可已完成 settings.json 热接管。");
             }
 
-            // Claude Code / Codex：打开已预注入该席位代理环境变量的独立终端窗口
-            string bannerTitle = seat.Id == "claude" ? "Claude Code" : "Codex CLI / ChatGPT";
-            string cliHint = seat.Id == "claude" ? "claude" : "codex";
+            if (seat.Id == "claude-desktop")
+            {
+                if (_isMacOs)
+                {
+                    var psi = new ProcessStartInfo("open") { UseShellExecute = false };
+                    psi.ArgumentList.Add("-a");
+                    psi.ArgumentList.Add("Claude");
+                    psi.ArgumentList.Add("--args");
+                    psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
+                    ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
+                    Process.Start(psi);
+                    return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Claude Desktop");
+                }
+
+                string? claudeExe = ResolveClaudeDesktopExe();
+                if (!string.IsNullOrEmpty(claudeExe))
+                {
+                    var psi = new ProcessStartInfo(claudeExe) { UseShellExecute = false };
+                    psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
+                    psi.ArgumentList.Add("--proxy-bypass-list=<-loopback>;localhost;127.0.0.1;[::1]");
+                    ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
+                    Process.Start(psi);
+                    return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Claude Desktop");
+                }
+            }
+
+            // Claude Code / Codex / Gemini CLI / Grok Build / OpenCode 等：打开已预注入该席位代理环境变量的独立终端窗口
+            string bannerTitle = seat.Name;
+            string cliHint = ResolveCliHint(seat);
 
             if (_isMacOs)
             {
@@ -272,16 +298,117 @@ public sealed class AppProxyTakeoverService
             "cursor" => InspectCursor(seat, expectedProxy),
             "agy" or "antigravity" => InspectAntigravity(seat, expectedProxy),
             "chatgpt" => InspectChatGpt(seat, expectedProxy),
-            _ => new SeatTakeoverStatus
-            {
-                SeatId = seat.Id,
-                SupportsConfigTakeover = false,
-                IsTakenOver = false,
-                ModeSummary = "端口监听模式",
-                StatusHint = "当前席位通过本地混合端口监听。"
-            }
+            _ => InspectGenericLauncher(seat, expectedProxy)
         };
     }
+
+    private SeatTakeoverStatus InspectGenericLauncher(AppSeat seat, string expectedProxy)
+    {
+        string launcherPath = GetGenericLauncherPath(seat.Id);
+        string[] procNames = ResolveProcessNames(seat);
+        bool running = procNames.Length > 0 && _processChecker(procNames);
+        bool takenOver = File.Exists(launcherPath) && File.ReadAllText(launcherPath).Contains(expectedProxy, StringComparison.OrdinalIgnoreCase);
+
+        return new SeatTakeoverStatus
+        {
+            SeatId = seat.Id,
+            IsProcessRunning = running,
+            SupportsConfigTakeover = true,
+            IsTakenOver = takenOver,
+            ModeSummary = seat.Id == "claude-desktop"
+                ? "Claude Desktop 桌面代理路由启动器"
+                : $"{seat.Name} 独立代理环境启动器",
+            TargetPath = launcherPath,
+            LaunchExecutable = seat.Id == "claude-desktop" ? (ResolveClaudeDesktopExe() ?? "Claude") : ResolveCliHint(seat),
+            StatusHint = takenOver
+                ? $"已生成专属隔离启动脚本 ({expectedProxy})；点击「专线启动」即可以独立出口运行 {seat.Name}。"
+                : $"未生成启动封装：点击「一键接管」生成专属隔离启动脚本，或直接点击「专线启动」拉起预注入代理环境的终端。"
+        };
+    }
+
+    private (bool Ok, string Message) EnableGenericLauncherTakeover(AppSeat seat)
+    {
+        Directory.CreateDirectory(_launchersDir);
+        string path = GetGenericLauncherPath(seat.Id);
+        string http = $"http://127.0.0.1:{seat.LocalPort}";
+        string socks = $"socks5h://127.0.0.1:{seat.LocalPort}";
+        string cli = ResolveCliHint(seat);
+
+        if (_isMacOs)
+        {
+            string body = seat.Id == "claude-desktop"
+                ? $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{http}\"\nexport HTTP_PROXY=\"{http}\"\nexport ALL_PROXY=\"{socks}\"\nexport NO_PROXY=\"localhost,127.0.0.1,::1\"\nopen -a Claude --args --proxy-server=\"{http}\"\n"
+                : $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{http}\"\nexport HTTP_PROXY=\"{http}\"\nexport ALL_PROXY=\"{socks}\"\nexport NO_PROXY=\"localhost,127.0.0.1,::1\"\necho \"[Agent Proxy Hub] {seat.Name} 独立出口已就绪 ({http})\"\nexec {cli} \"$@\"\n";
+            File.WriteAllText(path, body, new UTF8Encoding(false));
+        }
+        else
+        {
+            string body = seat.Id == "claude-desktop"
+                ? $"$env:HTTPS_PROXY=\"{http}\"\r\n$env:HTTP_PROXY=\"{http}\"\r\n$env:ALL_PROXY=\"{socks}\"\r\n$env:NO_PROXY=\"localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8\"\r\n$exe = \"$env:LOCALAPPDATA\\AnthropicClaude\\Claude.exe\"\r\nif (Test-Path $exe) {{ Start-Process -FilePath $exe -ArgumentList \"--proxy-server={http}\" }} else {{ Write-Host \"未在默认目录找到 Claude.exe，请手动启动并附带 --proxy-server={http}\" }}\r\n"
+                : $"$env:HTTPS_PROXY=\"{http}\"\r\n$env:HTTP_PROXY=\"{http}\"\r\n$env:ALL_PROXY=\"{socks}\"\r\n$env:NO_PROXY=\"localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8\"\r\nWrite-Host \"[Agent Proxy Hub] {seat.Name} 独立出口已就绪 ({http})\" -ForegroundColor Cyan\r\nWrite-Host \"直接运行: {cli}\" -ForegroundColor Green\r\n";
+            File.WriteAllText(path, body, new UTF8Encoding(true));
+        }
+
+        return (true, $"已为 {seat.Name} 生成独立隔离启动器 ({http})");
+    }
+
+    private (bool Ok, string Message) RestoreGenericLauncherTakeover(AppSeat seat)
+    {
+        string path = GetGenericLauncherPath(seat.Id);
+        if (File.Exists(path)) File.Delete(path);
+        return (true, $"已移除 {seat.Name} 托管启动脚本");
+    }
+
+    private string GetGenericLauncherPath(string seatId)
+    {
+        string safe = Regex.Replace(seatId, @"[^a-zA-Z0-9_-]", "_");
+        return Path.Combine(_launchersDir, _isMacOs ? $"launch-{safe}.sh" : $"launch-{safe}.ps1");
+    }
+
+    private string? ResolveClaudeDesktopExe()
+    {
+        string[] candidates =
+        [
+            Path.Combine(_appDataLocal, "AnthropicClaude", "Claude.exe"),
+            Path.Combine(_appDataLocal, "Programs", "claude-desktop", "Claude.exe"),
+            Path.Combine(_appDataLocal, "Programs", "Claude", "Claude.exe")
+        ];
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private static string ResolveCliHint(AppSeat seat) => seat.Id switch
+    {
+        "claude" => "claude",
+        "chatgpt" => "codex",
+        "claude-desktop" => "Claude",
+        "gemini-cli" => "gemini",
+        "grok-build" => "grok",
+        "opencode" => "opencode",
+        "openclaw" => "openclaw",
+        "hermes" => "hermes",
+        "pi" => "pi",
+        "minimax-code" => "minimax",
+        "kimi-code" => "kimi",
+        "deepseek-harness" => "deepseek",
+        "oh-my-pi" => "omp",
+        _ => string.IsNullOrWhiteSpace(seat.LaunchCommandWin) ? seat.Id : seat.LaunchCommandWin.Split(' ')[0]
+    };
+
+    private static string[] ResolveProcessNames(AppSeat seat) => seat.Id switch
+    {
+        "claude-desktop" => ["Claude", "claude"],
+        "gemini-cli" => ["gemini"],
+        "grok-build" => ["grok"],
+        "opencode" => ["opencode"],
+        "openclaw" => ["openclaw"],
+        "hermes" => ["hermes"],
+        "pi" => ["pi"],
+        "minimax-code" => ["minimax"],
+        "kimi-code" => ["kimi"],
+        "deepseek-harness" => ["deepseek"],
+        "oh-my-pi" => ["omp"],
+        _ => []
+    };
 
     private SeatTakeoverStatus InspectClaude(AppSeat seat, string expectedProxy)
     {

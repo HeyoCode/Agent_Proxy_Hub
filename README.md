@@ -183,6 +183,8 @@ flowchart LR
 | **ChatGPT / Codex** | `127.0.0.1:17892` | HTTP / SOCKS5 / SOCKS4 | 生成专属隔离启动脚本 + 一键拉起已注入代理环境的独立终端 | 一键清理托管脚本，零改动系统环境变量 |
 | **Antigravity** *(IDE / Agent)* | `127.0.0.1:17893` | HTTP / SOCKS5 / SOCKS4 | 兼容自愈汉化启动器与独立启动脚本，内置 **150ms 端口探活守卫** | 网关关闭时自动跳过代理直连；一键剥离托管块还原 |
 | **Cursor** *(AI 代码编辑器)* | `127.0.0.1:17894` | HTTP / SOCKS5 / SOCKS4 | 安全解析带注释的 `User/settings.json`，热写入 `http.proxy` | 保留字体/插件等全部用户配置，一键恢复原值 |
+| **Claude Desktop** *(桌面路由)* | `127.0.0.1:17895` | HTTP / SOCKS5 / SOCKS4 | 自动探测 `Claude.exe` / `Claude.app` 注入 `--proxy-server` 与代理环境变量 | 生成专属桌面路由启动器，一键清理还原 |
+| **10 款扩展 CLI / Agent** *(Gemini CLI · Grok Build · OpenCode · OpenClaw · Hermes · Pi · MiniMax Code · Kimi Code · DeepSeek Harness · Oh My Pi)* | `127.0.0.1:17896 ~ 17905` | HTTP / SOCKS5 / SOCKS4 | 自动按应用生成隔离启动脚本与预注入代理环境的独立终端，支持实时进程检测与总控翻页 | 零改动系统全局代理，一键清除托管启动脚本 |
 
 > [!TIP]
 > **接管后何时生效？**
@@ -197,8 +199,8 @@ flowchart LR
 ### 方式一：直接下载安装程序（推荐）
 
 前往 [**GitHub Releases**](https://github.com/HeyoCode/Agent_Proxy_Hub/releases) 下载对应平台最新安装包：
-- **Windows x64**：`AgentProxyHub-Setup-v0.4.2-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
-- **macOS**：`AgentProxyHub-v0.4.2-macos-arm64.dmg`
+- **Windows x64**：`AgentProxyHub-Setup-v0.4.3-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
+- **macOS**：`AgentProxyHub-v0.4.3-macos-arm64.dmg`
 
 ### 方式二：3 步完成首次配置
 
@@ -257,7 +259,7 @@ Agent_Proxy_Hub/
 pnpm --dir web install
 pnpm --dir web build
 
-# 2. 运行全套 xUnit 单元测试（14 项全绿）
+# 2. 运行全套 xUnit 单元测试（16 项全绿）
 dotnet test AgentProxyHub.sln -c Release
 
 # 3. 启动 Windows 无边框托盘客户端
@@ -272,16 +274,16 @@ dotnet run --project src/AgentProxyHub.Host/AgentProxyHub.Host.csproj -c Release
 
 ```powershell
 # Windows 轻量安装程序（需安装 Inno Setup 6）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.2
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.3
 
 # Windows 离线独立版（内置完整 .NET 10 运行时）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.2 -SelfContained
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.3 -SelfContained
 ```
 
 ```bash
 # macOS Apple Silicon / Intel DMG 镜像
 chmod +x installer/macos/build-dmg.sh
-./installer/macos/build-dmg.sh osx-arm64 0.4.2
+./installer/macos/build-dmg.sh osx-arm64 0.4.3
 ```
 
 </details>

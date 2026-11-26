@@ -245,6 +245,140 @@ export const SeatBrandIcon: React.FC<{ seatId: string; size?: number; className?
     );
   }
 
+  if (seatId === 'claude-desktop') {
+    // Claude Desktop（星芒标 + 右下角桌面显示器角标）
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <path
+          d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z"
+          fill="#D97757"
+          transform="translate(-1,-1) scale(0.9)"
+        />
+        <rect x="13" y="14" width="10" height="7" rx="1.5" fill="var(--bg-card)" stroke="currentColor" strokeWidth="1.5" />
+        <path d="M16 22.8h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'gemini-cli') {
+    // Google Gemini 官方四色星芒标
+    const gId = `gem-g-${uid}`;
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <defs>
+          <linearGradient id={gId} x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stopColor="#4285F4" />
+            <stop offset="45%" stopColor="#9B72CB" />
+            <stop offset="78%" stopColor="#D96570" />
+            <stop offset="100%" stopColor="#34A853" />
+          </linearGradient>
+        </defs>
+        <path d="M12 1.5C12 7.3 7.3 12 1.5 12 7.3 12 12 16.7 12 22.5 12 16.7 16.7 12 22.5 12 16.7 12 12 7.3 12 1.5Z" fill={`url(#${gId})`} />
+      </svg>
+    );
+  }
+
+  if (seatId === 'grok-build') {
+    // xAI Grok 斜杠星环标
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <circle cx="12" cy="12" r="7.5" stroke="currentColor" strokeWidth="2.1" />
+        <path d="M5.2 19.2L18.8 4.8" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'opencode') {
+    // OpenCode 极简双层矩形终端标
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <rect x="4" y="3" width="16" height="18" rx="3" fill="currentColor" fillOpacity="0.16" stroke="currentColor" strokeWidth="1.8" />
+        <rect x="8" y="10.5" width="8" height="7" rx="1.2" fill="currentColor" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'openclaw') {
+    // OpenClaw 红色小蟹/智能体标
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <circle cx="12" cy="12.5" r="7" fill="#E13B3B" />
+        <path d="M7.5 6.5L5.5 3.5M16.5 6.5L18.5 3.5M5 12.5H2.5M21.5 12.5H19M9 19l-1 2.2M15 19l1 2.2" stroke="#E13B3B" strokeWidth="2" strokeLinecap="round" />
+        <circle cx="9.6" cy="11.5" r="1.15" fill="#FFFFFF" />
+        <circle cx="14.4" cy="11.5" r="1.15" fill="#FFFFFF" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'hermes') {
+    // Hermes 翼盔复古徽章标
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <rect x="3" y="3" width="18" height="18" rx="4" fill="currentColor" fillOpacity="0.12" stroke="currentColor" strokeWidth="1.7" />
+        <path d="M8 17V7.5M16 17V7.5M8 12h8M6.5 7.5h11" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'pi') {
+    // Pi 彩色几何像素标
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <rect x="4" y="5" width="7" height="5" rx="1.2" fill="#F48466" />
+        <rect x="11" y="5" width="5" height="5" rx="1.2" fill="#4BA3E3" />
+        <rect x="4" y="10" width="5" height="9" rx="1.2" fill="#4BA3E3" />
+        <rect x="14" y="12" width="6" height="7" rx="1.2" fill="#F2B84B" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'minimax-code') {
+    // MiniMax 粉红声波韵律标
+    const mId = `mm-g-${uid}`;
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <defs>
+          <linearGradient id={mId} x1="2" y1="12" x2="22" y2="12" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stopColor="#EC4899" />
+            <stop offset="50%" stopColor="#F43F5E" />
+            <stop offset="100%" stopColor="#F97316" />
+          </linearGradient>
+        </defs>
+        <path d="M3 13.5v-3M6.6 16.5v-9M10.2 19V5M13.8 18V6M17.4 16v-8M21 13.5v-3" stroke={`url(#${mId})`} strokeWidth="2.2" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'kimi-code') {
+    // Moonshot Kimi 亮蓝 K + 星标
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <path d="M5.5 4.5v15M5.5 12.2l9.2-7.7M9.6 11.4l6.2 8.1" stroke="#0EA5E9" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx="19" cy="6.2" r="2.1" fill="#38BDF8" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'deepseek-harness') {
+    // DeepSeek 蓝色鲸鱼标
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <path d="M4.2 14.2c0-4.2 3.3-7.4 7.7-7.4 3.4 0 6.1 1.9 7.2 4.7 1.3-.3 2.3-1.2 2.7-2.4.4 2.7-.6 5.4-2.8 6.9-1.8 1.3-4.3 2-7.1 2-4.6 0-7.7-1.5-7.7-3.8Z" fill="#4D6BFE" />
+        <circle cx="9.6" cy="12" r="1.15" fill="#FFFFFF" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'oh-my-pi') {
+    // Oh My Pi 紫底 π 标
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <rect x="2.5" y="2.5" width="19" height="19" rx="5" fill="#2E1065" stroke="#A855F7" strokeWidth="1.5" />
+        <path d="M7.2 9h9.6M10 9v7.2M14.4 9v5.4c0 1 .6 1.8 1.6 1.8" stroke="#C084FC" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+
   // Cursor 官方 3D 等距立方体光标标（深浅主题自适应单色）
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" className={className} style={{ flexShrink: 0 }} aria-hidden="true">

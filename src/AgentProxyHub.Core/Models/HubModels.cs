@@ -213,7 +213,7 @@ public sealed class SidecarEngineStatus
 public static class ProjectMetadata
 {
     public const string Name = "Agent Proxy Hub";
-    public const string Version = "0.4.2";
+    public const string Version = "0.4.3";
     public const string RepoOwner = "HeyoCode";
     public const string RepoName = "Agent_Proxy_Hub";
     public const string RepoSlug = "HeyoCode/Agent_Proxy_Hub";

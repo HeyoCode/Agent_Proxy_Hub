@@ -2,7 +2,7 @@
 ; 遵循 Cult UI 黑曜石视觉语言与用户级零打扰安装规范
 
 #ifndef AppVersion
-  #define AppVersion "0.4.2"
+  #define AppVersion "0.4.3"
 #endif
 #ifndef PublishDir
   #define PublishDir "..\..\dist\publish-win-x64"

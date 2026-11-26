@@ -62,10 +62,30 @@ public sealed class HubStateStore
 
     private static HubStateDocument EnsureDefaults(HubStateDocument doc)
     {
+        var defaults = CreateDefaultSeats();
         if (doc.Seats.Count == 0)
         {
-            doc.Seats = CreateDefaultSeats();
+            doc.Seats = defaults;
+            return doc;
         }
+
+        // 无损增量补齐新增支持的内置 AI 应用席位（保留用户所有已有席位配置不动）
+        var existingIds = doc.Seats.Select(s => s.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var usedPorts = doc.Seats.Select(s => s.LocalPort).ToHashSet();
+        string defaultNodeId = doc.Nodes.FirstOrDefault()?.Id ?? "direct-phy";
+
+        foreach (var def in defaults)
+        {
+            if (existingIds.Contains(def.Id)) continue;
+            int port = def.LocalPort;
+            while (usedPorts.Contains(port)) port++;
+            def.LocalPort = port;
+            def.BoundNodeId = defaultNodeId;
+            def.Enabled = false;
+            usedPorts.Add(port);
+            doc.Seats.Add(def);
+        }
+
         return doc;
     }
 
@@ -167,6 +187,182 @@ public sealed class HubStateStore
             CaptureMode = "专属混合端口 :17894",
             LaunchCommandWin = "Cursor --proxy-server=socks5://127.0.0.1:17894",
             LaunchCommandMac = "open -a Cursor --args --proxy-server=socks5://127.0.0.1:17894"
+        },
+        new AppSeat
+        {
+            Id = "claude-desktop",
+            Glyph = "CD",
+            Name = "Claude Desktop",
+            Subtitle = "Anthropic Claude 桌面客户端（路由）",
+            ProcessWin = "Claude.exe",
+            ProcessMac = "Claude.app",
+            LocalPort = 17895,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17895 + 桌面路由",
+            LaunchCommandWin = "Claude --proxy-server=http://127.0.0.1:17895",
+            LaunchCommandMac = "open -a Claude --args --proxy-server=http://127.0.0.1:17895"
+        },
+        new AppSeat
+        {
+            Id = "gemini-cli",
+            Glyph = "GM",
+            Name = "Gemini CLI",
+            Subtitle = "Google Gemini 终端编码代理",
+            ProcessWin = "gemini.exe / node.exe",
+            ProcessMac = "gemini",
+            LocalPort = 17896,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17896 + CLI 注入",
+            LaunchCommandWin = "gemini",
+            LaunchCommandMac = "gemini"
+        },
+        new AppSeat
+        {
+            Id = "grok-build",
+            Glyph = "GK",
+            Name = "Grok Build",
+            Subtitle = "xAI Grok Build 编码代理",
+            ProcessWin = "grok.exe / node.exe",
+            ProcessMac = "grok",
+            LocalPort = 17897,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17897 + CLI 注入",
+            LaunchCommandWin = "grok",
+            LaunchCommandMac = "grok"
+        },
+        new AppSeat
+        {
+            Id = "opencode",
+            Glyph = "OC",
+            Name = "OpenCode",
+            Subtitle = "OpenCode 开源终端编码助手",
+            ProcessWin = "opencode.exe",
+            ProcessMac = "opencode",
+            LocalPort = 17898,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17898 + CLI 注入",
+            LaunchCommandWin = "opencode",
+            LaunchCommandMac = "opencode"
+        },
+        new AppSeat
+        {
+            Id = "openclaw",
+            Glyph = "CW",
+            Name = "OpenClaw",
+            Subtitle = "OpenClaw 自主智能体网关",
+            ProcessWin = "openclaw.exe / node.exe",
+            ProcessMac = "openclaw",
+            LocalPort = 17899,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17899 + CLI 注入",
+            LaunchCommandWin = "openclaw",
+            LaunchCommandMac = "openclaw"
+        },
+        new AppSeat
+        {
+            Id = "hermes",
+            Glyph = "HM",
+            Name = "Hermes",
+            Subtitle = "Hermes AI 代理与推理终端",
+            ProcessWin = "hermes.exe",
+            ProcessMac = "hermes",
+            LocalPort = 17900,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17900 + CLI 注入",
+            LaunchCommandWin = "hermes",
+            LaunchCommandMac = "hermes"
+        },
+        new AppSeat
+        {
+            Id = "pi",
+            Glyph = "PI",
+            Name = "Pi",
+            Subtitle = "Pi 轻量化终端编码代理",
+            ProcessWin = "pi.exe / node.exe",
+            ProcessMac = "pi",
+            LocalPort = 17901,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17901 + CLI 注入",
+            LaunchCommandWin = "pi",
+            LaunchCommandMac = "pi"
+        },
+        new AppSeat
+        {
+            Id = "minimax-code",
+            Glyph = "MM",
+            Name = "MiniMax Code",
+            Subtitle = "MiniMax 代码助手 CLI",
+            ProcessWin = "minimax.exe / node.exe",
+            ProcessMac = "minimax",
+            LocalPort = 17902,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17902 + CLI 注入",
+            LaunchCommandWin = "minimax",
+            LaunchCommandMac = "minimax"
+        },
+        new AppSeat
+        {
+            Id = "kimi-code",
+            Glyph = "KM",
+            Name = "Kimi Code",
+            Subtitle = "Moonshot Kimi Code CLI",
+            ProcessWin = "kimi.exe / node.exe",
+            ProcessMac = "kimi",
+            LocalPort = 17903,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17903 + CLI 注入",
+            LaunchCommandWin = "kimi",
+            LaunchCommandMac = "kimi"
+        },
+        new AppSeat
+        {
+            Id = "deepseek-harness",
+            Glyph = "DS",
+            Name = "DeepSeek Harness",
+            Subtitle = "DeepSeek Harness Agent CLI",
+            ProcessWin = "deepseek.exe / node.exe",
+            ProcessMac = "deepseek",
+            LocalPort = 17904,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17904 + CLI 注入",
+            LaunchCommandWin = "deepseek",
+            LaunchCommandMac = "deepseek"
+        },
+        new AppSeat
+        {
+            Id = "oh-my-pi",
+            Glyph = "OP",
+            Name = "Oh My Pi",
+            Subtitle = "Oh My Pi 增强代理框架",
+            ProcessWin = "omp.exe / node.exe",
+            ProcessMac = "omp",
+            LocalPort = 17905,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17905 + CLI 注入",
+            LaunchCommandWin = "omp",
+            LaunchCommandMac = "omp"
         }
     ];
 }

@@ -187,6 +187,7 @@ export interface UsageLogEntry {
   cacheWriteTokens: number;
   totalTokens: number;
   durationSeconds: number;
+  firstTokenSeconds?: number | null;
   tokensPerSecond?: number | null;
   costUsd?: number | null;
   isPriced: boolean;

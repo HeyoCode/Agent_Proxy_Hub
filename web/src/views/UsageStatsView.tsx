@@ -320,13 +320,14 @@ export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
                     <th className="num-r">输出</th>
                     <th className="num-r">缓存命中</th>
                     <th className="num-r">流速</th>
+                    <th className="num-r">首字(估)</th>
                     <th className="num-r">耗时</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(data?.logs ?? []).length === 0 ? (
                     <tr>
-                      <td colSpan={10} style={{ textAlign: 'center', padding: 30, color: 'var(--text-muted)' }}>
+                      <td colSpan={11} style={{ textAlign: 'center', padding: 30, color: 'var(--text-muted)' }}>
                         当前时间范围内暂无会话记录（可切换「全部历史」或点击右上角「按需同步」）
                       </td>
                     </tr>
@@ -367,6 +368,9 @@ export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
                         <td className="num-r num nowrap">{formatCompactTokens(row.cacheReadTokens)}</td>
                         <td className="num-r num nowrap" style={{ color: row.tokensPerSecond ? 'var(--accent-emerald-text)' : 'var(--text-muted)' }}>
                           {row.tokensPerSecond ? `~${row.tokensPerSecond} tok/s` : '—'}
+                        </td>
+                        <td className="num-r num nowrap" style={{ color: row.firstTokenSeconds ? 'var(--text-secondary)' : 'var(--text-muted)' }}>
+                          {row.firstTokenSeconds ? `~${row.firstTokenSeconds}s` : '—'}
                         </td>
                         <td className="num-r num nowrap" style={{ color: 'var(--text-secondary)' }}>
                           {row.durationSeconds > 0 ? `~${row.durationSeconds}s` : '—'}

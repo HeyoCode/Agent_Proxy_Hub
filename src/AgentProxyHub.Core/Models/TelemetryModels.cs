@@ -30,6 +30,7 @@ public sealed class UsageLogEntry
     public long CacheWriteTokens { get; set; }
     public long TotalTokens => EffectiveInputTokens + OutputTokens + CacheReadTokens + CacheWriteTokens;
     public double DurationSeconds { get; set; }
+    public double? FirstTokenSeconds { get; set; }
     public double? TokensPerSecond { get; set; }
     public double? CostUsd { get; set; }
     public bool IsPriced { get; set; }
