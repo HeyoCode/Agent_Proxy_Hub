@@ -80,9 +80,12 @@ export const NodesView: React.FC<Props> = ({
   const [mWgMtu, setMWgMtu] = useState('1280');
 
   // 批量导入与机场订阅拉取
+  const [importMode, setImportMode] = useState<'subscription' | 'text'>('subscription');
   const [subUrl, setSubUrl] = useState('');
   const [subProxy, setSubProxy] = useState('');
+  const [subDetectedFormat, setSubDetectedFormat] = useState<string | null>(null);
   const [fetchingSub, setFetchingSub] = useState(false);
+  const [previewSearch, setPreviewSearch] = useState('');
   const [batchText, setBatchText] = useState(
     'socks5://user:pass@38.154.227.14:1080#US-静态住宅\ntrojan://your-pass@jp.example.com:443?sni=jp.example.com#JP-Trojan原生\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@us.example.com:8388#US-SS原生\nvless://uuid@edge.example.com:443?security=reality&sni=www.microsoft.com&pbk=pubkey&sid=01&fp=chrome#Reality-singbox\nhy2://your-pass@hk.example.com:443?sni=hk.example.com#Hy2-singbox'
   );
@@ -199,6 +202,7 @@ export const NodesView: React.FC<Props> = ({
       const res = await api.fetchSubscription(subUrl.trim(), batchGroup || '订阅导入池', subProxy);
       setBatchText(res.rawText);
       setPreview(res.preview);
+      setSubDetectedFormat(res.detectedFormat);
       onToast(`订阅拉取成功（${res.detectedFormat}）：识别 ${res.preview.validCount} 条新节点，重复 ${res.preview.duplicateCount} 条`);
     } catch (err) {
       onToast(err instanceof Error ? err.message : '拉取订阅失败');
@@ -206,6 +210,32 @@ export const NodesView: React.FC<Props> = ({
       setFetchingSub(false);
     }
   }
+
+  function formatCompactCred(node: ProxyNode): string {
+    if (node.protocol === 'SHADOWSOCKS') return node.method ?? 'AEAD';
+    if (node.protocol === 'TROJAN') return node.sni ? `SNI ${node.sni}` : 'TLS 1.3';
+    if (node.protocol === 'WIREGUARD') return 'WireGuard 密钥';
+    if (node.username) {
+      return node.username.length > 14 ? `${node.username.slice(0, 8)}…` : node.username;
+    }
+    return node.password ? '密钥认证' : '无认证';
+  }
+
+  const previewItems = (preview?.items ?? []).filter(it => {
+    const kw = previewSearch.trim().toLowerCase();
+    if (!kw) return true;
+    const text = `${it.node?.name ?? ''} ${it.node?.host ?? ''} ${it.node?.protocol ?? ''} ${it.rawLine}`.toLowerCase();
+    return text.includes(kw);
+  });
+
+  const protocolBreakdown = Object.entries(
+    (preview?.items ?? []).reduce<Record<string, number>>((acc, it) => {
+      if (it.valid && it.node) {
+        acc[it.node.protocol] = (acc[it.node.protocol] ?? 0) + 1;
+      }
+      return acc;
+    }, {})
+  );
 
   async function handleImportBatch() {
     const res = await api.importBatch(batchText, batchProto, batchGroup);
@@ -591,115 +621,253 @@ export const NodesView: React.FC<Props> = ({
         </div>
       )}
 
-      {/* 批量导入与机场订阅拉取弹窗 */}
+      {/* 批量导入与机场订阅拉取弹窗（重构优雅双模式工作台） */}
       {showBatch && (
         <div className="modal-backdrop" onClick={onCloseModals}>
-          <div className="modal-surface" onClick={e => e.stopPropagation()}>
-            <div style={{ padding: '18px 22px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <div style={{ fontSize: 15, fontWeight: 700 }}>批量导入与机场订阅拉取</div>
+          <div className="modal-surface wide-import" onClick={e => e.stopPropagation()}>
+            {/* 头部：标题 + 模式切换 + 关闭 */}
+            <div style={{ padding: '16px 22px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 15.5, fontWeight: 700, color: 'var(--text-primary)' }}>导入独立代理线路</div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                  支持 <strong>Clash / Base64 机场订阅链接</strong>，以及 <span className="mono">socks5 / http(s) / trojan / ss / vless / hy2 / tuic / wg</span> 文本
+                  自动识别 Clash YAML / Base64 机场订阅与全协议节点链接，导入前实时去重校验
                 </div>
               </div>
-              <button type="button" className="btn-pill btn-soft btn-sm" onClick={onCloseModals}>关闭</button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <SegmentedTabs<'subscription' | 'text'>
+                  value={importMode}
+                  onChange={setImportMode}
+                  items={[
+                    { value: 'subscription', label: '订阅链接拉取' },
+                    { value: 'text', label: '文本 / 链接粘贴' }
+                  ]}
+                />
+                <button type="button" className="btn-pill btn-soft btn-sm" onClick={onCloseModals}>关闭</button>
+              </div>
             </div>
             <div className="soft-divider" />
-            <div style={{ padding: '14px 22px 0' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 180px auto', gap: 8, alignItems: 'center' }}>
-                <input
-                  className="clean-input mono"
-                  placeholder="粘贴机场订阅链接（如 https://.../config?token=...，自动识别 Clash YAML / Base64）"
-                  value={subUrl}
-                  onChange={e => setSubUrl(e.target.value)}
-                />
-                <input
-                  className="clean-input mono"
-                  placeholder="可选拉取代理 (如 :7897)"
-                  title="若订阅域名被拦截，可填写本机代理如 http://127.0.0.1:7897，留空则直连"
-                  value={subProxy}
-                  onChange={e => setSubProxy(e.target.value)}
-                />
-                <button
-                  type="button"
-                  className="btn-pill btn-indigo btn-sm"
-                  disabled={!subUrl.trim() || fetchingSub}
-                  onClick={handleFetchSubscription}
-                >
-                  <RefreshSpinIcon size={12} spinning={fetchingSub} />
-                  <span>{fetchingSub ? '拉取中' : '拉取订阅'}</span>
-                </button>
-              </div>
-            </div>
-            <div style={{ padding: '14px 22px 18px', display: 'grid', gridTemplateColumns: '1.05fr 1fr', gap: 16 }}>
-              <div>
-                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>代理文本 / 订阅内容（实时语法解析）</div>
-                <textarea
-                  className="clean-textarea mono"
-                  rows={9}
-                  style={{ resize: 'none', lineHeight: 1.55 }}
-                  value={batchText}
-                  onChange={e => setBatchText(e.target.value)}
-                />
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
-                  <div>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>无前缀行默认协议</div>
-                    <CustomSelect
-                      variant="light"
-                      value={batchProto}
-                      options={L1_DEFAULT_PROTOCOL_OPTIONS}
-                      onChange={v => setBatchProto(v as ProxyProtocol)}
-                      ariaLabel="选择无前缀行默认协议"
-                    />
-                  </div>
-                  <div>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>统一分组标签</div>
-                    <input className="clean-input" value={batchGroup} onChange={e => setBatchGroup(e.target.value)} />
-                  </div>
-                </div>
-              </div>
 
-              <div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>实时解析与去重校验</span>
-                  <span className="num" style={{ fontSize: 11.5, color: 'var(--accent-indigo)', fontWeight: 600 }}>
-                    有效 {preview?.validCount ?? 0} · 重复 {preview?.duplicateCount ?? 0} · 异常 {preview?.errorCount ?? 0}
-                  </span>
-                </div>
-                <div style={{ borderRadius: 12, background: 'var(--bg-subtle)', maxHeight: 268, overflowY: 'auto' }}>
-                  {(preview?.items ?? []).map(it => (
-                    <div
-                      key={it.lineNumber}
-                      style={{
-                        padding: '10px 12px',
-                        borderBottom: '1px solid var(--divider)',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        gap: 8
-                      }}
-                    >
-                      <div style={{ minWidth: 0 }}>
-                        <div style={{ fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {it.valid && it.node ? it.node.name : it.rawLine}
+            {/* 主体双栏工作区 */}
+            <div className="import-modal-body">
+              {/* 左栏：订阅拉取 或 文本粘贴 */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
+                {importMode === 'subscription' ? (
+                  <>
+                    <div className="import-sub-card">
+                      <div>
+                        <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                          机场订阅链接 URL
                         </div>
-                        <div className="num" style={{ fontSize: 11, color: it.valid ? 'var(--text-secondary)' : 'var(--accent-coral-text)' }}>
-                          {it.valid && it.node ? `${it.node.host}:${it.node.port} · ${it.node.username ?? '无认证'}` : it.errorReason}
+                        <input
+                          className="clean-input mono"
+                          placeholder="https://example.com/config?token=..."
+                          value={subUrl}
+                          onChange={e => setSubUrl(e.target.value)}
+                        />
+                      </div>
+
+                      <div className="import-meta-grid">
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 5 }}>统一分组标签</div>
+                          <input
+                            className="clean-input"
+                            placeholder="例如：机场高速中转"
+                            value={batchGroup}
+                            onChange={e => setBatchGroup(e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 5 }}>拉取代理（可选）</div>
+                          <input
+                            className="clean-input mono"
+                            placeholder="留空直连，或 :7897"
+                            title="若订阅域名被拦截，可填写本机代理如 http://127.0.0.1:7897"
+                            value={subProxy}
+                            onChange={e => setSubProxy(e.target.value)}
+                          />
                         </div>
                       </div>
-                      <span className={`pill-tag ${it.valid ? 'tag-emerald' : 'tag-coral'} mono`}>
-                        {it.valid && it.node ? `${it.node.protocol}` : (it.isDuplicate ? '重复' : '错误')}
-                      </span>
+
+                      <button
+                        type="button"
+                        className="btn-pill btn-indigo"
+                        style={{ width: '100%', justifyContent: 'center', height: 36 }}
+                        disabled={!subUrl.trim() || fetchingSub}
+                        onClick={handleFetchSubscription}
+                      >
+                        <RefreshSpinIcon size={13} spinning={fetchingSub} />
+                        <span>{fetchingSub ? '正在拉取并解析订阅...' : '拉取并解析订阅'}</span>
+                      </button>
                     </div>
-                  ))}
+
+                    {/* 解析摘要卡片（取代丑陋的 Base64 原始乱码展示） */}
+                    <div className="import-sub-card" style={{ flex: 1, justifyContent: 'space-between' }}>
+                      <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                            {subDetectedFormat ? `已识别格式：${subDetectedFormat}` : '支持格式与智能识别'}
+                          </span>
+                          {subDetectedFormat && (
+                            <span className="pill-tag tag-emerald">解析就绪</span>
+                          )}
+                        </div>
+
+                        {protocolBreakdown.length > 0 ? (
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                            {protocolBreakdown.map(([proto, count]) => {
+                              const isL2 = ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(proto);
+                              return (
+                                <span key={proto} className={`pill-tag ${isL2 ? 'tag-indigo' : 'tag-emerald'} mono`}>
+                                  {proto} · {count}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: 11.5, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                            • 自动兼容 <strong>Clash / Mihomo YAML</strong> 与 <strong>Base64 / v2rayN</strong> 订阅<br />
+                            • L1 原生支持 SOCKS5 / HTTP(S) / Trojan / Shadowsocks<br />
+                            • L2 按需支持 VLESS / Hysteria2 / TUIC / WireGuard
+                          </div>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 10, borderTop: '1px solid var(--divider)' }}>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                          需要手动微调或查看原文？
+                        </span>
+                        <button
+                          type="button"
+                          className="btn-pill btn-soft btn-sm"
+                          onClick={() => setImportMode('text')}
+                        >
+                          查看原始文本 →
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                        粘贴节点链接 / Base64 / Clash YAML
+                      </span>
+                      <button
+                        type="button"
+                        style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', fontSize: 11.5, cursor: 'pointer' }}
+                        onClick={() => { setBatchText(''); setSubDetectedFormat(null); }}
+                      >
+                        清空
+                      </button>
+                    </div>
+                    <textarea
+                      className="clean-textarea mono"
+                      rows={10}
+                      style={{ resize: 'none', lineHeight: 1.55, wordBreak: 'break-all', height: 224 }}
+                      placeholder="每行一条链接，支持 socks5://, http(s)://, trojan://, ss://, vless://, hy2://, tuic://, wg:// 或整段 Base64 / Clash YAML"
+                      value={batchText}
+                      onChange={e => setBatchText(e.target.value)}
+                    />
+                    <div className="import-meta-grid">
+                      <div>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 5 }}>无前缀行默认协议</div>
+                        <CustomSelect
+                          variant="light"
+                          value={batchProto}
+                          options={L1_DEFAULT_PROTOCOL_OPTIONS}
+                          onChange={v => setBatchProto(v as ProxyProtocol)}
+                          ariaLabel="选择无前缀行默认协议"
+                        />
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 5 }}>统一分组标签</div>
+                        <input
+                          className="clean-input"
+                          value={batchGroup}
+                          onChange={e => setBatchGroup(e.target.value)}
+                        />
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* 右栏：实时解析与去重预览列表 */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, minWidth: 0 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>实时解析与去重预览</span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <span className="pill-tag tag-emerald num">有效 {preview?.validCount ?? 0}</span>
+                    {(preview?.duplicateCount ?? 0) > 0 && (
+                      <span className="pill-tag tag-neutral num">重复 {preview?.duplicateCount}</span>
+                    )}
+                    {(preview?.errorCount ?? 0) > 0 && (
+                      <span className="pill-tag tag-coral num">异常 {preview?.errorCount}</span>
+                    )}
+                  </div>
+                </div>
+
+                <input
+                  className="clean-input"
+                  style={{ height: 32, fontSize: 12 }}
+                  placeholder="按地区、名称或协议筛选预览节点..."
+                  value={previewSearch}
+                  onChange={e => setPreviewSearch(e.target.value)}
+                />
+
+                <div className="import-preview-shell">
+                  {previewItems.length === 0 ? (
+                    <div style={{ margin: 'auto', textAlign: 'center', padding: 28, color: 'var(--text-muted)', fontSize: 12 }}>
+                      {previewSearch.trim() ? '没有匹配筛选条件的节点' : '粘贴订阅链接或节点文本后将在此实时预览'}
+                    </div>
+                  ) : (
+                    previewItems.map(it => {
+                      const isL2 = it.node && ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(it.node.protocol);
+                      const tagClass = it.valid
+                        ? (isL2 ? 'tag-indigo' : 'tag-emerald')
+                        : (it.isDuplicate ? 'tag-neutral' : 'tag-coral');
+                      return (
+                        <div key={it.lineNumber} className="import-preview-row">
+                          <span className="import-row-idx num">{String(it.lineNumber).padStart(2, '0')}</span>
+                          <div className="import-row-text">
+                            <div
+                              className="import-row-title"
+                              title={it.valid && it.node ? it.node.name : it.rawLine}
+                            >
+                              {it.valid && it.node ? it.node.name : it.rawLine}
+                            </div>
+                            <div
+                              className="import-row-sub num"
+                              style={{ color: it.valid ? 'var(--text-secondary)' : (it.isDuplicate ? 'var(--text-muted)' : 'var(--accent-coral-text)') }}
+                              title={it.valid && it.node ? `${it.node.host}:${it.node.port}` : (it.errorReason ?? '')}
+                            >
+                              {it.valid && it.node
+                                ? `${it.node.host}:${it.node.port} · ${formatCompactCred(it.node)}`
+                                : it.errorReason}
+                            </div>
+                          </div>
+                          <span className={`pill-tag ${tagClass} mono`} style={{ flexShrink: 0 }}>
+                            {it.valid && it.node ? it.node.protocol : (it.isDuplicate ? '重复' : '错误')}
+                          </span>
+                        </div>
+                      );
+                    })
+                  )}
                 </div>
               </div>
             </div>
-            <div className="modal-footer-bar">
-              <button type="button" className="btn-pill btn-soft" onClick={onCloseModals}>取消</button>
-              <button type="button" className="btn-pill btn-indigo" disabled={!preview || preview.validCount === 0} onClick={handleImportBatch}>
-                确认导入 ({preview?.validCount ?? 0} 条有效)
-              </button>
+
+            {/* 底部汇总与操作栏 */}
+            <div className="modal-footer-bar" style={{ justifyContent: 'space-between' }}>
+              <span className="num" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                将导入 <strong style={{ color: 'var(--text-primary)' }}>{preview?.validCount ?? 0}</strong> 条有效线路至「{batchGroup || '批量导入池'}」
+              </span>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <button type="button" className="btn-pill btn-soft" onClick={onCloseModals}>取消</button>
+                <button type="button" className="btn-pill btn-indigo" disabled={!preview || preview.validCount === 0} onClick={handleImportBatch}>
+                  确认导入 ({preview?.validCount ?? 0} 条有效)
+                </button>
+              </div>
             </div>
           </div>
         </div>

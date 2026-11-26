@@ -77,8 +77,8 @@ export const App: React.FC = () => {
     }
   });
   const [maximized, setMaximized] = useState<boolean>(false);
-  const [showManual, setShowManual] = useState(false);
-  const [showBatch, setShowBatch] = useState(false);
+  const [showManual, setShowManual] = useState(query.get('manual') === '1');
+  const [showBatch, setShowBatch] = useState(query.get('batch') === '1');
   const [showRepoModal, setShowRepoModal] = useState(query.get('about') === '1');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 

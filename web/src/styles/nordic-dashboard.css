@@ -1686,6 +1686,105 @@ html[data-theme="dark"] .nordic-slider {
 .modal-surface.narrow {
   max-width: 500px;
 }
+.modal-surface.wide-import {
+  max-width: 860px;
+  border: 1px solid var(--divider);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 44px);
+}
+.import-modal-body {
+  padding: 18px 22px;
+  display: grid;
+  grid-template-columns: minmax(0, 0.96fr) minmax(0, 1.14fr);
+  gap: 18px;
+  min-height: 0;
+  overflow-y: auto;
+}
+.import-sub-card {
+  background: var(--bg-subtle);
+  border: 1px solid var(--divider);
+  border-radius: 14px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.import-sub-card .clean-input {
+  background: var(--bg-card);
+  border: 1px solid var(--divider);
+}
+.import-sub-card .clean-input:focus {
+  border-color: var(--accent-indigo);
+}
+.import-sub-card .btn-soft {
+  background: var(--bg-card);
+  border: 1px solid var(--divider);
+}
+.import-meta-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+.import-meta-grid > * {
+  min-width: 0;
+}
+.import-preview-shell {
+  border-radius: 14px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--divider);
+  height: 316px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+.import-preview-row {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--divider);
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  transition: background 0.14s ease;
+}
+.import-preview-row:last-child {
+  border-bottom: none;
+}
+.import-preview-row:hover {
+  background: var(--bg-card-hover);
+}
+.import-row-idx {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.import-row-text {
+  min-width: 0;
+  overflow: hidden;
+}
+.import-row-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-row-sub {
+  font-size: 11px;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .modal-footer-bar {
   padding: 13px 20px;
   background: var(--bg-subtle);
