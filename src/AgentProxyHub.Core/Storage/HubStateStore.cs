@@ -79,7 +79,8 @@ public sealed class HubStateStore
             ForceRemoteDns = true,
             DirectPhysicalDohEnabled = true,
             DohServerIp = "223.5.5.5",
-            GlobalKillSwitch = true
+            GlobalKillSwitch = true,
+            EnableIpv6 = false
         },
         Nodes =
         [

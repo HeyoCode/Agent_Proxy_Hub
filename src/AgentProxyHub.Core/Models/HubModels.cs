@@ -76,6 +76,8 @@ public sealed class NetworkAdapterInfo
     public string Description { get; set; } = string.Empty;
     public int InterfaceIndex { get; set; }
     public string? IPv4Address { get; set; }
+    public int IPv6InterfaceIndex { get; set; }
+    public string? IPv6Address { get; set; }
     public string? GatewayAddress { get; set; }
     public string Status { get; set; } = "Down";
     public bool IsVirtualOrTunnel { get; set; }
@@ -96,6 +98,7 @@ public sealed class IsolationSettings
     public bool DirectPhysicalDohEnabled { get; set; } = true;
     public string DohServerIp { get; set; } = "223.5.5.5";
     public bool GlobalKillSwitch { get; set; } = true;
+    public bool EnableIpv6 { get; set; } = false;
 }
 
 /// <summary>
@@ -136,12 +139,44 @@ public sealed class BatchParseResult
 }
 
 /// <summary>
+/// 单个 AI 席位的应用配置/启动器接管状态
+/// </summary>
+public sealed class SeatTakeoverStatus
+{
+    public string SeatId { get; set; } = string.Empty;
+    public bool IsProcessRunning { get; set; }
+    public bool SupportsConfigTakeover { get; set; } = true;
+    public bool IsTakenOver { get; set; }
+    public string ModeSummary { get; set; } = string.Empty;
+    public string? TargetPath { get; set; }
+    public string? LaunchExecutable { get; set; }
+    public string StatusHint { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 经由本地席位监听端口的全链路实流验真结果
+/// </summary>
+public sealed class TunnelVerificationResult
+{
+    public bool Ok { get; set; }
+    public string SeatId { get; set; } = string.Empty;
+    public int LocalPort { get; set; }
+    public string ExitIp { get; set; } = "—";
+    public int? LatencyMs { get; set; }
+    public long BytesTx { get; set; }
+    public long BytesRx { get; set; }
+    public List<string> AiReachability { get; set; } = new();
+    public string Message { get; set; } = string.Empty;
+    public ProxyNode? Node { get; set; }
+}
+
+/// <summary>
 /// 项目仓库与版本单一元数据中心
 /// </summary>
 public static class ProjectMetadata
 {
     public const string Name = "Agent Proxy Hub";
-    public const string Version = "0.2.0";
+    public const string Version = "0.3.4";
     public const string RepoOwner = "HeyoCode";
     public const string RepoName = "Agent_Proxy_Hub";
     public const string RepoSlug = "HeyoCode/Agent_Proxy_Hub";

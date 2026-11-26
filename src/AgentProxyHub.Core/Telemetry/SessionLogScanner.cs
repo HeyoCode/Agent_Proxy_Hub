@@ -18,6 +18,8 @@ public sealed class SessionLogScanner
     private readonly string _claudeProjectsDir;
     private readonly string _codexSessionsDir;
     private readonly ConcurrentDictionary<string, CachedFileResult> _fileCache = new(StringComparer.OrdinalIgnoreCase);
+    private List<UsageLogEntry>? _cachedOrdered;
+    private int _lastFileCount = -1;
 
     public SessionLogScanner(string? userHomeOverride = null)
     {
@@ -32,48 +34,87 @@ public sealed class SessionLogScanner
 
     public (List<UsageLogEntry> Entries, SyncStatsResult SyncInfo) ScanIncremental()
     {
-        var sw = Stopwatch.StartNew();
-        var allEntries = new List<UsageLogEntry>();
-        int scannedFiles = 0;
+        var (entries, info, _) = ScanIncrementalWithChangeFlag();
+        return (entries, info);
+    }
 
-        // 1. 扫描 Antigravity 会话轨迹日志
+    /// <summary>
+    /// 高频增量扫描（支持 5 秒自动轮询）：文件未变化时零排序直接命中缓存，避免周期性 GC 抖动
+    /// </summary>
+    public (List<UsageLogEntry> Entries, SyncStatsResult SyncInfo, bool HasChanges) ScanIncrementalWithChangeFlag()
+    {
+        var sw = Stopwatch.StartNew();
+        var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var fileCandidates = new List<(string Path, Func<string, List<UsageLogEntry>> Parser)>();
+
         if (Directory.Exists(_antigravityBrainDir))
         {
             foreach (string file in SafeEnumerateFiles(_antigravityBrainDir, "transcript.jsonl"))
             {
-                scannedFiles++;
-                allEntries.AddRange(ParseWithCache(file, ParseAntigravityTranscript));
+                if (seenFiles.Add(file)) fileCandidates.Add((file, ParseAntigravityTranscript));
             }
         }
 
-        // 2. 扫描 Claude Code 本地项目会话日志
         if (Directory.Exists(_claudeProjectsDir))
         {
             foreach (string file in SafeEnumerateFiles(_claudeProjectsDir, "*.jsonl"))
             {
-                scannedFiles++;
-                allEntries.AddRange(ParseWithCache(file, ParseClaudeSession));
+                if (seenFiles.Add(file)) fileCandidates.Add((file, ParseClaudeSession));
             }
         }
 
-        // 3. 扫描 OpenAI Codex 会话日志
         if (Directory.Exists(_codexSessionsDir))
         {
             foreach (string file in SafeEnumerateFiles(_codexSessionsDir, "*.jsonl"))
             {
-                scannedFiles++;
-                allEntries.AddRange(ParseWithCache(file, ParseCodexSession));
+                if (seenFiles.Add(file)) fileCandidates.Add((file, ParseCodexSession));
             }
         }
 
+        int scannedFiles = fileCandidates.Count;
+        int reparsedCount = 0;
+        var allEntries = new List<UsageLogEntry>();
+
+        foreach (var (file, parser) in fileCandidates)
+        {
+            allEntries.AddRange(ParseWithCache(file, parser, ref reparsedCount));
+        }
+
+        // 清理已从磁盘移除文件的旧缓存项
+        bool removedAny = false;
+        foreach (string cachedKey in _fileCache.Keys)
+        {
+            if (!seenFiles.Contains(cachedKey))
+            {
+                if (_fileCache.TryRemove(cachedKey, out _)) removedAny = true;
+            }
+        }
+
+        bool changed = _cachedOrdered == null
+            || reparsedCount > 0
+            || removedAny
+            || scannedFiles != _lastFileCount;
+
+        List<UsageLogEntry> ordered;
+        if (!changed && _cachedOrdered != null)
+        {
+            ordered = _cachedOrdered;
+        }
+        else
+        {
+            ordered = allEntries
+                .OrderByDescending(e => e.Timestamp)
+                .ToList();
+            _cachedOrdered = ordered;
+            _lastFileCount = scannedFiles;
+        }
+
         sw.Stop();
-        if (scannedFiles > 0)
+        // 仅在首次冷启动等大批量重新解析文件时触发轻量优化回收，5 秒空闲轮询零 GC
+        if (reparsedCount >= 8)
         {
             GC.Collect(2, GCCollectionMode.Optimized, blocking: false);
         }
-        var ordered = allEntries
-            .OrderByDescending(e => e.Timestamp)
-            .ToList();
 
         var info = new SyncStatsResult
         {
@@ -83,10 +124,13 @@ public sealed class SessionLogScanner
             ElapsedMs = sw.ElapsedMilliseconds
         };
 
-        return (ordered, info);
+        return (ordered, info, changed);
     }
 
-    private List<UsageLogEntry> ParseWithCache(string filePath, Func<string, List<UsageLogEntry>> parser)
+    private List<UsageLogEntry> ParseWithCache(
+        string filePath,
+        Func<string, List<UsageLogEntry>> parser,
+        ref int reparsedCount)
     {
         try
         {
@@ -102,6 +146,7 @@ public sealed class SessionLogScanner
 
             var parsed = parser(filePath);
             _fileCache[filePath] = new CachedFileResult(fi.LastWriteTimeUtc, fi.Length, parsed);
+            reparsedCount++;
             return parsed;
         }
         catch

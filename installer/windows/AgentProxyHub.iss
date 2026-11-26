@@ -2,7 +2,7 @@
 ; 遵循 Cult UI 黑曜石视觉语言与用户级零打扰安装规范
 
 #ifndef AppVersion
-  #define AppVersion "0.2.0"
+  #define AppVersion "0.3.4"
 #endif
 #ifndef PublishDir
   #define PublishDir "..\..\dist\publish-win-x64"
@@ -100,6 +100,10 @@ UninstalledAll=%1 已从您的计算机成功移除。
 Name: "desktopicon"; Description: "在桌面创建“Agent Proxy Hub”快捷方式"; GroupDescription: "桌面与快捷入口:"
 Name: "autostart"; Description: "登录 Windows 时静默启动并驻留系统托盘 (--minimized)"; GroupDescription: "后台保活选项:"
 
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\wwwroot"
+Type: filesandordirs; Name: "{app}\AgentProxyHub.Desktop.Win.exe.WebView2"
+
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
 
@@ -154,6 +158,14 @@ var
 begin
   Result := True;
   IsSelfContained := ('{#SelfContainedMode}' = '1');
+
+  // 非便携模式下，若检测到旧版托盘实例正在运行，先安全终止进程以实现无弹窗平滑覆盖升级
+  if (not IsPortableMode) and CheckForMutexes('AgentProxyHub_SingleInstance_Lock') then
+  begin
+    Exec('taskkill.exe', '/F /IM AgentProxyHub.Desktop.Win.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ErrCode);
+    Sleep(400);
+  end;
+
   if IsPortableMode or WizardSilent then
     Exit;
 

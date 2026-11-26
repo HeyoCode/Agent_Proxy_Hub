@@ -1,16 +1,36 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { OverviewResponse, api } from './api';
-import { OverviewView } from './views/OverviewView';
-import { UsageStatsView } from './views/UsageStatsView';
-import { NodesView } from './views/NodesView';
+import {
+  AppsNavIcon,
+  BrandLogoIcon,
+  GitHubIcon,
+  IsolationNavIcon,
+  MoonIcon,
+  NodesNavIcon,
+  OverviewNavIcon,
+  SunIcon,
+  UsageNavIcon
+} from './components/Icons';
+import { RightInspector } from './components/RightInspector';
 import { AppsCliView } from './views/AppsCliView';
 import { IsolationView } from './views/IsolationView';
+import { NodesView } from './views/NodesView';
+import { OverviewView } from './views/OverviewView';
+import { UsageStatsView } from './views/UsageStatsView';
+import {
+  WindowResizeHandles,
+  isDesktopShell,
+  sendWindowCommand,
+  startWindowDrag,
+  subscribeMaximizedState,
+  toggleWindowMaximizeOnDoubleClick
+} from './windowBridge';
 
 type TabKey = 'overview' | 'usage' | 'nodes' | 'apps' | 'isolation';
 
 const FALLBACK_PROJECT = {
   name: 'Agent Proxy Hub',
-  version: '0.2.0',
+  version: '0.3.4',
   repoOwner: 'HeyoCode',
   repoName: 'Agent_Proxy_Hub',
   repoSlug: 'HeyoCode/Agent_Proxy_Hub',
@@ -20,25 +40,35 @@ const FALLBACK_PROJECT = {
   description: 'AI 专用独立出口代理与双源用量统计桌面网关 (Windows / macOS)'
 };
 
-const GitHubMark: React.FC<{ size?: number }> = ({ size = 14 }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-    <path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.1.78-.25.78-.55 0-.27-.01-1.17-.02-2.12-3.2.7-3.88-1.36-3.88-1.36-.52-1.33-1.28-1.68-1.28-1.68-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.21-1.49 3.18-1.18 3.18-1.18.63 1.59.23 2.76.11 3.05.74.8 1.19 1.82 1.19 3.08 0 4.41-2.69 5.39-5.25 5.67.41.36.78 1.06.78 2.14 0 1.54-.01 2.79-.01 3.17 0 .31.21.66.79.55A11.51 11.51 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
-  </svg>
-);
+const TAB_TITLES: Record<TabKey, string> = {
+  overview: '控制台',
+  usage: '用量统计',
+  nodes: '独立线路池',
+  apps: '应用接管与 CLI',
+  isolation: '网卡隔离与熔断'
+};
 
 export const App: React.FC = () => {
   const query = new URLSearchParams(window.location.search);
   const initialTab = (query.get('view') as TabKey) || 'overview';
-  const initialTheme = query.get('theme') === 'light' ? 'light' : 'dark';
+  const initialTheme = query.get('theme') === 'dark' ? 'dark' : 'light';
 
   const [tab, setTab] = useState<TabKey>(
     ['overview', 'usage', 'nodes', 'apps', 'isolation'].includes(initialTab) ? initialTab : 'overview'
   );
-  const [theme, setTheme] = useState<'dark' | 'light'>(initialTheme);
+  const [theme, setTheme] = useState<'light' | 'dark'>(initialTheme);
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const [selectedSeatId, setSelectedSeatId] = useState<string>('claude');
+  const [throughputMode, setThroughputMode] = useState<'realtime' | 'cumulative'>(() => {
+    try {
+      return window.localStorage.getItem('aph_throughput_mode') === 'cumulative' ? 'cumulative' : 'realtime';
+    } catch {
+      return 'realtime';
+    }
+  });
+  const [maximized, setMaximized] = useState<boolean>(false);
   const [showManual, setShowManual] = useState(false);
   const [showBatch, setShowBatch] = useState(false);
-  const [showTray, setShowTray] = useState(false);
   const [showRepoModal, setShowRepoModal] = useState(query.get('about') === '1');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
@@ -46,9 +76,13 @@ export const App: React.FC = () => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
 
+  useEffect(() => {
+    return subscribeMaximizedState(setMaximized);
+  }, []);
+
   const toast = useCallback((msg: string) => {
     setToastMsg(msg);
-    window.setTimeout(() => setToastMsg(prev => (prev === msg ? null : prev)), 2500);
+    window.setTimeout(() => setToastMsg(prev => (prev === msg ? null : prev)), 2600);
   }, []);
 
   const reloadOverview = useCallback(async () => {
@@ -56,13 +90,28 @@ export const App: React.FC = () => {
     setOverview(res);
   }, []);
 
+  const handleChangeThroughputMode = useCallback((mode: 'realtime' | 'cumulative') => {
+    setThroughputMode(mode);
+    try {
+      window.localStorage.setItem('aph_throughput_mode', mode);
+    } catch { }
+  }, []);
+
   useEffect(() => {
     void reloadOverview();
+    const intervalMs = throughputMode === 'realtime' ? 1500 : 4000;
     const timer = window.setInterval(() => {
       void reloadOverview();
-    }, 5000);
+    }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [reloadOverview]);
+  }, [reloadOverview, throughputMode]);
+
+  useEffect(() => {
+    if (!overview?.seats.length) return;
+    if (!overview.seats.some(s => s.id === selectedSeatId)) {
+      setSelectedSeatId(overview.seats[0].id);
+    }
+  }, [overview, selectedSeatId]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -86,6 +135,11 @@ export const App: React.FC = () => {
   const project = overview?.project ?? FALLBACK_PROJECT;
 
   async function handleOpenGitHub() {
+    if (isDesktopShell()) {
+      sendWindowCommand({ type: 'window:openUrl', url: project.repoUrl });
+      toast(`已在系统浏览器打开 ${project.repoSlug}`);
+      return;
+    }
     try {
       const res = await api.openRepo();
       if (res.opened) {
@@ -93,7 +147,7 @@ export const App: React.FC = () => {
         return;
       }
     } catch {
-      // ignore and fall back to window.open
+      // ignore and fall back
     }
     window.open(project.repoUrl, '_blank', 'noopener,noreferrer');
     toast(`已打开 ${project.repoSlug}`);
@@ -106,273 +160,235 @@ export const App: React.FC = () => {
 
   const lockedNicLabel = overview?.lockedNic
     ? `${overview.lockedNic.name} (${overview.lockedNic.iPv4Address ?? '在线'})`
-    : '扫描物理网卡中...';
+    : '扫描中';
+  const activeSeatsCount = overview?.seats.filter(s => s.enabled).length ?? 0;
+  const totalSeatsCount = overview?.seats.length ?? 4;
+  const bypassedCount = overview?.excludedVirtualNics.length ?? 0;
+
+  const navItems: { key: TabKey; label: string; icon: React.ReactNode }[] = [
+    { key: 'overview', label: '控制台', icon: <OverviewNavIcon /> },
+    { key: 'usage', label: '用量统计', icon: <UsageNavIcon /> },
+    { key: 'nodes', label: `独立线路 (${overview?.nodes.length ?? 0})`, icon: <NodesNavIcon /> },
+    { key: 'apps', label: '应用接管 & CLI', icon: <AppsNavIcon /> },
+    { key: 'isolation', label: '网卡隔离', icon: <IsolationNavIcon /> }
+  ];
+
+  const activeNavIdx = Math.max(0, navItems.findIndex(item => item.key === tab));
 
   return (
-    <div className="app-root">
-      {/* 顶栏 + Cult UI 灵动岛状态胶囊 */}
-      <header className="topbar">
-        <div className="brand-lockup">
-          <div className="brand-mark">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2.5L4.5 6.3v5.4c0 4.8 3.2 9.1 7.5 10.3 4.3-1.2 7.5-5.5 7.5-10.3V6.3L12 2.5z" stroke="#10B981" strokeWidth="2.1" />
-              <circle cx="12" cy="11.8" r="2.6" fill="currentColor" />
-            </svg>
-          </div>
-          <div>
-            <strong style={{ fontSize: 13.5, letterSpacing: '-0.02em' }}>{project.name}</strong>
-            <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 7 }}>
-              .NET 10 Core · {overview?.memoryMb ?? '—'} MB
+    <div className="app-shell">
+      <WindowResizeHandles />
+
+      {/* 1. 左侧纯白极简图标栏 (72px) */}
+      <aside className="left-rail" aria-label="主导航">
+        <div
+          className="rail-logo-slot"
+          title={`${project.name} v${project.version} · 按住可拖动窗口`}
+          onMouseDown={startWindowDrag}
+          onDoubleClick={toggleWindowMaximizeOnDoubleClick}
+        >
+          <BrandLogoIcon size={25} />
+        </div>
+
+        <nav className="rail-nav">
+          <div
+            className="rail-active-indicator"
+            style={{ transform: `translate3d(0, ${activeNavIdx * 54}px, 0)` }}
+            aria-hidden="true"
+          />
+          {navItems.map(item => (
+            <button
+              key={item.key}
+              type="button"
+              className={`rail-btn ${tab === item.key ? 'active' : ''}`}
+              aria-label={item.label}
+              onClick={() => setTab(item.key)}
+            >
+              {item.icon}
+              <span className="rail-tooltip">{item.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="rail-bottom">
+          <button
+            type="button"
+            className="rail-utility-btn"
+            aria-label="打开 GitHub 开源项目信息"
+            onClick={() => setShowRepoModal(true)}
+          >
+            <GitHubIcon size={17} />
+            <span className="rail-tooltip">{project.repoSlug} v{project.version}</span>
+          </button>
+
+          <button
+            type="button"
+            className="rail-utility-btn"
+            aria-label="切换浅色或深色界面"
+            onClick={() => setTheme(t => (t === 'light' ? 'dark' : 'light'))}
+          >
+            {theme === 'light' ? <MoonIcon size={17} /> : <SunIcon size={17} />}
+            <span className="rail-tooltip">{theme === 'light' ? '切换深色模式' : '切换浅色模式'}</span>
+          </button>
+        </div>
+      </aside>
+
+      {/* 2. 中间冷灰雾白主画布 */}
+      <div className="center-column">
+        <header
+          className="top-bar"
+          onMouseDown={startWindowDrag}
+          onDoubleClick={toggleWindowMaximizeOnDoubleClick}
+        >
+          <h1 className="top-title">{TAB_TITLES[tab]}</h1>
+
+          <div className="top-telemetry-row">
+            <span className="top-metric-item">
+              <span className="top-dot-live" />
+              <span className="top-metric-label">物理网卡:</span>
+              <span className="top-metric-val num">{lockedNicLabel}</span>
+            </span>
+            <span className="top-metric-item">
+              <span className="top-metric-label">已绕过隧道:</span>
+              <span className="top-metric-val num">{bypassedCount} 个</span>
+            </span>
+            <span className="top-metric-item">
+              <span className="top-metric-label">活跃席位:</span>
+              <span className="top-metric-val num">{activeSeatsCount}/{totalSeatsCount}</span>
+            </span>
+            <span className="top-metric-item">
+              <span className="top-metric-label">IPv6:</span>
+              <span
+                className="top-metric-val"
+                style={{ color: overview?.isolation.enableIpv6 ? 'var(--accent-indigo)' : 'var(--text-secondary)' }}
+              >
+                {overview?.isolation.enableIpv6 ? '已开启' : '已关闭'}
+              </span>
+            </span>
+            <span className="top-metric-item">
+              <span className="top-metric-label">内存:</span>
+              <span className="top-metric-val num">{overview?.memoryMb ?? '—'} MB</span>
             </span>
           </div>
-        </div>
+        </header>
 
-        <div className="dynamic-island">
-          <span className="pulse-dot" />
-          <span>物理直出：<strong>{lockedNicLabel}</strong></span>
-          <span className="island-sep" />
-          <span className={overview?.hasDetectedTunnel ? 'island-bypass' : 'island-clean'}>
-            {overview?.hasDetectedTunnel
-              ? `已绕过 ${overview.excludedVirtualNics.length} 个虚拟隧道网卡 · 0 B`
-              : '直绑物理硬件网卡 · 隔离稳态'}
-          </span>
-        </div>
-
-        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 }}>
-          <button
-            className="gh-capsule"
-            onClick={() => setShowRepoModal(true)}
-            title={`查看 GitHub 项目仓库 ${project.repoSlug}`}
-          >
-            <GitHubMark size={14} />
-            <span className="mono" style={{ fontWeight: 700 }}>{project.repoSlug}</span>
-            <span className="gh-ver-tag mono">v{project.version}</span>
-          </button>
-          <button
-            className="tx-btn tx-btn-sec tx-btn-sm"
-            onClick={() => setTheme(t => (t === 'dark' ? 'light' : 'dark'))}
-          >
-            {theme === 'dark' ? '☀ 浅色' : '☾ 深色'}
-          </button>
-          <button
-            className="tx-btn tx-btn-sec tx-btn-sm"
-            onClick={() => setShowTray(v => !v)}
-          >
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#10B981' }} />
-            <span>托盘快捷窗</span>
-          </button>
-        </div>
-      </header>
-
-      {/* 悬浮胶囊分段导航 Dock */}
-      <div className="dock-row">
-        <div className="dock-tray">
-          <button className={`dock-tab ${tab === 'overview' ? 'active' : ''}`} onClick={() => setTab('overview')}>
-            <span>专线席位</span><span className="kbd">⌘1</span>
-          </button>
-          <button className={`dock-tab ${tab === 'usage' ? 'active' : ''}`} onClick={() => setTab('usage')}>
-            <span>用量统计</span><span className="kbd">⌘2</span>
-          </button>
-          <button className={`dock-tab ${tab === 'nodes' ? 'active' : ''}`} onClick={() => setTab('nodes')}>
-            <span>线路池 ({overview?.nodes.length ?? 0})</span><span className="kbd">⌘3</span>
-          </button>
-          <button className={`dock-tab ${tab === 'apps' ? 'active' : ''}`} onClick={() => setTab('apps')}>
-            <span>进程与 CLI</span><span className="kbd">⌘4</span>
-          </button>
-          <button className={`dock-tab ${tab === 'isolation' ? 'active' : ''}`} onClick={() => setTab('isolation')}>
-            <span>网卡隔离</span><span className="kbd">⌘5</span>
-          </button>
-        </div>
-
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="tx-btn tx-btn-sec" onClick={() => { setTab('nodes'); setShowManual(true); }}>+ 手动添加</button>
-          <button className="tx-btn tx-btn-primary" onClick={() => { setTab('nodes'); setShowBatch(true); }}>批量导入线路</button>
-        </div>
+        <main className="canvas-scroll">
+          {!overview ? (
+            <div className="surface-card surface-card-pad" style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
+              正在连接 Agent Proxy Hub 本地核心网关...
+            </div>
+          ) : (
+            <div key={tab} className="view-stage-enter">
+              {tab === 'overview' && (
+                <OverviewView
+                  data={overview}
+                  selectedSeatId={selectedSeatId}
+                  onSelectSeat={setSelectedSeatId}
+                  onReload={reloadOverview}
+                  onToast={toast}
+                  onOpenBatch={() => { setTab('nodes'); setShowBatch(true); }}
+                  onGoStats={() => setTab('usage')}
+                />
+              )}
+              {tab === 'usage' && <UsageStatsView onToast={toast} />}
+              {tab === 'nodes' && (
+                <NodesView
+                  nodes={overview.nodes}
+                  showManual={showManual}
+                  showBatch={showBatch}
+                  onCloseModals={() => { setShowManual(false); setShowBatch(false); }}
+                  onOpenManual={() => setShowManual(true)}
+                  onOpenBatch={() => setShowBatch(true)}
+                  onReload={reloadOverview}
+                  onToast={toast}
+                />
+              )}
+              {tab === 'apps' && <AppsCliView data={overview} onReload={reloadOverview} onToast={toast} />}
+              {tab === 'isolation' && <IsolationView onReloadOverview={reloadOverview} onToast={toast} />}
+            </div>
+          )}
+        </main>
       </div>
 
-      {/* 主滚动画布 */}
-      <main className="main-scroll">
-        {!overview ? (
-          <div className="tx-tray">
-            <div className="tx-card tx-card-pad" style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
-              正在连接 Agent Proxy Hub 本地引擎...
-            </div>
-          </div>
-        ) : (
-          <>
-            {tab === 'overview' && (
-              <OverviewView
-                data={overview}
-                onReload={reloadOverview}
-                onToast={toast}
-                onOpenBatch={() => { setTab('nodes'); setShowBatch(true); }}
-                onGoStats={() => setTab('usage')}
-              />
-            )}
-            {tab === 'usage' && <UsageStatsView onToast={toast} />}
-            {tab === 'nodes' && (
-              <NodesView
-                nodes={overview.nodes}
-                showManual={showManual}
-                showBatch={showBatch}
-                onCloseModals={() => { setShowManual(false); setShowBatch(false); }}
-                onOpenManual={() => setShowManual(true)}
-                onOpenBatch={() => setShowBatch(true)}
-                onReload={reloadOverview}
-                onToast={toast}
-              />
-            )}
-            {tab === 'apps' && <AppsCliView data={overview} onToast={toast} />}
-            {tab === 'isolation' && <IsolationView onReloadOverview={reloadOverview} onToast={toast} />}
-          </>
-        )}
-      </main>
+      {/* 3. 右侧午夜深蓝常驻检视栏 (308px) */}
+      <RightInspector
+        project={project}
+        overview={overview}
+        selectedSeatId={selectedSeatId}
+        throughputMode={throughputMode}
+        onChangeThroughputMode={handleChangeThroughputMode}
+        maximized={maximized}
+        onReload={reloadOverview}
+        onToast={toast}
+        onOpenBatch={() => { setTab('nodes'); setShowBatch(true); }}
+      />
 
-      {/* 右上角托盘悬浮小窗 */}
-      {showTray && overview && (
-        <div className="floating-tray">
-          <div className="floating-card">
-            <div style={{ padding: '11px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                <span className="pulse-dot" />
-                <strong style={{ fontSize: 12.5 }}>Agent Proxy Hub · 快捷面板</strong>
-              </div>
-              <span className="badge badge-emerald">物理直出</span>
-            </div>
-            <div className="tx-sep" />
-            <div style={{ padding: '11px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: 'var(--text-secondary)' }}>
-                <span>物理网卡：<strong>{overview.lockedNic?.name ?? '—'}</strong></span>
-                <span className="mono">{overview.memoryMb} MB</span>
-              </div>
-              {overview.seats.slice(0, 3).map(seat => {
-                const bound = overview.nodes.find(n => n.id === seat.boundNodeId);
-                return (
-                  <div className="rule-well" key={seat.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '7px 10px' }}>
-                    <div>
-                      <div style={{ fontWeight: 600, fontSize: 12 }}>{seat.name} (:{seat.localPort})</div>
-                      <div className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{bound?.exitIp ?? '—'} · {bound?.name ?? '未绑定'}</div>
-                    </div>
-                    <span className={`badge ${seat.enabled ? 'badge-emerald' : 'badge-neutral'}`}>{seat.enabled ? '在线' : '关闭'}</span>
-                  </div>
-                );
-              })}
-              <div style={{ display: 'flex', gap: 8, marginTop: 2 }}>
-                <button className="tx-btn tx-btn-sec tx-btn-sm" style={{ flex: 1 }} onClick={() => { setShowTray(false); setTab('usage'); }}>查看用量统计</button>
-                <button className="tx-btn tx-btn-primary tx-btn-sm" onClick={() => setShowTray(false)}>收起</button>
-              </div>
-              <div className="tx-sep" style={{ marginTop: 2 }} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: 'var(--text-secondary)' }}>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                  <GitHubMark size={12} />
-                  <span className="mono">{project.repoSlug}</span>
-                </span>
-                <button className="tx-btn tx-btn-sec tx-btn-sm" style={{ height: 22, fontSize: 11 }} onClick={() => { setShowTray(false); setShowRepoModal(true); }}>
-                  项目详情
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Cult UI 双层同心圆角 GitHub 项目铭牌弹窗 */}
+      {/* 单层极简 GitHub 项目信息浮窗 */}
       {showRepoModal && (
-        <div className="modal-mask" onClick={() => setShowRepoModal(false)}>
-          <div className="modal-tray narrow" style={{ maxWidth: 580 }} onClick={e => e.stopPropagation()}>
-            <div className="modal-card">
-              <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                  <div style={{
-                    width: 40, height: 40, borderRadius: 12, background: 'var(--card-subtle)',
-                    border: '1px solid var(--card-border)', display: 'flex', alignItems: 'center', justifyContent: 'center'
-                  }}>
-                    <GitHubMark size={20} />
-                  </div>
-                  <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <strong style={{ fontSize: 15 }}>{project.name}</strong>
-                      <span className="gh-ver-tag mono">v{project.version}</span>
-                      <span className="badge badge-neutral">GitHub 仓库</span>
-                    </div>
-                    <div className="mono" style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                      {project.repoSlug} · 维护者 {project.author}
-                    </div>
-                  </div>
+        <div className="modal-backdrop" onClick={() => setShowRepoModal(false)}>
+          <div className="modal-surface narrow" style={{ maxWidth: 540 }} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '20px 22px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div
+                  style={{
+                    width: 42,
+                    height: 42,
+                    borderRadius: 12,
+                    background: 'var(--bg-subtle)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'var(--text-primary)'
+                  }}
+                >
+                  <GitHubIcon size={20} />
                 </div>
-                <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={() => setShowRepoModal(false)}>关闭</button>
-              </div>
-
-              <div className="tx-sep" />
-
-              <div style={{ padding: '15px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
-                  {project.description}。集成物理网卡直绑隔离（绕过 Clash / Wintun / utun）、TLS SNI Fake-IP 还原、全协议代理调度与免解密双源 AI 用量统计。
-                </div>
-
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  <span className="badge badge-emerald">IP_UNICAST_IF / IP_BOUND_IF 直绑</span>
-                  <span className="badge badge-indigo">SOCKS5 / HTTP / HTTPS</span>
-                  <span className="badge badge-sky">CC Switch 级双源统计</span>
-                  <span className="badge badge-neutral">Windows &amp; macOS</span>
-                </div>
-
-                <div className="rule-well" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11.5 }}>
-                    <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>GitHub 仓库地址</span>
-                    <span className="mono" style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{project.repoUrl}</span>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <strong style={{ fontSize: 15.5 }}>{project.name}</strong>
+                    <span className="pill-tag tag-indigo num">v{project.version}</span>
                   </div>
-                  <div className="terminal-well" style={{ padding: '9px 11px', fontSize: 11.5 }}>
-                    {`git clone ${project.cloneUrl}`}
+                  <div className="num" style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                    <span className="mono">{project.repoSlug}</span> · {project.author}
                   </div>
                 </div>
               </div>
+              <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => setShowRepoModal(false)}>关闭</button>
+            </div>
 
-              <div className="tx-sep" />
+            <div className="soft-divider" />
 
-              <div style={{ padding: '12px 20px', background: 'var(--card-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={() => handleCopyText(project.repoUrl, '仓库链接')}>复制链接</button>
-                  <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={() => handleCopyText(`git clone ${project.cloneUrl}`, ' git clone 命令')}>复制 Clone 命令</button>
-                </div>
-                <button className="tx-btn tx-btn-primary" onClick={handleOpenGitHub}>
-                  <GitHubMark size={13} />
-                  <span>在浏览器打开 GitHub ↗</span>
-                </button>
+            <div style={{ padding: '16px 22px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                {project.description}。支持物理网卡直绑绕过 Clash/Wintun、Fake-IP TLS SNI 自动还原、全协议静态代理调度与免解密双源 AI 用量统计。
               </div>
+
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                <span className="pill-tag tag-emerald">IP_UNICAST_IF / IP_BOUND_IF 直绑</span>
+                <span className="pill-tag tag-indigo mono">SOCKS5 / HTTP / HTTPS</span>
+                <span className="pill-tag tag-neutral">Windows &amp; macOS</span>
+              </div>
+
+              <div className="code-surface" style={{ padding: '11px 14px' }}>
+                {`git clone ${project.cloneUrl}`}
+              </div>
+            </div>
+
+            <div className="modal-footer-bar" style={{ justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleCopyText(project.repoUrl, '仓库链接')}>复制链接</button>
+                <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleCopyText(`git clone ${project.cloneUrl}`, ' Clone 命令')}>复制 Clone</button>
+              </div>
+              <button type="button" className="btn-pill btn-indigo" onClick={handleOpenGitHub}>
+                <GitHubIcon size={14} />
+                <span>打开 GitHub 仓库</span>
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* 底部通栏项目铭牌状态条 */}
-      <footer className="status-footer">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span><strong>{project.name}</strong> <span className="mono">v{project.version}</span></span>
-          <span style={{ opacity: 0.4 }}>·</span>
-          <span>物理网卡硬件直绑隔离 · 系统全局代理零修改</span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <button
-            className="footer-gh-link"
-            onClick={() => setShowRepoModal(true)}
-            title="打开 GitHub 项目铭牌"
-          >
-            <GitHubMark size={12} />
-            <span className="mono">github.com/{project.repoSlug}</span>
-            <span style={{ color: 'var(--emerald-text)', fontWeight: 700 }}>↗</span>
-          </button>
-          <button
-            className="tx-btn tx-btn-sec tx-btn-sm"
-            style={{ height: 22, fontSize: 11, padding: '0 8px' }}
-            onClick={() => handleCopyText(project.repoUrl, ' GitHub 仓库地址')}
-          >
-            复制地址
-          </button>
-        </div>
-      </footer>
-
-      {toastMsg && <div className="toast-pill">{toastMsg}</div>}
+      {toastMsg && <div className="toast-float">{toastMsg}</div>}
     </div>
   );
 };

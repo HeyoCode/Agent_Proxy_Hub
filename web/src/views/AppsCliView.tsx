@@ -1,98 +1,205 @@
 import React, { useState } from 'react';
-import { OverviewResponse } from '../api';
+import { OverviewResponse, api, formatBytes } from '../api';
+import { CheckTinyIcon, CopyIcon, PlayLaunchIcon, PlugTakeoverIcon, SeatBrandIcon } from '../components/Icons';
+import { SegmentedTabs } from '../components/SegmentedTabs';
 
 interface Props {
   data: OverviewResponse;
+  onReload: () => Promise<void>;
   onToast: (msg: string) => void;
 }
 
-export const AppsCliView: React.FC<Props> = ({ data, onToast }) => {
+export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
   const [cliTab, setCliTab] = useState<'ps' | 'zsh' | 'claude' | 'agy'>(data.os === 'mac' ? 'zsh' : 'ps');
+  const [copied, setCopied] = useState(false);
+  const [busySeat, setBusySeat] = useState<string | null>(null);
   const codeText = data.cliSnippets[cliTab] ?? '';
 
   async function handleCopy() {
     await navigator.clipboard?.writeText(codeText);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
     onToast('已复制独立 CLI / IDE 隔离配置命令');
   }
 
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 1fr', gap: 12, alignItems: 'start' }}>
-      <div className="tx-tray">
-        <div className="tx-card tx-card-pad">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-            <strong style={{ fontSize: 13.5 }}>AI 应用进程与独立端口映射</strong>
-            <span className="badge badge-neutral">
-              {data.os === 'mac' ? 'macOS 混合端口 + 启动器' : 'Windows 混合端口 + 进程注入'}
-            </span>
-          </div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
-            绝不改动系统全局代理设置；每个 AI 软件通过独立本机混合端口与进程环境变量注入完成隔离，与 Clash 彻底平行互不干扰。
-          </div>
+  async function handleToggleTakeover(seatId: string, enable: boolean) {
+    setBusySeat(seatId);
+    try {
+      const res = await api.setSeatTakeover(seatId, enable);
+      await onReload();
+      onToast(res.message);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '接管操作失败');
+    } finally {
+      setBusySeat(null);
+    }
+  }
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-            {data.seats.map(seat => {
-              const bound = data.nodes.find(n => n.id === seat.boundNodeId);
-              const proc = data.os === 'mac' ? seat.processMac : seat.processWin;
-              return (
-                <div className="rule-well" key={seat.id}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-                      <div style={{
-                        width: 28, height: 28, borderRadius: 8, background: 'var(--card-solid)',
-                        border: '1px solid var(--card-border)', display: 'flex', alignItems: 'center',
-                        justifyContent: 'center', fontWeight: 700, fontSize: 11.5
-                      }}>{seat.glyph}</div>
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: 12.5 }}>{seat.name}</div>
-                        <div className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>目标进程：{proc}</div>
+  async function handleLaunch(seatId: string) {
+    setBusySeat(seatId);
+    try {
+      const res = await api.launchSeatApp(seatId);
+      await onReload();
+      onToast(res.message);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '启动失败');
+    } finally {
+      setBusySeat(null);
+    }
+  }
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1.18fr 1fr', gap: 18, alignItems: 'start' }}>
+      <div className="surface-card surface-card-pad">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+          <span className="card-title-sm">AI 应用无损接管与独立端口映射</span>
+          <span className="pill-tag tag-neutral">
+            {data.os === 'mac' ? 'macOS 混合端口' : 'Windows 混合端口'}
+          </span>
+        </div>
+        <div className="card-subtitle-sm" style={{ marginBottom: 14 }}>
+          不改系统全局代理；点击「一键接管」即可自动备份并绑定对应软件配置（支持无损一键还原）。
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {data.seats.map(seat => {
+            const bound = data.nodes.find(n => n.id === seat.boundNodeId);
+            const proc = data.os === 'mac' ? seat.processMac : seat.processWin;
+            const takeover = data.seatTakeovers?.find(t => t.seatId === seat.id);
+            const snap = data.trafficSnapshots.find(t => t.seatId === seat.id);
+            const isBusy = busySeat === seat.id;
+
+            return (
+              <div
+                key={seat.id}
+                style={{
+                  background: 'var(--bg-subtle)',
+                  borderRadius: 12,
+                  padding: '12px 14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 7
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                    <div
+                      style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 10,
+                        background: 'var(--bg-card)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--accent-indigo)',
+                        flexShrink: 0
+                      }}
+                    >
+                      <SeatBrandIcon seatId={seat.id} size={17} />
+                    </div>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontWeight: 600, fontSize: 13 }}>{seat.name}</span>
+                        {takeover?.isProcessRunning && (
+                          <span className="pill-tag tag-indigo" style={{ fontSize: 10, padding: '1px 7px' }}>运行中</span>
+                        )}
+                      </div>
+                      <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        目标进程：<span className="mono">{proc}</span>
                       </div>
                     </div>
-                    <span className={`badge ${seat.enabled ? 'badge-emerald' : 'badge-neutral'}`}>
-                      {seat.enabled ? '端口活跃' : '未启用'}
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                    <span className={`pill-tag ${takeover?.isTakenOver ? 'tag-emerald' : 'tag-amber'}`}>
+                      {takeover?.isTakenOver ? '已接管' : '待接管'}
+                    </span>
+                    <span className={`pill-tag ${seat.enabled ? 'tag-indigo' : 'tag-neutral'}`}>
+                      {seat.enabled ? `:${seat.localPort}` : '暂停'}
                     </span>
                   </div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: 'var(--text-secondary)' }}>
-                    <span>专属入口：<strong className="mono" style={{ color: 'var(--text-primary)' }}>127.0.0.1:{seat.localPort}</strong></span>
-                    <span>绑定专线：<strong style={{ color: 'var(--text-primary)' }}>{bound?.name ?? '未绑定'}</strong></span>
+                </div>
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                  <span>绑定专线：<strong style={{ color: 'var(--text-primary)' }}>{bound?.name ?? '未绑定'}</strong></span>
+                  <span className="num">直出吞吐：<strong style={{ color: 'var(--text-primary)' }}>↑ {formatBytes(snap?.bytesTx ?? 0)} / ↓ {formatBytes(snap?.bytesRx ?? 0)}</strong></span>
+                </div>
+
+                {takeover && (
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                    {takeover.statusHint}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, paddingTop: 2 }}>
+                  <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {takeover?.modeSummary ?? '独立端口模式'}
+                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      className={`btn-pill btn-sm ${takeover?.isTakenOver ? 'btn-soft' : 'btn-indigo'}`}
+                      onClick={() => handleToggleTakeover(seat.id, !(takeover?.isTakenOver ?? false))}
+                    >
+                      <PlugTakeoverIcon size={12} />
+                      <span>{takeover?.isTakenOver ? '还原默认' : '一键接管'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      className="btn-pill btn-sm btn-soft"
+                      onClick={() => handleLaunch(seat.id)}
+                    >
+                      <PlayLaunchIcon size={12} />
+                      <span>专线启动</span>
+                    </button>
                   </div>
                 </div>
-              );
-            })}
-          </div>
+              </div>
+            );
+          })}
         </div>
       </div>
 
-      <div className="tx-tray">
-        <div className="tx-card tx-card-pad">
+      <div className="surface-card surface-card-pad">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+          <span className="card-title-sm">CLI / IDE 隔离配置命令参考</span>
+          <span className="pill-tag tag-indigo">防串线</span>
+        </div>
+        <div className="card-subtitle-sm" style={{ marginBottom: 12 }}>
+          如需在任意终端临时覆盖 Clash 系统变量，可一键复制下方环境变量
+        </div>
+
+        <div style={{ marginBottom: 12 }}>
+          <SegmentedTabs<'ps' | 'zsh' | 'claude' | 'agy'>
+            value={cliTab}
+            onChange={setCliTab}
+            items={[
+              { value: 'ps', label: 'PowerShell' },
+              { value: 'zsh', label: 'macOS / Zsh' },
+              { value: 'claude', label: 'Claude Code' },
+              { value: 'agy', label: 'Antigravity' }
+            ]}
+          />
+        </div>
+
+        <div className="code-surface">{codeText}</div>
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button type="button" className={`btn-pill ${copied ? 'btn-soft' : 'btn-indigo'}`} onClick={handleCopy}>
+            {copied ? <CheckTinyIcon size={13} /> : <CopyIcon size={13} />}
+            <span>{copied ? '已复制命令' : '复制隔离配置命令'}</span>
+          </button>
+        </div>
+
+        <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 12, background: 'var(--bg-subtle)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-            <strong style={{ fontSize: 13.5 }}>CLI / IDE 一键隔离配置注入</strong>
-            <span className="badge badge-indigo">防串线</span>
+            <strong style={{ fontSize: 12.5 }}>关于吞吐计数与用量统计</strong>
+            <span className="pill-tag tag-emerald">双源零冲突</span>
           </div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10 }}>
-            将终端代理指向独立端口，绕过系统里 Clash 设置的全局代理变量
-          </div>
-
-          <div className="dock-tray" style={{ padding: 3, borderRadius: 11, marginBottom: 10 }}>
-            <button className={`dock-tab ${cliTab === 'ps' ? 'active' : ''}`} style={{ height: 26, fontSize: 11.5, borderRadius: 8 }} onClick={() => setCliTab('ps')}>PowerShell</button>
-            <button className={`dock-tab ${cliTab === 'zsh' ? 'active' : ''}`} style={{ height: 26, fontSize: 11.5, borderRadius: 8 }} onClick={() => setCliTab('zsh')}>macOS / Zsh</button>
-            <button className={`dock-tab ${cliTab === 'claude' ? 'active' : ''}`} style={{ height: 26, fontSize: 11.5, borderRadius: 8 }} onClick={() => setCliTab('claude')}>Claude Code</button>
-            <button className={`dock-tab ${cliTab === 'agy' ? 'active' : ''}`} style={{ height: 26, fontSize: 11.5, borderRadius: 8 }} onClick={() => setCliTab('agy')}>Antigravity</button>
-          </div>
-
-          <div className="terminal-well">{codeText}</div>
-
-          <div style={{ display: 'flex', gap: 8, marginTop: 11 }}>
-            <button className="tx-btn tx-btn-primary" onClick={handleCopy}>复制隔离配置命令</button>
-          </div>
-
-          <div className="rule-well" style={{ marginTop: 12 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-              <strong style={{ fontSize: 12 }}>关于会话用量免解密统计</strong>
-              <span className="badge badge-emerald">零 MITM 风险</span>
-            </div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>
-              代理隧道保持端到端 TLS 1.3 原生加密不拆包；Token 与模型消耗通过增量扫描 <span className="mono">.claude / .codex / .gemini</span> 结构化日志元数据完成精确汇总。
-            </div>
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+            Token 用量直接扫描 <span className="mono">.claude / .codex / .gemini</span> 会话日志；右栏「累计直出吞吐」统计经由 <span className="mono">127.0.0.1:1789x</span> 端口的真实 TCP 流量。完成左侧「一键接管」并重启对应软件后，流量与 Token 即会同步归集。
           </div>
         </div>
       </div>

@@ -9,16 +9,16 @@ namespace AgentProxyHub.Core.Networking;
 /// </summary>
 public static partial class ProxyNodeImporter
 {
-    [GeneratedRegex(@"^(socks5h?|socks4a?|https?):\/\/(?:([^:@\s]+):([^@\s]+)@)?(\[?[a-zA-Z0-9.:-]+\]?):(\d{1,5})\/?(?:#(.+))?$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"^(socks5h?|socks4a?|https?):\/\/(?:([^:@\s]+):([^@\s]+)@)?(\[[a-fA-F0-9:%.]+\]|[a-zA-Z0-9.-]+):(\d{1,5})\/?(?:#(.+))?$", RegexOptions.IgnoreCase)]
     private static partial Regex UrlPattern();
 
-    [GeneratedRegex(@"^([^:@\s]+):([^@\s]+)@([a-zA-Z0-9.-]+):(\d{1,5})(?:#(.+))?$")]
+    [GeneratedRegex(@"^([^:@\s]+):([^@\s]+)@(\[[a-fA-F0-9:%.]+\]|[a-zA-Z0-9.-]+):(\d{1,5})(?:#(.+))?$")]
     private static partial Regex UserPassAtHostPattern();
 
-    [GeneratedRegex(@"^([a-zA-Z0-9.-]+):(\d{1,5}):([^:\s#]+):([^#\s]+)(?:#(.+))?$")]
+    [GeneratedRegex(@"^(\[[a-fA-F0-9:%.]+\]|[a-zA-Z0-9.-]+):(\d{1,5}):([^:\s#]+):([^#\s]+)(?:#(.+))?$")]
     private static partial Regex FourColonPattern();
 
-    [GeneratedRegex(@"^([a-zA-Z0-9.-]+):(\d{1,5})(?:#(.+))?$")]
+    [GeneratedRegex(@"^(\[[a-fA-F0-9:%.]+\]|[a-zA-Z0-9.-]+):(\d{1,5})(?:#(.+))?$")]
     private static partial Regex HostPortPattern();
 
     public static BatchParseResult Parse(
@@ -172,15 +172,17 @@ public static partial class ProxyNodeImporter
         string? remark,
         string group)
     {
+        string cleanHost = host.Trim().Trim('[', ']');
+        string displayHost = cleanHost.Contains(':') ? $"[{cleanHost}]" : cleanHost;
         return new ProxyNode
         {
             Id = "n_" + Guid.NewGuid().ToString("N")[..8],
             Protocol = proto,
-            Host = host.Trim(),
+            Host = cleanHost,
             Port = port,
             Username = NullIfEmpty(user),
             Password = NullIfEmpty(pass),
-            Name = string.IsNullOrWhiteSpace(remark) ? $"{proto}-{host}:{port}" : remark.Trim(),
+            Name = string.IsNullOrWhiteSpace(remark) ? $"{proto}-{displayHost}:{port}" : remark.Trim(),
             Group = string.IsNullOrWhiteSpace(group) ? "批量导入池" : group.Trim(),
             Status = "unverified",
             ExitIp = "—",

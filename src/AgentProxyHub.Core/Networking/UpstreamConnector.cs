@@ -21,6 +21,13 @@ public sealed class UpstreamConnector
         _dnsResolver = dnsResolver;
     }
 
+    public static bool IsIpv6Literal(string host)
+    {
+        if (string.IsNullOrWhiteSpace(host)) return false;
+        string clean = host.Trim().Trim('[', ']');
+        return IPAddress.TryParse(clean, out var parsed) && parsed.AddressFamily == AddressFamily.InterNetworkV6;
+    }
+
     /// <summary>
     /// 通过物理网卡连接指定代理节点，并让该节点代为连向 targetHost:targetPort
     /// </summary>
@@ -31,13 +38,39 @@ public sealed class UpstreamConnector
         IsolationSettings settings,
         CancellationToken ct = default)
     {
-        IPAddress? proxyIp = IPAddress.TryParse(node.Host, out var ip) ? ip : null;
-        if (proxyIp == null)
+        if (!settings.EnableIpv6 && IsIpv6Literal(targetHost))
+            throw new InvalidOperationException("IPv6 开关已关闭，已阻断 IPv6 目标连接");
+
+        if (node.Protocol == ProxyProtocol.DIRECT_PHYSICAL)
         {
-            proxyIp = settings.DirectPhysicalDohEnabled
-                ? await _dnsResolver.ResolveHostAsync(node.Host, settings.DohServerIp, ct)
-                : (await Dns.GetHostAddressesAsync(node.Host, AddressFamily.InterNetwork, ct)).FirstOrDefault()
-                  ?? throw new InvalidOperationException($"无法解析代理节点域名: {node.Host}");
+            return await ConnectDirectPhysicalAsync(targetHost, targetPort, settings, ct);
+        }
+
+        string cleanProxyHost = node.Host.Trim().Trim('[', ']');
+        IPAddress? proxyIp = IPAddress.TryParse(cleanProxyHost, out var ip) ? ip : null;
+        if (proxyIp != null)
+        {
+            if (proxyIp.AddressFamily == AddressFamily.InterNetworkV6 && !settings.EnableIpv6)
+                throw new InvalidOperationException("IPv6 开关已关闭，无法连接 IPv6 代理节点");
+        }
+        else
+        {
+            if (settings.DirectPhysicalDohEnabled)
+            {
+                proxyIp = await _dnsResolver.ResolveHostAsync(cleanProxyHost, settings.DohServerIp, settings.EnableIpv6, ct);
+            }
+            else if (!settings.EnableIpv6)
+            {
+                proxyIp = (await Dns.GetHostAddressesAsync(cleanProxyHost, AddressFamily.InterNetwork, ct)).FirstOrDefault()
+                          ?? throw new InvalidOperationException($"无法解析代理节点域名: {cleanProxyHost}");
+            }
+            else
+            {
+                var all = await Dns.GetHostAddressesAsync(cleanProxyHost, ct);
+                proxyIp = all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+                          ?? all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6)
+                          ?? throw new InvalidOperationException($"无法解析代理节点域名: {cleanProxyHost}");
+            }
         }
 
         var socket = _nicManager.CreateBoundTcpSocket(proxyIp.AddressFamily, proxyIp);
@@ -89,9 +122,13 @@ public sealed class UpstreamConnector
     /// </summary>
     public async Task<Stream> ConnectDirectPhysicalAsync(string host, int port, IsolationSettings settings, CancellationToken ct = default)
     {
-        IPAddress ip = IPAddress.TryParse(host, out var parsed)
+        string cleanHost = host.Trim().Trim('[', ']');
+        if (!settings.EnableIpv6 && IsIpv6Literal(cleanHost))
+            throw new InvalidOperationException("IPv6 开关已关闭，已阻断 IPv6 直连");
+
+        IPAddress ip = IPAddress.TryParse(cleanHost, out var parsed)
             ? parsed
-            : await _dnsResolver.ResolveHostAsync(host, settings.DohServerIp, ct);
+            : await _dnsResolver.ResolveHostAsync(cleanHost, settings.DohServerIp, settings.EnableIpv6, ct);
 
         var socket = _nicManager.CreateBoundTcpSocket(ip.AddressFamily, ip);
         try
@@ -229,9 +266,11 @@ public sealed class UpstreamConnector
 
     private static async Task HandshakeHttpConnectAsync(Stream stream, ProxyNode node, string targetHost, int targetPort, CancellationToken ct)
     {
+        string cleanTarget = targetHost.Trim().Trim('[', ']');
+        string formattedHost = IsIpv6Literal(cleanTarget) ? $"[{cleanTarget}]" : cleanTarget;
         var sb = new StringBuilder();
-        sb.Append($"CONNECT {targetHost}:{targetPort} HTTP/1.1\r\n");
-        sb.Append($"Host: {targetHost}:{targetPort}\r\n");
+        sb.Append($"CONNECT {formattedHost}:{targetPort} HTTP/1.1\r\n");
+        sb.Append($"Host: {formattedHost}:{targetPort}\r\n");
         sb.Append("Proxy-Connection: Keep-Alive\r\n");
         if (!string.IsNullOrEmpty(node.Username))
         {

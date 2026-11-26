@@ -7,7 +7,7 @@ using System.Text;
 namespace AgentProxyHub.Core.Networking;
 
 /// <summary>
-/// 绑定物理网卡的轻量独立 DNS 解析器（仅在代理节点地址为域名时绕过系统/Clash DNS）
+/// 绑定物理网卡的轻量独立 DNS 解析器（仅在代理节点地址为域名时绕过系统/Clash DNS，支持按 IPv6 开关解析 A / AAAA）
 /// </summary>
 public sealed class CleanDnsResolver
 {
@@ -19,22 +19,34 @@ public sealed class CleanDnsResolver
         _nicManager = nicManager;
     }
 
-    public async Task<IPAddress> ResolveHostAsync(string host, string dnsServerIp = "223.5.5.5", CancellationToken ct = default)
+    public async Task<IPAddress> ResolveHostAsync(
+        string host,
+        string dnsServerIp = "223.5.5.5",
+        bool enableIpv6 = false,
+        CancellationToken ct = default)
     {
-        if (IPAddress.TryParse(host, out var parsed))
+        string cleanHost = host.Trim().Trim('[', ']');
+        if (IPAddress.TryParse(cleanHost, out var parsed))
+        {
+            if (parsed.AddressFamily == AddressFamily.InterNetworkV6 && !enableIpv6)
+                throw new InvalidOperationException("IPv6 开关已关闭，已阻断 IPv6 连接");
             return parsed;
+        }
 
-        if (_cache.TryGetValue(host, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow)
+        string cacheKey = $"{cleanHost}|v{(enableIpv6 ? 6 : 4)}";
+        if (_cache.TryGetValue(cacheKey, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow)
             return cached.Ip;
 
         try
         {
-            if (IPAddress.TryParse(dnsServerIp, out var dnsIp))
+            if (IPAddress.TryParse(dnsServerIp, out var dnsIp) &&
+                (dnsIp.AddressFamily == AddressFamily.InterNetwork || enableIpv6))
             {
-                var resolved = await QueryARecordDirectAsync(host, dnsIp, ct);
+                var resolved = await QueryDnsRecordDirectAsync(cleanHost, dnsIp, 1, ct)
+                               ?? (enableIpv6 ? await QueryDnsRecordDirectAsync(cleanHost, dnsIp, 28, ct) : null);
                 if (resolved != null)
                 {
-                    _cache[host] = (resolved, DateTimeOffset.UtcNow.AddMinutes(5));
+                    _cache[cacheKey] = (resolved, DateTimeOffset.UtcNow.AddMinutes(5));
                     return resolved;
                 }
             }
@@ -44,17 +56,30 @@ public sealed class CleanDnsResolver
             // 若企业内网屏蔽外网 UDP 53，则降级系统解析兜底
         }
 
-        var addresses = await Dns.GetHostAddressesAsync(host, AddressFamily.InterNetwork, ct);
-        var fallback = addresses.FirstOrDefault()
-                       ?? throw new InvalidOperationException($"无法解析主机地址: {host}");
-        _cache[host] = (fallback, DateTimeOffset.UtcNow.AddMinutes(2));
+        IPAddress? fallback;
+        if (!enableIpv6)
+        {
+            var v4List = await Dns.GetHostAddressesAsync(cleanHost, AddressFamily.InterNetwork, ct);
+            fallback = v4List.FirstOrDefault();
+        }
+        else
+        {
+            var all = await Dns.GetHostAddressesAsync(cleanHost, ct);
+            fallback = all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+                       ?? all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6);
+        }
+
+        if (fallback == null)
+            throw new InvalidOperationException($"无法解析主机地址: {cleanHost}");
+
+        _cache[cacheKey] = (fallback, DateTimeOffset.UtcNow.AddMinutes(2));
         return fallback;
     }
 
-    private async Task<IPAddress?> QueryARecordDirectAsync(string domain, IPAddress dnsIp, CancellationToken ct)
+    private async Task<IPAddress?> QueryDnsRecordDirectAsync(string domain, IPAddress dnsIp, ushort qType, CancellationToken ct)
     {
-        byte[] query = BuildDnsAQuery(domain, out ushort txId);
-        using var udp = _nicManager.CreateBoundUdpSocket();
+        byte[] query = BuildDnsQuery(domain, qType, out ushort txId);
+        using var udp = _nicManager.CreateBoundUdpSocket(dnsIp.AddressFamily);
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(1800));
 
@@ -63,10 +88,10 @@ public sealed class CleanDnsResolver
 
         var recvBuf = new byte[512];
         var result = await udp.ReceiveFromAsync(recvBuf, SocketFlags.None, remoteEp, timeoutCts.Token);
-        return ParseDnsAResponse(recvBuf.AsSpan(0, result.ReceivedBytes), txId);
+        return ParseDnsResponse(recvBuf.AsSpan(0, result.ReceivedBytes), txId, qType);
     }
 
-    private static byte[] BuildDnsAQuery(string domain, out ushort txId)
+    private static byte[] BuildDnsQuery(string domain, ushort qType, out ushort txId)
     {
         txId = (ushort)Random.Shared.Next(1, 65535);
         using var ms = new MemoryStream(128);
@@ -85,14 +110,14 @@ public sealed class CleanDnsResolver
         ms.WriteByte(0);
 
         Span<byte> qTail = stackalloc byte[4];
-        BinaryPrimitives.WriteUInt16BigEndian(qTail[0..2], 1); // TYPE A
-        BinaryPrimitives.WriteUInt16BigEndian(qTail[2..4], 1); // CLASS IN
+        BinaryPrimitives.WriteUInt16BigEndian(qTail[0..2], qType); // TYPE A=1 / AAAA=28
+        BinaryPrimitives.WriteUInt16BigEndian(qTail[2..4], 1);     // CLASS IN
         ms.Write(qTail);
 
         return ms.ToArray();
     }
 
-    private static IPAddress? ParseDnsAResponse(ReadOnlySpan<byte> resp, ushort expectedTxId)
+    private static IPAddress? ParseDnsResponse(ReadOnlySpan<byte> resp, ushort expectedTxId, ushort expectedType)
     {
         if (resp.Length < 12) return null;
         if (BinaryPrimitives.ReadUInt16BigEndian(resp[0..2]) != expectedTxId) return null;
@@ -116,9 +141,12 @@ public sealed class CleanDnsResolver
             pos += 10;
             if (pos + rdLen > resp.Length) break;
 
-            if (type == 1 && rdLen == 4)
+            if (type == expectedType)
             {
-                return new IPAddress(resp.Slice(pos, 4));
+                if (expectedType == 1 && rdLen == 4)
+                    return new IPAddress(resp.Slice(pos, 4));
+                if (expectedType == 28 && rdLen == 16)
+                    return new IPAddress(resp.Slice(pos, 16));
             }
             pos += rdLen;
         }

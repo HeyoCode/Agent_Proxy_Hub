@@ -49,8 +49,11 @@ public sealed class SeatTrafficSnapshot
     public long TotalConnections { get; set; }
     public long BytesTx { get; set; }
     public long BytesRx { get; set; }
+    public long BytesTxPerSec { get; set; }
+    public long BytesRxPerSec { get; set; }
     public long SniRecoveredCount { get; set; }
     public long KillSwitchBlockedCount { get; set; }
+    public long Ipv6BlockedCount { get; set; }
 }
 
 /// <summary>
@@ -128,6 +131,8 @@ public sealed class UsageDashboardResponse
     // 代理网络层总流量
     public long TotalProxyTxBytes { get; set; }
     public long TotalProxyRxBytes { get; set; }
+    public long TotalProxyTxBytesPerSec { get; set; }
+    public long TotalProxyRxBytesPerSec { get; set; }
     public long TotalProxyConnections { get; set; }
 
     // 筛选选项与计数

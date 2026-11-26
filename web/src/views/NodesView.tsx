@@ -1,5 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { BatchParseResult, ProxyNode, ProxyProtocol, api } from '../api';
+import { CustomSelect } from '../components/CustomSelect';
+import { PlusIcon, RefreshSpinIcon, UploadBatchIcon } from '../components/Icons';
+import { SegmentedTabs } from '../components/SegmentedTabs';
 
 interface Props {
   nodes: ProxyNode[];
@@ -12,13 +15,19 @@ interface Props {
   onToast: (msg: string) => void;
 }
 
+const PROTOCOL_OPTIONS = [
+  { value: 'SOCKS5', label: 'SOCKS5 / SOCKS5h', sublabel: '远端域名解析 · 推荐静态住宅' },
+  { value: 'HTTP', label: 'HTTP CONNECT', sublabel: '标准 HTTPS 隧道握手' },
+  { value: 'HTTPS', label: 'HTTPS (TLS)', sublabel: '上游代理 TLS 加密连接' },
+  { value: 'SOCKS4', label: 'SOCKS4a', sublabel: '轻量兼容型 SOCKS 协议' }
+];
+
 export const NodesView: React.FC<Props> = ({
   nodes, showManual, showBatch, onCloseModals, onOpenManual, onOpenBatch, onReload, onToast
 }) => {
   const [filter, setFilter] = useState<'all' | 'SOCKS' | 'HTTP'>('all');
   const [testingAll, setTestingAll] = useState(false);
 
-  // 手动添加表单
   const [mProto, setMProto] = useState<ProxyProtocol>('SOCKS5');
   const [mName, setMName] = useState('');
   const [mGroup, setMGroup] = useState('AI 静态住宅池');
@@ -27,7 +36,6 @@ export const NodesView: React.FC<Props> = ({
   const [mUser, setMUser] = useState('');
   const [mPass, setMPass] = useState('');
 
-  // 批量导入表单
   const [batchText, setBatchText] = useState(
     'socks5://user:pass@127.0.0.1:1080#示例SOCKS5线路\nhttp://user:pass@127.0.0.1:8080#示例HTTP线路'
   );
@@ -99,221 +107,238 @@ export const NodesView: React.FC<Props> = ({
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div className="tx-tray">
-        <div className="tx-card">
-          <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-            <div className="dock-tray" style={{ padding: 3, borderRadius: 11 }}>
-              <button className={`dock-tab ${filter === 'all' ? 'active' : ''}`} style={{ height: 26, fontSize: 12, borderRadius: 8 }} onClick={() => setFilter('all')}>
-                全部 ({nodes.length})
-              </button>
-              <button className={`dock-tab ${filter === 'SOCKS' ? 'active' : ''}`} style={{ height: 26, fontSize: 12, borderRadius: 8 }} onClick={() => setFilter('SOCKS')}>
-                SOCKS5 / 4 ({nodes.filter(n => n.protocol === 'SOCKS5' || n.protocol === 'SOCKS4').length})
-              </button>
-              <button className={`dock-tab ${filter === 'HTTP' ? 'active' : ''}`} style={{ height: 26, fontSize: 12, borderRadius: 8 }} onClick={() => setFilter('HTTP')}>
-                HTTP / HTTPS ({nodes.filter(n => n.protocol === 'HTTP' || n.protocol === 'HTTPS').length})
-              </button>
-            </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <div className="surface-card">
+        <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+          <SegmentedTabs<'all' | 'SOCKS' | 'HTTP'>
+            value={filter}
+            onChange={setFilter}
+            items={[
+              { value: 'all', label: '全部', count: nodes.length },
+              { value: 'SOCKS', label: 'SOCKS5 / 4', count: nodes.filter(n => n.protocol === 'SOCKS5' || n.protocol === 'SOCKS4').length },
+              { value: 'HTTP', label: 'HTTP / HTTPS', count: nodes.filter(n => n.protocol === 'HTTP' || n.protocol === 'HTTPS').length }
+            ]}
+          />
 
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={handleVerifyAll} disabled={testingAll}>
-                {testingAll ? '验真中...' : '全部物理直连验真'}
-              </button>
-              <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={onOpenManual}>+ 手动添加</button>
-              <button className="tx-btn tx-btn-primary tx-btn-sm" onClick={onOpenBatch}>批量导入</button>
-            </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" className="btn-pill btn-soft btn-sm" onClick={handleVerifyAll} disabled={testingAll}>
+              <RefreshSpinIcon size={13} spinning={testingAll} />
+              <span>{testingAll ? '验真中' : '全量直连验真'}</span>
+            </button>
+            <button type="button" className="btn-pill btn-soft btn-sm" onClick={onOpenManual}>
+              <PlusIcon size={12} />
+              <span>手动添加</span>
+            </button>
+            <button type="button" className="btn-pill btn-indigo btn-sm" onClick={onOpenBatch}>
+              <UploadBatchIcon size={13} />
+              <span>批量导入线路</span>
+            </button>
           </div>
-
-          <div className="tx-sep" />
-
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th>节点名称与分组</th>
-                <th>协议</th>
-                <th>代理入口地址</th>
-                <th>真实落地出口 IP / 说明</th>
-                <th>AI 可达性验真</th>
-                <th className="num-r">延迟</th>
-                <th className="num-r">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(n => (
-                <tr key={n.id}>
-                  <td>
-                    <div style={{ fontWeight: 700 }}>{n.name}</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{n.group}</div>
-                  </td>
-                  <td><span className="badge badge-indigo mono">{n.protocol}</span></td>
-                  <td>
-                    <div className="mono">{n.host}:{n.port}</div>
-                    <div className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      {n.username ? `认证：${n.username}` : '无认证'}
-                    </div>
-                  </td>
-                  <td>
-                    <div className="mono" style={{ fontWeight: 600 }}>{n.exitIp}</div>
-                    <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{n.ispSummary}</div>
-                  </td>
-                  <td>
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                      {n.aiReachability.map(tag => (
-                        <span key={tag} className={`badge ${tag.includes('✕') || tag.includes('超时') ? 'badge-red' : 'badge-neutral'}`}>{tag}</span>
-                      ))}
-                    </div>
-                  </td>
-                  <td className="num-r mono" style={{ fontWeight: 700, color: n.status === 'offline' ? 'var(--red-text)' : (n.latencyMs ? 'var(--emerald-text)' : 'var(--text-muted)') }}>
-                    {n.latencyMs ? `${n.latencyMs} ms` : (n.status === 'offline' ? '超时' : '待测')}
-                  </td>
-                  <td className="num-r">
-                    <div style={{ display: 'inline-flex', gap: 6 }}>
-                      <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={() => handleVerifyOne(n.id)}>验真</button>
-                      {n.id !== 'direct-phy' && (
-                        <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={() => handleDelete(n.id)}>删除</button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         </div>
+
+        <div className="soft-divider" />
+
+        <table className="clean-table">
+          <thead>
+            <tr>
+              <th>节点名称与分组</th>
+              <th>协议</th>
+              <th>代理入口地址</th>
+              <th>真实落地出口 IP / 说明</th>
+              <th>AI 可达性</th>
+              <th className="num-r">延迟</th>
+              <th className="num-r">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map(n => (
+              <tr key={n.id}>
+                <td>
+                  <div style={{ fontWeight: 600 }}>{n.name}</div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{n.group}</div>
+                </td>
+                <td className="nowrap"><span className="pill-tag tag-indigo mono">{n.protocol}</span></td>
+                <td className="nowrap">
+                  <div className="mono" style={{ fontSize: 12 }}>{n.host}:{n.port}</div>
+                  <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    {n.username ? `认证：${n.username}` : '无认证'}
+                  </div>
+                </td>
+                <td>
+                  <div className="num" style={{ fontWeight: 600 }}>{n.exitIp}</div>
+                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{n.ispSummary}</div>
+                </td>
+                <td>
+                  <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                    {n.aiReachability.map(tag => (
+                      <span key={tag} className={`pill-tag ${tag.includes('✕') || tag.includes('超时') ? 'tag-coral' : 'tag-neutral'}`}>
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                </td>
+                <td
+                  className="num-r num nowrap"
+                  style={{
+                    fontWeight: 700,
+                    color: n.status === 'offline' ? 'var(--accent-coral-text)' : (n.latencyMs ? 'var(--accent-emerald-text)' : 'var(--text-muted)')
+                  }}
+                >
+                  {n.latencyMs ? `${n.latencyMs} ms` : (n.status === 'offline' ? '超时' : '待测')}
+                </td>
+                <td className="num-r nowrap">
+                  <div style={{ display: 'inline-flex', gap: 6 }}>
+                    <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleVerifyOne(n.id)}>验真</button>
+                    {n.id !== 'direct-phy' && (
+                      <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleDelete(n.id)}>删除</button>
+                    )}
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
       {/* 手动添加弹窗 */}
       {showManual && (
-        <div className="modal-mask">
-          <div className="modal-tray narrow">
-            <form className="modal-card" onSubmit={handleSaveManual}>
-              <div style={{ padding: '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <strong style={{ fontSize: 14.5 }}>手动添加独立代理线路</strong>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>支持 HTTP / HTTPS / SOCKS5 / SOCKS4，出站强制绑定物理网卡</div>
-                </div>
-                <button type="button" className="tx-btn tx-btn-sec tx-btn-sm" onClick={onCloseModals}>关闭</button>
+        <div className="modal-backdrop" onClick={onCloseModals}>
+          <form className="modal-surface narrow" onSubmit={handleSaveManual} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '18px 22px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>手动添加独立代理线路</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>支持 HTTP / HTTPS / SOCKS5 / SOCKS4，出站强制绑定物理网卡</div>
               </div>
-              <div className="tx-sep" />
-              <div style={{ padding: '15px 18px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>协议类型</div>
-                  <select className="tx-select" value={mProto} onChange={e => setMProto(e.target.value as ProxyProtocol)}>
-                    <option value="SOCKS5">SOCKS5 / SOCKS5h</option>
-                    <option value="HTTP">HTTP CONNECT</option>
-                    <option value="HTTPS">HTTPS (TLS)</option>
-                    <option value="SOCKS4">SOCKS4a</option>
-                  </select>
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>备注名称</div>
-                  <input className="tx-input" placeholder="例如：US-AT&T-静态住宅" value={mName} onChange={e => setMName(e.target.value)} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>服务器 IP / 域名 *</div>
-                  <input className="tx-input mono" required placeholder="例如：38.154.227.14" value={mHost} onChange={e => setMHost(e.target.value)} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>端口 *</div>
-                  <input className="tx-input mono" required value={mPort} onChange={e => setMPort(e.target.value)} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>用户名（可选）</div>
-                  <input className="tx-input mono" value={mUser} onChange={e => setMUser(e.target.value)} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>密码（可选）</div>
-                  <input className="tx-input mono" type="password" value={mPass} onChange={e => setMPass(e.target.value)} />
-                </div>
-                <div style={{ gridColumn: 'span 2' }}>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>所属分组</div>
-                  <input className="tx-input" value={mGroup} onChange={e => setMGroup(e.target.value)} />
-                </div>
+              <button type="button" className="btn-pill btn-soft btn-sm" onClick={onCloseModals}>关闭</button>
+            </div>
+            <div className="soft-divider" />
+            <div style={{ padding: '18px 22px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>协议类型</div>
+                <CustomSelect
+                  variant="light"
+                  value={mProto}
+                  options={PROTOCOL_OPTIONS}
+                  onChange={v => setMProto(v as ProxyProtocol)}
+                  ariaLabel="选择手动添加节点协议"
+                />
               </div>
-              <div className="tx-sep" />
-              <div style={{ padding: '12px 18px', background: 'var(--card-subtle)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                <button type="button" className="tx-btn tx-btn-sec" onClick={onCloseModals}>取消</button>
-                <button type="submit" className="tx-btn tx-btn-primary">保存线路</button>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>备注名称</div>
+                <input className="clean-input" placeholder="例如：US-AT&T-静态住宅" value={mName} onChange={e => setMName(e.target.value)} />
               </div>
-            </form>
-          </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>服务器 IP / 域名 *</div>
+                <input className="clean-input mono" required placeholder="例如：38.154.227.14" value={mHost} onChange={e => setMHost(e.target.value)} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>端口 *</div>
+                <input className="clean-input num" required value={mPort} onChange={e => setMPort(e.target.value)} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>用户名（可选）</div>
+                <input className="clean-input mono" value={mUser} onChange={e => setMUser(e.target.value)} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>密码（可选）</div>
+                <input className="clean-input mono" type="password" value={mPass} onChange={e => setMPass(e.target.value)} />
+              </div>
+              <div style={{ gridColumn: 'span 2' }}>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>所属分组</div>
+                <input className="clean-input" value={mGroup} onChange={e => setMGroup(e.target.value)} />
+              </div>
+            </div>
+            <div className="modal-footer-bar">
+              <button type="button" className="btn-pill btn-soft" onClick={onCloseModals}>取消</button>
+              <button type="submit" className="btn-pill btn-indigo">保存线路</button>
+            </div>
+          </form>
         </div>
       )}
 
       {/* 批量导入弹窗 */}
       {showBatch && (
-        <div className="modal-mask">
-          <div className="modal-tray">
-            <div className="modal-card">
-              <div style={{ padding: '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <strong style={{ fontSize: 14.5 }}>批量导入独立代理线路</strong>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>
-                    支持 <span className="mono">socks5://user:pass@ip:port#名称</span>、<span className="mono">http(s)://...</span>、<span className="mono">ip:port:user:pass</span>、CSV 与 Base64 订阅
-                  </div>
+        <div className="modal-backdrop" onClick={onCloseModals}>
+          <div className="modal-surface" onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '18px 22px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>批量导入独立代理线路</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                  支持 <span className="mono">socks5://user:pass@ip:port#名称</span>、<span className="mono">http(s)://...</span>、<span className="mono">ip:port:user:pass</span>、CSV 与 Base64 订阅
                 </div>
-                <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={onCloseModals}>关闭</button>
               </div>
-              <div className="tx-sep" />
-              <div style={{ padding: '15px 18px', display: 'grid', gridTemplateColumns: '1.05fr 1fr', gap: 14 }}>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>粘贴代理文本（后端实时语法解析）</div>
-                  <textarea
-                    className="tx-textarea mono"
-                    rows={10}
-                    style={{ resize: 'none', lineHeight: 1.5 }}
-                    value={batchText}
-                    onChange={e => setBatchText(e.target.value)}
-                  />
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>无前缀行默认协议</div>
-                      <select className="tx-select" value={batchProto} onChange={e => setBatchProto(e.target.value as ProxyProtocol)}>
-                        <option value="SOCKS5">SOCKS5h (远端解析)</option>
-                        <option value="HTTP">HTTP CONNECT</option>
-                        <option value="HTTPS">HTTPS (TLS)</option>
-                        <option value="SOCKS4">SOCKS4a</option>
-                      </select>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>统一分组标签</div>
-                      <input className="tx-input" value={batchGroup} onChange={e => setBatchGroup(e.target.value)} />
-                    </div>
+              <button type="button" className="btn-pill btn-soft btn-sm" onClick={onCloseModals}>关闭</button>
+            </div>
+            <div className="soft-divider" />
+            <div style={{ padding: '18px 22px', display: 'grid', gridTemplateColumns: '1.05fr 1fr', gap: 16 }}>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>粘贴代理文本（实时语法解析）</div>
+                <textarea
+                  className="clean-textarea mono"
+                  rows={10}
+                  style={{ resize: 'none', lineHeight: 1.55 }}
+                  value={batchText}
+                  onChange={e => setBatchText(e.target.value)}
+                />
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>无前缀行默认协议</div>
+                    <CustomSelect
+                      variant="light"
+                      value={batchProto}
+                      options={PROTOCOL_OPTIONS}
+                      onChange={v => setBatchProto(v as ProxyProtocol)}
+                      ariaLabel="选择无前缀行默认协议"
+                    />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>统一分组标签</div>
+                    <input className="clean-input" value={batchGroup} onChange={e => setBatchGroup(e.target.value)} />
                   </div>
                 </div>
+              </div>
 
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                    <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)' }}>实时解析与去重校验</span>
-                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--emerald-text)', fontWeight: 600 }}>
-                      有效 {preview?.validCount ?? 0} · 重复 {preview?.duplicateCount ?? 0} · 异常 {preview?.errorCount ?? 0}
-                    </span>
-                  </div>
-                  <div style={{ border: '1px solid var(--card-border)', borderRadius: 12, background: 'var(--card-subtle)', maxHeight: 256, overflowY: 'auto' }}>
-                    {(preview?.items ?? []).map(it => (
-                      <div key={it.lineNumber} style={{ padding: '8px 11px', borderBottom: '1px solid var(--card-border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-                        <div>
-                          <div style={{ fontWeight: 600, fontSize: 12 }}>
-                            {it.valid && it.node ? it.node.name : it.rawLine}
-                          </div>
-                          <div className="mono" style={{ fontSize: 11, color: it.valid ? 'var(--text-secondary)' : 'var(--red-text)' }}>
-                            {it.valid && it.node ? `${it.node.host}:${it.node.port} · ${it.node.username ?? '无认证'}` : it.errorReason}
-                          </div>
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>实时解析与去重校验</span>
+                  <span className="num" style={{ fontSize: 11.5, color: 'var(--accent-indigo)', fontWeight: 600 }}>
+                    有效 {preview?.validCount ?? 0} · 重复 {preview?.duplicateCount ?? 0} · 异常 {preview?.errorCount ?? 0}
+                  </span>
+                </div>
+                <div style={{ borderRadius: 12, background: 'var(--bg-subtle)', maxHeight: 268, overflowY: 'auto' }}>
+                  {(preview?.items ?? []).map(it => (
+                    <div
+                      key={it.lineNumber}
+                      style={{
+                        padding: '10px 12px',
+                        borderBottom: '1px solid var(--divider)',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: 8
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontWeight: 600, fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {it.valid && it.node ? it.node.name : it.rawLine}
                         </div>
-                        <span className={`badge ${it.valid ? 'badge-emerald' : 'badge-red'} mono`}>
-                          {it.valid && it.node ? `${it.node.protocol} ✓` : (it.isDuplicate ? '重复' : '错误')}
-                        </span>
+                        <div className="num" style={{ fontSize: 11, color: it.valid ? 'var(--text-secondary)' : 'var(--accent-coral-text)' }}>
+                          {it.valid && it.node ? `${it.node.host}:${it.node.port} · ${it.node.username ?? '无认证'}` : it.errorReason}
+                        </div>
                       </div>
-                    ))}
-                  </div>
+                      <span className={`pill-tag ${it.valid ? 'tag-emerald' : 'tag-coral'} mono`}>
+                        {it.valid && it.node ? `${it.node.protocol}` : (it.isDuplicate ? '重复' : '错误')}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
-              <div className="tx-sep" />
-              <div style={{ padding: '12px 18px', background: 'var(--card-subtle)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                <button className="tx-btn tx-btn-sec" onClick={onCloseModals}>取消</button>
-                <button className="tx-btn tx-btn-primary" disabled={!preview || preview.validCount === 0} onClick={handleImportBatch}>
-                  确认导入 ({preview?.validCount ?? 0} 条有效)
-                </button>
-              </div>
+            </div>
+            <div className="modal-footer-bar">
+              <button type="button" className="btn-pill btn-soft" onClick={onCloseModals}>取消</button>
+              <button type="button" className="btn-pill btn-indigo" disabled={!preview || preview.validCount === 0} onClick={handleImportBatch}>
+                确认导入 ({preview?.validCount ?? 0} 条有效)
+              </button>
             </div>
           </div>
         </div>

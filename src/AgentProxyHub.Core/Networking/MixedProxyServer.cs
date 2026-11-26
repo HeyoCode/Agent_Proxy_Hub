@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -19,18 +20,26 @@ public sealed class MixedProxyServer : IDisposable
     {
         public required AppSeat Seat { get; set; }
         public TcpListener? Listener { get; set; }
+        public TcpListener? ListenerV6 { get; set; }
         public CancellationTokenSource? Cts { get; set; }
         public long ActiveConnections;
         public long TotalConnections;
         public long BytesTx;
         public long BytesRx;
+        public long LastSampleBytesTx;
+        public long LastSampleBytesRx;
+        public long LastSampleTimestamp = Stopwatch.GetTimestamp();
+        public long BytesTxPerSec;
+        public long BytesRxPerSec;
         public long SniRecoveredCount;
         public long KillSwitchBlockedCount;
+        public long Ipv6BlockedCount;
     }
 
     private readonly UpstreamConnector _connector;
     private readonly ConcurrentDictionary<string, SeatListenerState> _seats = new();
     private readonly object _configLock = new();
+    private readonly CancellationTokenSource _rateSamplerCts = new();
     private List<ProxyNode> _nodes = new();
     private IsolationSettings _isolation = new();
     private bool _disposed;
@@ -38,12 +47,14 @@ public sealed class MixedProxyServer : IDisposable
     public MixedProxyServer(UpstreamConnector connector)
     {
         _connector = connector;
+        _ = RunRateSamplerLoopAsync(_rateSamplerCts.Token);
     }
 
     public void UpdateTopology(IReadOnlyList<AppSeat> seats, IReadOnlyList<ProxyNode> nodes, IsolationSettings isolation)
     {
         lock (_configLock)
         {
+            bool ipv6Changed = _isolation.EnableIpv6 != isolation.EnableIpv6;
             _nodes = nodes.ToList();
             _isolation = isolation;
 
@@ -67,7 +78,7 @@ public sealed class MixedProxyServer : IDisposable
                 {
                     StopListener(st);
                 }
-                else if (st.Listener == null || portChanged || enableChanged)
+                else if (st.Listener == null || portChanged || enableChanged || ipv6Changed)
                 {
                     StopListener(st);
                     StartListener(st);
@@ -106,11 +117,60 @@ public sealed class MixedProxyServer : IDisposable
                 TotalConnections = Interlocked.Read(ref st.TotalConnections),
                 BytesTx = Interlocked.Read(ref st.BytesTx),
                 BytesRx = Interlocked.Read(ref st.BytesRx),
+                BytesTxPerSec = Interlocked.Read(ref st.BytesTxPerSec),
+                BytesRxPerSec = Interlocked.Read(ref st.BytesRxPerSec),
                 SniRecoveredCount = Interlocked.Read(ref st.SniRecoveredCount),
-                KillSwitchBlockedCount = Interlocked.Read(ref st.KillSwitchBlockedCount)
+                KillSwitchBlockedCount = Interlocked.Read(ref st.KillSwitchBlockedCount),
+                Ipv6BlockedCount = Interlocked.Read(ref st.Ipv6BlockedCount)
             });
         }
         return result;
+    }
+
+    /// <summary>
+    /// 计算各个席位的实时上下行速率（字节/秒），默认由每秒后台采样器自动触发，也可由单元测试显式驱动
+    /// </summary>
+    public void SampleThroughputRates()
+    {
+        long nowTs = Stopwatch.GetTimestamp();
+        foreach (var st in _seats.Values)
+        {
+            long prevTs = Interlocked.Read(ref st.LastSampleTimestamp);
+            double elapsedSec = (nowTs - prevTs) / (double)Stopwatch.Frequency;
+            if (elapsedSec < 0.05) continue;
+
+            long curTx = Interlocked.Read(ref st.BytesTx);
+            long curRx = Interlocked.Read(ref st.BytesRx);
+            long prevTx = Interlocked.Exchange(ref st.LastSampleBytesTx, curTx);
+            long prevRx = Interlocked.Exchange(ref st.LastSampleBytesRx, curRx);
+            Interlocked.Exchange(ref st.LastSampleTimestamp, nowTs);
+
+            long deltaTx = Math.Max(0, curTx - prevTx);
+            long deltaRx = Math.Max(0, curRx - prevRx);
+            Interlocked.Exchange(ref st.BytesTxPerSec, (long)Math.Round(deltaTx / elapsedSec));
+            Interlocked.Exchange(ref st.BytesRxPerSec, (long)Math.Round(deltaRx / elapsedSec));
+        }
+    }
+
+    private async Task RunRateSamplerLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(ct))
+            {
+                SampleThroughputRates();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 正常停止
+        }
+    }
+
+    private bool IsIpv6Enabled()
+    {
+        lock (_configLock) return _isolation.EnableIpv6;
     }
 
     private void StartListener(SeatListenerState st)
@@ -125,14 +185,35 @@ public sealed class MixedProxyServer : IDisposable
         st.Cts = cts;
 
         _ = Task.Run(() => AcceptLoopAsync(st, listener, cts.Token), cts.Token);
+
+        // 开启 IPv6 开关时同步在 [::1] 环回启动双栈伴随监听（绝不暴露到局域网）
+        if (_isolation.EnableIpv6 && Socket.OSSupportsIPv6)
+        {
+            try
+            {
+                int boundPort = ((IPEndPoint)listener.LocalEndpoint).Port;
+                var listenerV6 = new TcpListener(IPAddress.IPv6Loopback, boundPort);
+                listenerV6.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                listenerV6.Start();
+                st.ListenerV6 = listenerV6;
+                _ = Task.Run(() => AcceptLoopAsync(st, listenerV6, cts.Token), cts.Token);
+            }
+            catch
+            {
+                // 若系统禁用了 IPv6 环回，则优雅降级仅保留 127.0.0.1 监听
+                st.ListenerV6 = null;
+            }
+        }
     }
 
     private static void StopListener(SeatListenerState st)
     {
         try { st.Cts?.Cancel(); } catch { }
         try { st.Listener?.Stop(); } catch { }
+        try { st.ListenerV6?.Stop(); } catch { }
         st.Cts?.Dispose();
         st.Listener = null;
+        st.ListenerV6 = null;
         st.Cts = null;
     }
 
@@ -240,6 +321,15 @@ public sealed class MixedProxyServer : IDisposable
         await UpstreamConnector.ReadExactAsync(clientStream, portBuf, ct);
         int targetPort = BinaryPrimitives.ReadUInt16BigEndian(portBuf);
 
+        // IPv6 关闭时快速拒绝 IPv6 目标，避免 Happy Eyeballs 长时间等待或回退泄漏
+        if (!IsIpv6Enabled() && (reqHdr[3] == 0x04 || UpstreamConnector.IsIpv6Literal(targetHost)))
+        {
+            Interlocked.Increment(ref st.Ipv6BlockedCount);
+            await clientStream.WriteAsync(new byte[] { 0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, ct);
+            await clientStream.FlushAsync(ct);
+            return;
+        }
+
         // 若命中 Fake-IP 段且开启 SNI 还原：先回复 SOCKS5 成功并预读首包以提取 SNI 真实域名
         byte[]? initialPayload = null;
         if (_isolation.TlsSniRecoveryEnabled && TlsSniInspector.IsFakeIp(targetHost))
@@ -335,6 +425,14 @@ public sealed class MixedProxyServer : IDisposable
         {
             (string host, int port) = ParseHostPort(target, 443);
 
+            if (!IsIpv6Enabled() && UpstreamConnector.IsIpv6Literal(host))
+            {
+                Interlocked.Increment(ref st.Ipv6BlockedCount);
+                await clientStream.WriteAsync("HTTP/1.1 502 Bad Gateway (IPv6 Disabled)\r\n\r\n"u8.ToArray(), ct);
+                await clientStream.FlushAsync(ct);
+                return;
+            }
+
             if (_isolation.TlsSniRecoveryEnabled && TlsSniInspector.IsFakeIp(host))
             {
                 await clientStream.WriteAsync("HTTP/1.1 200 Connection Established\r\n\r\n"u8.ToArray(), ct);
@@ -371,8 +469,16 @@ public sealed class MixedProxyServer : IDisposable
             if (!Uri.TryCreate(target, UriKind.Absolute, out var uri))
                 return;
 
-            string host = uri.Host;
+            string host = uri.Host.Trim('[', ']');
             int port = uri.Port > 0 ? uri.Port : 80;
+
+            if (!IsIpv6Enabled() && UpstreamConnector.IsIpv6Literal(host))
+            {
+                Interlocked.Increment(ref st.Ipv6BlockedCount);
+                await clientStream.WriteAsync("HTTP/1.1 502 Bad Gateway (IPv6 Disabled)\r\n\r\n"u8.ToArray(), ct);
+                await clientStream.FlushAsync(ct);
+                return;
+            }
 
             using var upstream = await DialUpstreamOrBlockAsync(st, host, port, ct);
             if (upstream == null)
@@ -551,6 +657,8 @@ public sealed class MixedProxyServer : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        try { _rateSamplerCts.Cancel(); } catch { }
+        _rateSamplerCts.Dispose();
         foreach (var st in _seats.Values)
         {
             StopListener(st);

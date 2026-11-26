@@ -30,6 +30,9 @@ public sealed class PhysicalNicManager
     private const int IpProtoIp = 0;
     private const int WinIpUnicastIf = 31;
     private const int MacIpBoundIf = 25;
+    private const int IpProtoIpv6 = 41;
+    private const int WinIpv6UnicastIf = 31;
+    private const int MacIpv6BoundIf = 125;
 
     [DllImport("ws2_32.dll", SetLastError = true)]
     private static extern int setsockopt(IntPtr s, int level, int optname, ref int optval, int optlen);
@@ -92,13 +95,18 @@ public sealed class PhysicalNicManager
 
             var ipProps = SafeGetIpProperties(nic);
             int ifIndex = SafeGetIpv4Index(nic, ipProps);
+            int ifIndex6 = SafeGetIpv6Index(nic, ipProps);
 
             string? ipv4 = ipProps?.UnicastAddresses
                 .FirstOrDefault(u => u.Address.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(u.Address))
                 ?.Address.ToString();
 
-            // 忽略无接口索引且无 IPv4 的幽灵虚拟过滤层
-            if (ifIndex <= 0 && string.IsNullOrEmpty(ipv4))
+            string? ipv6 = ipProps?.UnicastAddresses
+                .FirstOrDefault(u => u.Address.AddressFamily == AddressFamily.InterNetworkV6 && !IPAddress.IsLoopback(u.Address) && !u.Address.IsIPv6LinkLocal)
+                ?.Address.ToString();
+
+            // 忽略无任何协议栈索引且无单播地址的幽灵过滤层
+            if (ifIndex <= 0 && ifIndex6 <= 0 && string.IsNullOrEmpty(ipv4) && string.IsNullOrEmpty(ipv6))
                 continue;
 
             string? gateway = ipProps?.GatewayAddresses
@@ -124,6 +132,8 @@ public sealed class PhysicalNicManager
                 Description = string.IsNullOrWhiteSpace(nic.Description) ? nic.Name : nic.Description,
                 InterfaceIndex = ifIndex,
                 IPv4Address = ipv4,
+                IPv6InterfaceIndex = ifIndex6,
+                IPv6Address = ipv6,
                 GatewayAddress = gateway,
                 Status = nic.OperationalStatus == OperationalStatus.Up ? "Up" : "Down",
                 IsVirtualOrTunnel = isVirtual,
@@ -179,73 +189,70 @@ public sealed class PhysicalNicManager
             return socket;
         }
 
-        var nic = GetLockedAdapter();
-        if (nic == null || nic.InterfaceIndex <= 0 || family != AddressFamily.InterNetwork)
-        {
-            return socket;
-        }
-
-        try
-        {
-            if (OperatingSystem.IsWindows())
-            {
-                if (!string.IsNullOrEmpty(nic.IPv4Address) && IPAddress.TryParse(nic.IPv4Address, out var localIp))
-                {
-                    socket.Bind(new IPEndPoint(localIp, 0));
-                }
-
-                // Windows IP_UNICAST_IF 要求网络字节序接口索引
-                int netOrderIndex = IPAddress.HostToNetworkOrder(nic.InterfaceIndex);
-                setsockopt(socket.Handle, IpProtoIp, WinIpUnicastIf, ref netOrderIndex, sizeof(int));
-            }
-            else if (OperatingSystem.IsMacOS())
-            {
-                uint idx = (uint)nic.InterfaceIndex;
-                mac_setsockopt((int)socket.Handle, IpProtoIp, MacIpBoundIf, ref idx, sizeof(uint));
-            }
-        }
-        catch
-        {
-            // 在受限沙盒或接口瞬态变化时优雅降级，由调用方连接与熔断逻辑兜底
-        }
-
+        BindSocketToPhysicalNic(socket, family);
         return socket;
     }
 
     /// <summary>
     /// 创建直绑物理网卡的 UDP Socket（用于上游代理域名的独立防污染 DNS 解析）
     /// </summary>
-    public Socket CreateBoundUdpSocket()
+    public Socket CreateBoundUdpSocket(AddressFamily family = AddressFamily.InterNetwork)
     {
-        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        var socket = new Socket(family, SocketType.Dgram, ProtocolType.Udp);
+        BindSocketToPhysicalNic(socket, family);
+        return socket;
+    }
+
+    private void BindSocketToPhysicalNic(Socket socket, AddressFamily family)
+    {
         var nic = GetLockedAdapter();
-        if (nic == null || nic.InterfaceIndex <= 0)
-            return socket;
+        if (nic == null) return;
 
         try
         {
-            if (OperatingSystem.IsWindows())
+            if (family == AddressFamily.InterNetwork && nic.InterfaceIndex > 0)
             {
-                if (!string.IsNullOrEmpty(nic.IPv4Address) && IPAddress.TryParse(nic.IPv4Address, out var localIp))
+                if (OperatingSystem.IsWindows())
                 {
-                    socket.Bind(new IPEndPoint(localIp, 0));
-                }
+                    if (!string.IsNullOrEmpty(nic.IPv4Address) && IPAddress.TryParse(nic.IPv4Address, out var localIp))
+                    {
+                        socket.Bind(new IPEndPoint(localIp, 0));
+                    }
 
-                int netOrderIndex = IPAddress.HostToNetworkOrder(nic.InterfaceIndex);
-                setsockopt(socket.Handle, IpProtoIp, WinIpUnicastIf, ref netOrderIndex, sizeof(int));
+                    // Windows IP_UNICAST_IF 要求网络字节序接口索引
+                    int netOrderIndex = IPAddress.HostToNetworkOrder(nic.InterfaceIndex);
+                    setsockopt(socket.Handle, IpProtoIp, WinIpUnicastIf, ref netOrderIndex, sizeof(int));
+                }
+                else if (OperatingSystem.IsMacOS())
+                {
+                    uint idx = (uint)nic.InterfaceIndex;
+                    mac_setsockopt((int)socket.Handle, IpProtoIp, MacIpBoundIf, ref idx, sizeof(uint));
+                }
             }
-            else if (OperatingSystem.IsMacOS())
+            else if (family == AddressFamily.InterNetworkV6 && nic.IPv6InterfaceIndex > 0)
             {
-                uint idx = (uint)nic.InterfaceIndex;
-                mac_setsockopt((int)socket.Handle, IpProtoIp, MacIpBoundIf, ref idx, sizeof(uint));
+                if (OperatingSystem.IsWindows())
+                {
+                    if (!string.IsNullOrEmpty(nic.IPv6Address) && IPAddress.TryParse(nic.IPv6Address, out var localIp6))
+                    {
+                        socket.Bind(new IPEndPoint(localIp6, 0));
+                    }
+
+                    // Windows IPV6_UNICAST_IF 要求主机字节序接口索引
+                    int hostOrderV6Idx = nic.IPv6InterfaceIndex;
+                    setsockopt(socket.Handle, IpProtoIpv6, WinIpv6UnicastIf, ref hostOrderV6Idx, sizeof(int));
+                }
+                else if (OperatingSystem.IsMacOS())
+                {
+                    uint idx6 = (uint)nic.IPv6InterfaceIndex;
+                    mac_setsockopt((int)socket.Handle, IpProtoIpv6, MacIpv6BoundIf, ref idx6, sizeof(uint));
+                }
             }
         }
         catch
         {
-            // ignore
+            // 在受限沙盒或接口瞬态变化时优雅降级，由调用方连接与熔断逻辑兜底
         }
-
-        return socket;
     }
 
     private static void ConfigureKeepAlive(Socket socket)
@@ -283,6 +290,21 @@ public sealed class PhysicalNicManager
         try
         {
             return ipProps.GetIPv4Properties()?.Index ?? 0;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private static int SafeGetIpv6Index(NetworkInterface nic, IPInterfaceProperties? ipProps)
+    {
+        if (ipProps == null || !nic.Supports(NetworkInterfaceComponent.IPv6))
+            return 0;
+
+        try
+        {
+            return ipProps.GetIPv6Properties()?.Index ?? 0;
         }
         catch
         {

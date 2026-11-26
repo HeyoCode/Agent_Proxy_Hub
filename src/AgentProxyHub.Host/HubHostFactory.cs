@@ -37,6 +37,10 @@ public static class HubHostFactory
         bool? KillSwitchEnabled,
         bool? AllowSameGroupFailover);
 
+    public sealed record ToggleAllSeatsRequest(bool Enabled);
+
+    public sealed record SeatTakeoverRequest(bool Enabled);
+
     public sealed record IsolationUpdateRequest(
         string? LockedPhysicalNicId,
         bool? AutoBypassVirtualNics,
@@ -44,7 +48,8 @@ public static class HubHostFactory
         bool? ForceRemoteDns,
         bool? DirectPhysicalDohEnabled,
         string? DohServerIp,
-        bool? GlobalKillSwitch);
+        bool? GlobalKillSwitch,
+        bool? EnableIpv6);
 
     public sealed record PricingUpsertRequest(
         string Pattern,
@@ -75,12 +80,20 @@ public static class HubHostFactory
         pricingCatalog.SetCustomRules(doc.CustomPricings);
         var sessionScanner = new SessionLogScanner();
         var usageService = new UsageStatsService(sessionScanner, pricingCatalog);
+        var takeoverService = new AppProxyTakeoverService();
 
-        // 首次启动即异步预扫本地会话日志并拉起全部已启用席位端口
-        proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+        // 支持仅用于截图/UI验收的隔离端口模式，避免与已运行实例的端口冲突
+        int? verifyPort = ParseVerifyPort(args);
+        bool isVerifyOnly = verifyPort.HasValue;
+
+        if (!isVerifyOnly)
+        {
+            // 首次启动即异步预扫本地会话日志并拉起全部已启用席位端口
+            proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+        }
         _ = Task.Run(() => usageService.SyncNow());
 
-        int apiPort = doc.HostApiPort > 0 ? doc.HostApiPort : 17880;
+        int apiPort = verifyPort ?? (doc.HostApiPort > 0 ? doc.HostApiPort : 17880);
         builder.WebHost.UseUrls($"http://127.0.0.1:{apiPort}");
 
         builder.Services.AddSingleton(store);
@@ -90,17 +103,68 @@ public static class HubHostFactory
         builder.Services.AddSingleton(healthChecker);
         builder.Services.AddSingleton(pricingCatalog);
         builder.Services.AddSingleton(usageService);
+        builder.Services.AddSingleton(takeoverService);
 
         var app = builder.Build();
         var stateLock = new object();
+
+        // 后台每 5 秒自动增量同步一次本地 AI 会话日志，新产生对话 5 秒内自动呈现在大盘中
+        var stoppingToken = app.Lifetime.ApplicationStopping;
+        _ = Task.Run(async () =>
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+            try
+            {
+                while (await timer.WaitForNextTickAsync(stoppingToken))
+                {
+                    try
+                    {
+                        usageService.SyncNow();
+                    }
+                    catch
+                    {
+                        // 单轮读取冲突安全跳过，等待下一轮 5 秒采样
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // 正常关闭
+            }
+        }, stoppingToken);
 
         // 解析静态资源目录（支持独立 Host 发布及桌面壳内嵌目录）
         string wwwroot = ResolveWwwRoot(customWwwRoot);
         if (Directory.Exists(wwwroot))
         {
+            // 对根路径与 HTML 文档强制禁用 HTTP 缓存，防止桌面端 WebView2 覆盖升级后命中旧版 index.html
+            app.Use(async (ctx, next) =>
+            {
+                string reqPath = ctx.Request.Path.Value ?? "/";
+                if (reqPath == "/" || reqPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+                {
+                    ctx.Response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
+                    ctx.Response.Headers["Pragma"] = "no-cache";
+                    ctx.Response.Headers["Expires"] = "0";
+                }
+                await next();
+            });
+
             var fp = new PhysicalFileProvider(wwwroot);
             app.UseDefaultFiles(new DefaultFilesOptions { FileProvider = fp });
-            app.UseStaticFiles(new StaticFileOptions { FileProvider = fp });
+            app.UseStaticFiles(new StaticFileOptions
+            {
+                FileProvider = fp,
+                OnPrepareResponse = ctx =>
+                {
+                    if (ctx.File.Name.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
+                    {
+                        ctx.Context.Response.Headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0";
+                        ctx.Context.Response.Headers["Pragma"] = "no-cache";
+                        ctx.Context.Response.Headers["Expires"] = "0";
+                    }
+                }
+            });
         }
 
         // 1. 总览与实时隔离状态
@@ -115,6 +179,7 @@ public static class HubHostFactory
                 var cliSnippets = AppSeatManager.BuildCliSnippets(
                     doc.Seats.FirstOrDefault(s => s.Id == "claude"),
                     doc.Seats.FirstOrDefault(s => s.Id == "agy"));
+                var seatTakeovers = takeoverService.InspectAll(doc.Seats);
 
                 return Results.Ok(new
                 {
@@ -129,6 +194,7 @@ public static class HubHostFactory
                     seats = doc.Seats,
                     nodes = doc.Nodes,
                     trafficSnapshots = traffic,
+                    seatTakeovers,
                     cliSnippets
                 });
             }
@@ -145,13 +211,15 @@ public static class HubHostFactory
             if (string.IsNullOrWhiteSpace(req.Host) || req.Port is < 1 or > 65535)
                 return Results.BadRequest(new { message = "主机地址或端口无效 (1~65535)" });
 
+            string cleanHost = req.Host.Trim().Trim('[', ']');
+            string displayHost = cleanHost.Contains(':') ? $"[{cleanHost}]" : cleanHost;
             var node = new ProxyNode
             {
                 Id = "n_" + Guid.NewGuid().ToString("N")[..8],
                 Protocol = req.Protocol,
-                Name = string.IsNullOrWhiteSpace(req.Name) ? $"{req.Protocol}-{req.Host}:{req.Port}" : req.Name.Trim(),
+                Name = string.IsNullOrWhiteSpace(req.Name) ? $"{req.Protocol}-{displayHost}:{req.Port}" : req.Name.Trim(),
                 Group = string.IsNullOrWhiteSpace(req.Group) ? "手动添加专线" : req.Group.Trim(),
-                Host = req.Host.Trim(),
+                Host = cleanHost,
                 Port = req.Port,
                 Username = string.IsNullOrWhiteSpace(req.Username) ? null : req.Username.Trim(),
                 Password = string.IsNullOrWhiteSpace(req.Password) ? null : req.Password.Trim(),
@@ -164,7 +232,8 @@ public static class HubHostFactory
             {
                 doc.Nodes.Insert(0, node);
                 store.Save(doc);
-                proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                if (!isVerifyOnly)
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
             }
             return Results.Ok(node);
         });
@@ -193,7 +262,8 @@ public static class HubHostFactory
                 if (added.Count > 0)
                 {
                     store.Save(doc);
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    if (!isVerifyOnly)
+                        proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
                 }
             }
             return Results.Ok(new
@@ -216,7 +286,8 @@ public static class HubHostFactory
                     seat.BoundNodeId = doc.Nodes.FirstOrDefault()?.Id;
                 }
                 store.Save(doc);
-                proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                if (!isVerifyOnly)
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
                 return Results.Ok(new { removed });
             }
         });
@@ -271,6 +342,7 @@ public static class HubHostFactory
                 var seat = doc.Seats.FirstOrDefault(s => s.Id == id);
                 if (seat == null) return Results.NotFound();
 
+                bool portChanged = req.LocalPort is >= 1024 and <= 65535 && req.LocalPort.Value != seat.LocalPort;
                 if (req.Enabled.HasValue) seat.Enabled = req.Enabled.Value;
                 if (req.BoundNodeId != null) seat.BoundNodeId = req.BoundNodeId;
                 if (req.LocalPort is >= 1024 and <= 65535) seat.LocalPort = req.LocalPort.Value;
@@ -278,8 +350,148 @@ public static class HubHostFactory
                 if (req.AllowSameGroupFailover.HasValue) seat.AllowSameGroupFailover = req.AllowSameGroupFailover.Value;
 
                 store.Save(doc);
-                proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                if (!isVerifyOnly)
+                {
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    if (portChanged && takeoverService.InspectSeat(seat).IsTakenOver)
+                    {
+                        takeoverService.SetTakeover(seat, true);
+                    }
+                }
                 return Results.Ok(seat);
+            }
+        });
+
+        app.MapPost("/api/seats/{id}/takeover", (string id, SeatTakeoverRequest req) =>
+        {
+            if (isVerifyOnly)
+            {
+                return Results.Ok(new
+                {
+                    ok = false,
+                    message = "验证预览模式禁止修改本机应用配置文件",
+                    seatTakeovers = takeoverService.InspectAll(doc.Seats)
+                });
+            }
+
+            lock (stateLock)
+            {
+                var seat = doc.Seats.FirstOrDefault(s => s.Id == id);
+                if (seat == null) return Results.NotFound();
+
+                if (req.Enabled && !seat.Enabled)
+                {
+                    seat.Enabled = true;
+                    store.Save(doc);
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                }
+
+                var (ok, message, status) = takeoverService.SetTakeover(seat, req.Enabled);
+                return Results.Ok(new
+                {
+                    ok,
+                    message,
+                    status,
+                    seatTakeovers = takeoverService.InspectAll(doc.Seats)
+                });
+            }
+        });
+
+        app.MapPost("/api/seats/{id}/launch", (string id) =>
+        {
+            if (isVerifyOnly)
+            {
+                return Results.Ok(new
+                {
+                    ok = false,
+                    message = "验证预览模式不拉起外部应用进程",
+                    seatTakeovers = takeoverService.InspectAll(doc.Seats)
+                });
+            }
+
+            lock (stateLock)
+            {
+                var seat = doc.Seats.FirstOrDefault(s => s.Id == id);
+                if (seat == null) return Results.NotFound();
+
+                if (!seat.Enabled)
+                {
+                    seat.Enabled = true;
+                    store.Save(doc);
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                }
+
+                var (ok, message) = takeoverService.LaunchWithProxy(seat);
+                return Results.Ok(new
+                {
+                    ok,
+                    message,
+                    seatTakeovers = takeoverService.InspectAll(doc.Seats)
+                });
+            }
+        });
+
+        app.MapPost("/api/seats/{id}/verify-tunnel", async (string id, CancellationToken ct) =>
+        {
+            AppSeat? seat;
+            ProxyNode? boundNode;
+            IsolationSettings iso;
+            lock (stateLock)
+            {
+                seat = doc.Seats.FirstOrDefault(s => s.Id == id);
+                if (seat == null) return Results.NotFound();
+                if (!seat.Enabled && !isVerifyOnly)
+                {
+                    seat.Enabled = true;
+                    store.Save(doc);
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                }
+                boundNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
+                iso = doc.Isolation;
+            }
+
+            if (isVerifyOnly)
+            {
+                if (boundNode != null && boundNode.Protocol != ProxyProtocol.DIRECT_PHYSICAL)
+                    await healthChecker.VerifyNodeAsync(boundNode, iso, ct);
+                return Results.Ok(new TunnelVerificationResult
+                {
+                    Ok = boundNode?.Status == "online",
+                    SeatId = seat.Id,
+                    LocalPort = seat.LocalPort,
+                    ExitIp = boundNode?.ExitIp ?? "—",
+                    LatencyMs = boundNode?.LatencyMs,
+                    Node = boundNode,
+                    Message = "预览模式完成节点直连检测"
+                });
+            }
+
+            var res = await healthChecker.VerifyViaLocalSeatAsync(seat.Id, seat.LocalPort, boundNode, iso, null, ct);
+            var snap = proxyServer.GetTrafficSnapshots().FirstOrDefault(s => s.SeatId == seat.Id);
+            res.BytesTx = snap?.BytesTx ?? 0;
+            res.BytesRx = snap?.BytesRx ?? 0;
+
+            lock (stateLock)
+            {
+                store.Save(doc);
+            }
+
+            return Results.Ok(res);
+        });
+
+        app.MapPost("/api/seats/toggle-all", (ToggleAllSeatsRequest req) =>
+        {
+            lock (stateLock)
+            {
+                foreach (var seat in doc.Seats)
+                {
+                    seat.Enabled = req.Enabled;
+                }
+
+                store.Save(doc);
+                if (!isVerifyOnly)
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                return Results.Ok(doc.Seats);
             }
         });
 
@@ -321,10 +533,12 @@ public static class HubHostFactory
                 if (req.DirectPhysicalDohEnabled.HasValue) doc.Isolation.DirectPhysicalDohEnabled = req.DirectPhysicalDohEnabled.Value;
                 if (!string.IsNullOrWhiteSpace(req.DohServerIp)) doc.Isolation.DohServerIp = req.DohServerIp.Trim();
                 if (req.GlobalKillSwitch.HasValue) doc.Isolation.GlobalKillSwitch = req.GlobalKillSwitch.Value;
+                if (req.EnableIpv6.HasValue) doc.Isolation.EnableIpv6 = req.EnableIpv6.Value;
 
                 nicManager.Refresh(doc.Isolation.LockedPhysicalNicId);
                 store.Save(doc);
-                proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                if (!isVerifyOnly)
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
                 return Results.Ok(new
                 {
                     settings = doc.Isolation,
@@ -401,6 +615,29 @@ public static class HubHostFactory
         });
 
         return app;
+    }
+
+    private static int? ParseVerifyPort(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            string a = args[i];
+            if (a.StartsWith("--verify-port=", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(a["--verify-port=".Length..], out int eqPort) &&
+                eqPort is >= 1024 and <= 65535)
+            {
+                return eqPort;
+            }
+
+            if (a.Equals("--verify-port", StringComparison.OrdinalIgnoreCase) &&
+                i + 1 < args.Length &&
+                int.TryParse(args[i + 1], out int nextPort) &&
+                nextPort is >= 1024 and <= 65535)
+            {
+                return nextPort;
+            }
+        }
+        return null;
     }
 
     private static string ResolveWwwRoot(string? customWwwRoot)

@@ -1,7 +1,7 @@
 {
   "name": "agent-proxy-hub-web",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.3.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/plus-jakarta-sans": "^5.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

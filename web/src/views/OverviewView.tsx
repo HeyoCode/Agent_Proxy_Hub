@@ -1,254 +1,628 @@
-import React from 'react';
-import { AppSeat, OverviewResponse, ProxyNode, api, formatBytes } from '../api';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  AppSeat,
+  OverviewResponse,
+  UsageDashboardResponse,
+  api,
+  formatCompactTokens
+} from '../api';
+import {
+  AlertCircleIcon,
+  CheckTinyIcon,
+  CrossTinyIcon,
+  SeatBrandIcon,
+  ShieldCheckIcon
+} from '../components/Icons';
+import { SegmentedTabs } from '../components/SegmentedTabs';
 
 interface Props {
   data: OverviewResponse;
+  selectedSeatId: string;
+  onSelectSeat: (seatId: string) => void;
   onReload: () => Promise<void>;
   onToast: (msg: string) => void;
   onOpenBatch: () => void;
   onGoStats: () => void;
 }
 
-export const OverviewView: React.FC<Props> = ({ data, onReload, onToast, onOpenBatch, onGoStats }) => {
-  const activeSeats = data.seats.filter(s => s.enabled).length;
-  const onlineNodes = data.nodes.filter(n => n.status === 'online').length;
-  const totalConns = data.trafficSnapshots.reduce((s, t) => s + t.activeConnections, 0);
-  const totalTx = data.trafficSnapshots.reduce((s, t) => s + t.bytesTx, 0);
-  const totalRx = data.trafficSnapshots.reduce((s, t) => s + t.bytesRx, 0);
+interface ChartPoint {
+  label: string;
+  tokens: number;
+  requests: number;
+  costUsd: number;
+}
 
-  const nicName = data.lockedNic
-    ? `${data.lockedNic.name} (${data.lockedNic.iPv4Address ?? '无IPv4'})`
-    : '未检测到在线物理网卡';
+function buildSmoothSvgPath(pts: { x: number; y: number }[]): { line: string; area: string } {
+  if (pts.length === 0) return { line: '', area: '' };
+  if (pts.length === 1) {
+    const p = pts[0];
+    return {
+      line: `M ${p.x} ${p.y}`,
+      area: `M ${p.x} 118 L ${p.x} ${p.y} L ${p.x} 118 Z`
+    };
+  }
 
-  const excludedNames = data.excludedVirtualNics.length > 0
-    ? data.excludedVirtualNics.map(v => `${v.name}`).slice(0, 3).join(' · ')
-    : '当前未运行虚拟隧道网卡（防干扰引擎常驻待命）';
+  let line = `M ${pts[0].x.toFixed(2)} ${pts[0].y.toFixed(2)}`;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[i === 0 ? i : i - 1];
+    const p1 = pts[i];
+    const p2 = pts[i + 1];
+    const p3 = pts[i + 2 < pts.length ? i + 2 : i + 1];
 
-  async function handleToggleSeat(seat: AppSeat, enabled: boolean) {
-    await api.updateSeat(seat.id, { enabled });
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+    line += ` C ${cp1x.toFixed(2)} ${cp1y.toFixed(2)}, ${cp2x.toFixed(2)} ${cp2y.toFixed(2)}, ${p2.x.toFixed(2)} ${p2.y.toFixed(2)}`;
+  }
+
+  const last = pts[pts.length - 1];
+  const area = `${line} L ${last.x.toFixed(2)} 118 L ${pts[0].x.toFixed(2)} 118 Z`;
+  return { line, area };
+}
+
+export const OverviewView: React.FC<Props> = ({
+  data,
+  selectedSeatId,
+  onSelectSeat,
+  onReload,
+  onToast,
+  onOpenBatch,
+  onGoStats
+}) => {
+  const [chartRange, setChartRange] = useState<'today' | '7d'>('today');
+  const [stats, setStats] = useState<UsageDashboardResponse | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const [togglingAll, setTogglingAll] = useState(false);
+  const [togglingIpv6, setTogglingIpv6] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const pullStats = () => {
+      void api.getStatsDashboard({
+        range: chartRange,
+        appFilter: 'all',
+        modelFilter: 'all',
+        page: 1,
+        pageSize: 1
+      }).then(res => {
+        if (active) {
+          setStats(res);
+        }
+      }).catch(() => {});
+    };
+
+    pullStats();
+    setHoverIdx(null);
+    const timer = window.setInterval(pullStats, 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [chartRange]);
+
+  const offlineEnabledSeat = data.seats.find(s => {
+    if (!s.enabled) return false;
+    const n = data.nodes.find(node => node.id === s.boundNodeId);
+    return n?.status === 'offline';
+  });
+  const needsNodeSetup = data.nodes.length <= 1 || Boolean(offlineEnabledSeat);
+  const allEnabled = data.seats.length > 0 && data.seats.every(s => s.enabled);
+
+  async function handleToggleAll() {
+    setTogglingAll(true);
+    try {
+      const next = !allEnabled;
+      await api.toggleAllSeats(next);
+      await onReload();
+      onToast(next ? '已开启全部 AI 席位独立端口' : '已暂停全部 AI 席位监听');
+    } finally {
+      setTogglingAll(false);
+    }
+  }
+
+  async function handleToggleSeat(seat: AppSeat) {
+    const next = !seat.enabled;
+    await api.updateSeat(seat.id, { enabled: next });
     await onReload();
-    onToast(`${seat.name} 已${enabled ? '启用独立专线监听' : '暂停监听'}`);
+    onToast(`${seat.name} 已${next ? '启用' : '暂停'}`);
   }
 
-  async function handleBindNode(seat: AppSeat, nodeId: string) {
-    await api.updateSeat(seat.id, { boundNodeId: nodeId });
-    await onReload();
-    onToast(`${seat.name} 出口线路已实时热切换`);
+  async function handleToggleIsolation(key: 'tlsSniRecoveryEnabled' | 'globalKillSwitch' | 'enableIpv6', label: string) {
+    const next = !data.isolation[key];
+    if (key === 'enableIpv6') setTogglingIpv6(true);
+    try {
+      await api.updateIsolation({ [key]: next });
+      await onReload();
+      onToast(`${label}已${next ? '开启' : '关闭'}`);
+    } finally {
+      if (key === 'enableIpv6') setTogglingIpv6(false);
+    }
   }
 
-  async function copyEnv(seat: AppSeat) {
-    const cmd = data.os === 'mac'
-      ? `export HTTPS_PROXY="http://127.0.0.1:${seat.localPort}" ALL_PROXY="socks5h://127.0.0.1:${seat.localPort}"`
-      : `$env:HTTPS_PROXY="http://127.0.0.1:${seat.localPort}"; $env:ALL_PROXY="socks5h://127.0.0.1:${seat.localPort}"`;
-    await navigator.clipboard?.writeText(cmd);
-    onToast(`已复制 ${seat.name} 独立端口 (:${seat.localPort}) 环境变量`);
-  }
+  const chartPoints: ChartPoint[] = useMemo(() => {
+    const raw = stats?.timeline ?? [];
+    if (raw.length === 0) {
+      return chartRange === '7d'
+        ? ['周一', '周二', '周三', '周四', '周五', '周六', '周日'].map(label => ({ label, tokens: 0, requests: 0, costUsd: 0 }))
+        : ['00:00', '04:00', '08:00', '12:00', '16:00', '20:00', '23:00'].map(label => ({ label, tokens: 0, requests: 0, costUsd: 0 }));
+    }
 
-  async function verifyBoundNode(node?: ProxyNode) {
-    if (!node) return;
-    onToast(`正在直绑物理网卡验真 ${node.name}...`);
-    const res = await api.verifyNode(node.id);
-    await onReload();
-    onToast(res.status === 'online'
-      ? `验真通过：${res.exitIp} (${res.latencyMs ?? 1} ms)`
-      : `验真失败：${res.ispSummary}`);
-  }
+    if (raw.length <= 8) {
+      return raw.map(pt => ({
+        label: pt.label,
+        tokens: pt.totalTokens,
+        requests: pt.requests,
+        costUsd: pt.costUsd
+      }));
+    }
+
+    const buckets: ChartPoint[] = [];
+    const chunk = Math.ceil(raw.length / 8);
+    for (let i = 0; i < raw.length; i += chunk) {
+      const slice = raw.slice(i, i + chunk);
+      buckets.push({
+        label: slice[0].label,
+        tokens: slice.reduce((acc, x) => acc + x.totalTokens, 0),
+        requests: slice.reduce((acc, x) => acc + x.requests, 0),
+        costUsd: slice.reduce((acc, x) => acc + x.costUsd, 0)
+      });
+    }
+    return buckets;
+  }, [stats, chartRange]);
+
+  const maxTokens = Math.max(1, ...chartPoints.map(p => p.tokens));
+  const peakIdx = chartPoints.reduce((best, p, i, arr) => (p.tokens > arr[best].tokens ? i : best), 0);
+  const activeIdx = hoverIdx !== null && chartPoints[hoverIdx] ? hoverIdx : (chartPoints[peakIdx]?.tokens > 0 ? peakIdx : Math.floor(chartPoints.length / 2));
+
+  const svgCoords = useMemo(() => {
+    const left = 22;
+    const right = 398;
+    const top = 38;
+    const bottom = 104;
+    const span = right - left;
+    const hasData = chartPoints.some(p => p.tokens > 0);
+    return chartPoints.map((pt, i) => {
+      const x = chartPoints.length === 1 ? (left + right) / 2 : left + (span * i) / (chartPoints.length - 1);
+      const y = hasData
+        ? bottom - (pt.tokens / maxTokens) * (bottom - top)
+        : 102;
+      return { x, y };
+    });
+  }, [chartPoints, maxTokens]);
+
+  const { line: linePath, area: areaPath } = useMemo(() => buildSmoothSvgPath(svgCoords), [svgCoords]);
+  const activeCoord = svgCoords[activeIdx] ?? { x: 210, y: 80 };
+  const activePoint = chartPoints[activeIdx];
+
+  const claudeSeat = data.seats.find(s => s.id === 'claude') ?? data.seats[0];
+  const chatgptSeat = data.seats.find(s => s.id === 'chatgpt') ?? data.seats[1];
+  const agySeat = data.seats.find(s => s.id === 'agy' || s.id === 'antigravity') ?? data.seats[2];
+  const cursorSeat = data.seats.find(s => s.id === 'cursor') ?? data.seats[3];
+
+  const nicShort = data.lockedNic ? data.lockedNic.name : '物理网卡待命';
+
+  const renderControlNode = (
+    title: string,
+    sub: string,
+    isOn: boolean,
+    actionLabelOn: string,
+    actionLabelOff: string,
+    onSelect: (() => void) | null,
+    onToggle: () => void,
+    isFocused: boolean
+  ) => (
+    <div
+      className={`ctrl-node ${isFocused ? 'is-focused' : ''}`}
+      onClick={() => onSelect?.()}
+    >
+      <div className={`ctrl-status-dot ${isOn ? 'ok' : 'off'}`}>
+        {isOn ? <CheckTinyIcon /> : <CrossTinyIcon />}
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div className="ctrl-node-title">{title}</div>
+        <div className="ctrl-node-sub num">{sub}</div>
+        <button
+          type="button"
+          className={`ctrl-mini-action ${isOn ? '' : 'is-off'}`}
+          onClick={e => {
+            e.stopPropagation();
+            onToggle();
+          }}
+        >
+          {isOn ? actionLabelOn : actionLabelOff}
+        </button>
+      </div>
+    </div>
+  );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 276px', gap: 12, alignItems: 'stretch' }}>
-        <div className="tx-tray">
-          <div className="tx-card">
-            <div style={{ padding: '11px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <strong style={{ fontSize: 13 }}>防 Clash 干扰三段物理直出拓扑</strong>
-                <span className="badge badge-emerald">
-                  {data.os === 'mac' ? 'IP_BOUND_IF 直绑已激活' : 'IP_UNICAST_IF 直绑已激活'}
-                </span>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <div className="overview-top-grid">
+        <div className="overview-left-stack">
+          {/* 1. 智能状态横幅卡 */}
+          <div className={`alert-banner-card ${needsNodeSetup ? 'coral' : 'indigo'}`}>
+            <div>
+              <div className="alert-title-row">
+                {needsNodeSetup ? <AlertCircleIcon size={17} /> : <ShieldCheckIcon size={17} />}
+                <span>{needsNodeSetup ? '独立专线待配置' : '物理硬件直出隔离稳态'}</span>
               </div>
-              <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                系统全局代理：保持未修改
-              </span>
+              <div className="alert-body-text">
+                {offlineEnabledSeat
+                  ? `${offlineEnabledSeat.name} 所绑线路离线，熔断锁已阻止流量泄漏至本地。`
+                  : needsNodeSetup
+                    ? '当前仅启用本地物理直出，导入静态 SOCKS5 / HTTP 专线后即可分应用独立 IP。'
+                    : `已自动绕过 ${data.excludedVirtualNics.length} 个虚拟隧道网卡，系统全局代理零改动。`}
+              </div>
             </div>
-            <div className="tx-sep" />
-            <div style={{ padding: '12px 16px 14px', display: 'flex', flexDirection: 'column', gap: 9 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 20px 1.12fr 20px 1.15fr 20px 1fr', alignItems: 'center', gap: 4 }}>
-                <div className="rule-well">
-                  <div style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--text-muted)' }}>① AI 独立应用</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, marginTop: 2 }}>Claude / GPT / AGY</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>多软件隔离会话</div>
-                </div>
-                <div style={{ textAlign: 'center', color: 'var(--emerald-text)', fontWeight: 700 }}>→</div>
-                <div className="rule-well">
-                  <div style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--text-muted)' }}>② 本地混合入口 &amp; SNI</div>
-                  <div className="mono" style={{ fontSize: 12, fontWeight: 700, marginTop: 2 }}>127.0.0.1:17891–94</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                    {data.isolation.tlsSniRecoveryEnabled ? '自动还原 198.18.x.x Fake-IP' : '直通远端解析'}
-                  </div>
-                </div>
-                <div style={{ textAlign: 'center', color: 'var(--emerald-text)', fontWeight: 700 }}>→</div>
-                <div className="rule-well" style={{ background: 'var(--emerald-soft)', borderColor: 'var(--emerald-border)' }}>
-                  <div style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--emerald-text)' }}>③ 物理出口网卡锁定</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, marginTop: 2 }}>{nicName}</div>
-                  <div className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                    网关 {data.lockedNic?.gatewayAddress ?? '自动'} · 直出绕过 TUN
-                  </div>
-                </div>
-                <div style={{ textAlign: 'center', color: 'var(--emerald-text)', fontWeight: 700 }}>→</div>
-                <div className="rule-well">
-                  <div style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--text-muted)' }}>④ 独立纯净出口</div>
-                  <div style={{ fontSize: 12, fontWeight: 700, marginTop: 2 }}>SOCKS5h / HTTP(S)</div>
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>防串 IP 熔断：{data.isolation.globalKillSwitch ? '已锁' : '关闭'}</div>
-                </div>
-              </div>
+            <button
+              type="button"
+              className="btn-pill btn-white btn-sm"
+              onClick={needsNodeSetup ? onOpenBatch : onGoStats}
+            >
+              {needsNodeSetup ? '导入线路' : '查看用量'}
+            </button>
+          </div>
 
-              <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '7px 12px', borderRadius: 11, border: '1px dashed var(--amber-border)',
-                background: 'var(--amber-soft)', fontSize: 11.5, color: 'var(--text-secondary)'
-              }}>
-                <span>
-                  <strong style={{ color: 'var(--amber-text)' }}>已自动排斥虚拟隧道：</strong>
-                  <span className="mono">{excludedNames}</span>
-                </span>
-                <span className="badge badge-amber">0 字节经过第三方 VPN/Clash</span>
+          {/* 2. 平滑三次贝塞尔用量趋势卡 */}
+          <div className="surface-card surface-card-pad" style={{ flex: '1 1 auto', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <span className="card-title-sm">Token 消耗趋势</span>
+                <span className="card-subtitle-sm" style={{ marginLeft: 6 }}>(免解密会话日志)</span>
               </div>
+              <SegmentedTabs
+                size="sm"
+                value={chartRange}
+                onChange={setChartRange}
+                items={[
+                  { value: 'today', label: '今日' },
+                  { value: '7d', label: '7 天' }
+                ]}
+              />
+            </div>
+
+            <div style={{ position: 'relative', marginTop: 8 }}>
+              <svg viewBox="0 0 420 138" style={{ width: '100%', height: 148, overflow: 'visible' }}>
+                <defs>
+                  <linearGradient id="coralAreaGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#F27973" stopOpacity="0.24" />
+                    <stop offset="100%" stopColor="#F27973" stopOpacity="0.01" />
+                  </linearGradient>
+                </defs>
+
+                {[42, 72, 102].map(y => (
+                  <line key={y} x1="16" y1={y} x2="404" y2={y} stroke="var(--divider)" strokeWidth="1" />
+                ))}
+
+                {areaPath && <path d={areaPath} fill="url(#coralAreaGrad)" />}
+                {linePath && <path d={linePath} fill="none" stroke="#F27973" strokeWidth="2.4" strokeLinecap="round" />}
+
+                <line
+                  className="chart-hover-line"
+                  x1={activeCoord.x}
+                  y1={activeCoord.y}
+                  x2={activeCoord.x}
+                  y2="118"
+                  stroke="#F27973"
+                  strokeOpacity="0.35"
+                  strokeDasharray="3 3"
+                  strokeWidth="1.2"
+                />
+                <circle className="chart-hover-halo" cx={activeCoord.x} cy={activeCoord.y} r="7" fill="#F27973" fillOpacity="0.2" />
+                <circle className="chart-hover-dot" cx={activeCoord.x} cy={activeCoord.y} r="3.6" fill="#F27973" stroke="#FFFFFF" strokeWidth="1.6" />
+
+                {svgCoords.map((pt, i) => (
+                  <g key={chartPoints[i].label}>
+                    <rect
+                      x={pt.x - 24}
+                      y="10"
+                      width="48"
+                      height="112"
+                      fill="transparent"
+                      style={{ cursor: 'pointer' }}
+                      onMouseEnter={() => setHoverIdx(i)}
+                    />
+                    <text
+                      x={pt.x}
+                      y="134"
+                      textAnchor="middle"
+                      fontSize="9.8"
+                      fontFamily="var(--font-sans)"
+                      fill={i === activeIdx ? '#EA6660' : 'var(--text-muted)'}
+                      fontWeight={i === activeIdx ? '700' : '500'}
+                    >
+                      {chartPoints[i].label}
+                    </text>
+                  </g>
+                ))}
+              </svg>
+
+              {activePoint && (
+                <div
+                  className="chart-popover-tip"
+                  style={{
+                    position: 'absolute',
+                    left: `${Math.min(78, Math.max(22, (activeCoord.x / 420) * 100))}%`,
+                    top: `${Math.max(2, Math.min(54, ((activeCoord.y - 38) / 138) * 100))}%`,
+                    transform: 'translate(-50%, -25%)'
+                  }}
+                >
+                  <div className="num" style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                    {activePoint.label} · {activePoint.requests} 次请求
+                  </div>
+                  <div className="num" style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--text-primary)' }}>
+                    {activePoint.tokens > 0 ? `${formatCompactTokens(activePoint.tokens)} Tokens` : '0 Tokens'}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        {/* 右侧实时遥测汇总 */}
-        <div className="tx-tray">
-          <div className="tx-card" style={{ padding: '12px 15px', height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <strong style={{ fontSize: 12.5 }}>实时网关与流量</strong>
-              <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={onGoStats}>用量大盘 →</button>
+        {/* 3. 右侧：独立分流总控卡片 */}
+        <div className="surface-card controls-card">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+            <div className="card-title-sm">独立分流总控</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: data.isolation.enableIpv6 ? 'var(--accent-indigo)' : 'var(--text-secondary)' }}>
+                  IPv6
+                </span>
+                <label className="nordic-switch" title="开启/关闭 IPv6 双栈代理与物理网卡直绑（默认关闭以防 IPv6 泄漏与单栈代理卡顿）">
+                  <input
+                    type="checkbox"
+                    checked={data.isolation.enableIpv6}
+                    disabled={togglingIpv6}
+                    onChange={() => handleToggleIsolation('enableIpv6', 'IPv6 双栈转发')}
+                  />
+                  <span className="nordic-slider" />
+                </label>
+              </div>
+              <div style={{ width: 1, height: 14, background: 'var(--divider)' }} aria-hidden="true" />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  {allEnabled ? '全部开启' : '一键全开'}
+                </span>
+                <label className="nordic-switch" title="一键启停全部 AI 席位端口">
+                  <input
+                    type="checkbox"
+                    checked={allEnabled}
+                    disabled={togglingAll}
+                    onChange={handleToggleAll}
+                  />
+                  <span className="nordic-slider" />
+                </label>
+              </div>
             </div>
-            <div className="tx-sep" />
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <span style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>活跃监听席位</span>
-              <span className="mono" style={{ fontSize: 15, fontWeight: 700 }}>{activeSeats} / {data.seats.length}</span>
+          </div>
+
+          <div className="controls-stage">
+            <div className="ctrl-col">
+              {claudeSeat && renderControlNode(
+                claudeSeat.name,
+                `:${claudeSeat.localPort}`,
+                claudeSeat.enabled,
+                '已启用',
+                '点击启用',
+                () => onSelectSeat(claudeSeat.id),
+                () => handleToggleSeat(claudeSeat),
+                selectedSeatId === claudeSeat.id
+              )}
+              {chatgptSeat && renderControlNode(
+                chatgptSeat.name,
+                `:${chatgptSeat.localPort}`,
+                chatgptSeat.enabled,
+                '已启用',
+                '点击启用',
+                () => onSelectSeat(chatgptSeat.id),
+                () => handleToggleSeat(chatgptSeat),
+                selectedSeatId === chatgptSeat.id
+              )}
+              {renderControlNode(
+                'SNI 域名还原',
+                data.isolation.tlsSniRecoveryEnabled ? '198.18 自动剥离' : '已暂停',
+                data.isolation.tlsSniRecoveryEnabled,
+                '还原中',
+                '点击开启',
+                null,
+                () => handleToggleIsolation('tlsSniRecoveryEnabled', 'TLS SNI 还原'),
+                false
+              )}
             </div>
-            <div className="tx-sep" />
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <span style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>线路池可用 / 总数</span>
-              <span className="mono" style={{ fontSize: 15, fontWeight: 700 }}>{onlineNodes} / {data.nodes.length}</span>
+
+            {/* 中央精密物理网卡直出拓扑核心 SVG（活跃通道附加流光虚线） */}
+            <div className="ctrl-center-diagram">
+              <svg viewBox="0 0 240 220" style={{ width: '100%', height: '100%', overflow: 'visible' }} aria-hidden="true">
+                <path
+                  d="M8 34 H58 L84 68"
+                  className={claudeSeat?.enabled ? 'ctrl-wire-active' : ''}
+                  stroke={claudeSeat?.enabled ? undefined : 'var(--divider)'}
+                  strokeWidth="1.4"
+                  fill="none"
+                />
+                <path
+                  d="M8 110 H66"
+                  className={chatgptSeat?.enabled ? 'ctrl-wire-active' : ''}
+                  stroke={chatgptSeat?.enabled ? undefined : 'var(--divider)'}
+                  strokeWidth="1.4"
+                  fill="none"
+                />
+                <path
+                  d="M8 186 H58 L84 152"
+                  className={data.isolation.tlsSniRecoveryEnabled ? 'ctrl-wire-active' : ''}
+                  stroke={data.isolation.tlsSniRecoveryEnabled ? undefined : 'var(--divider)'}
+                  strokeWidth="1.4"
+                  fill="none"
+                />
+
+                <path
+                  d="M232 34 H182 L156 68"
+                  className={agySeat?.enabled ? 'ctrl-wire-active' : ''}
+                  stroke={agySeat?.enabled ? undefined : 'var(--divider)'}
+                  strokeWidth="1.4"
+                  fill="none"
+                />
+                <path
+                  d="M232 110 H174"
+                  className={cursorSeat?.enabled ? 'ctrl-wire-active' : ''}
+                  stroke={cursorSeat?.enabled ? undefined : 'var(--divider)'}
+                  strokeWidth="1.4"
+                  fill="none"
+                />
+                <path
+                  d="M232 186 H182 L156 152"
+                  className={data.isolation.globalKillSwitch ? 'ctrl-wire-active' : ''}
+                  stroke={data.isolation.globalKillSwitch ? undefined : 'var(--divider)'}
+                  strokeWidth="1.4"
+                  fill="none"
+                />
+
+                <circle cx="120" cy="110" r="56" fill="var(--bg-subtle)" />
+                <circle cx="120" cy="110" r="46" stroke="var(--accent-indigo)" strokeOpacity="0.22" strokeWidth="1.5" strokeDasharray="4 4" fill="var(--bg-card)" />
+                <path
+                  d="M120 74 L148 90 V130 L120 146 L92 130 V90 Z"
+                  fill="var(--bg-subtle)"
+                  stroke="var(--accent-indigo)"
+                  strokeWidth="1.8"
+                  strokeLinejoin="round"
+                />
+                <circle cx="120" cy="110" r="14" fill="var(--accent-indigo)" fillOpacity="0.14" />
+                <circle cx="120" cy="110" r="5.5" fill="var(--accent-indigo)" />
+              </svg>
+
+              <div style={{ textAlign: 'center', marginTop: -12 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  物理出口 · {nicShort}
+                </div>
+                <div className="num" style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
+                  {data.lockedNic?.iPv4Address ?? '直绑硬件接口'}
+                </div>
+              </div>
             </div>
-            <div className="tx-sep" />
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <span style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>当前并发连接</span>
-              <span className="mono" style={{ fontSize: 15, fontWeight: 700 }}>{totalConns} 活跃流</span>
-            </div>
-            <div className="tx-sep" />
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-              <span style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>累计直出吞吐</span>
-              <span className="mono" style={{ fontSize: 12, fontWeight: 700 }}>↑ {formatBytes(totalTx)} · ↓ {formatBytes(totalRx)}</span>
+
+            <div className="ctrl-col">
+              {agySeat && renderControlNode(
+                agySeat.name,
+                `:${agySeat.localPort}`,
+                agySeat.enabled,
+                '已启用',
+                '点击启用',
+                () => onSelectSeat(agySeat.id),
+                () => handleToggleSeat(agySeat),
+                selectedSeatId === agySeat.id
+              )}
+              {cursorSeat && renderControlNode(
+                cursorSeat.name,
+                `:${cursorSeat.localPort}`,
+                cursorSeat.enabled,
+                '已启用',
+                '点击启用',
+                () => onSelectSeat(cursorSeat.id),
+                () => handleToggleSeat(cursorSeat),
+                selectedSeatId === cursorSeat.id
+              )}
+              {renderControlNode(
+                '防串熔断锁',
+                data.isolation.globalKillSwitch ? '断线绝不回退' : '未锁定',
+                data.isolation.globalKillSwitch,
+                '已锁死',
+                '点击锁定',
+                null,
+                () => handleToggleIsolation('globalKillSwitch', '全局防串 IP 熔断锁'),
+                false
+              )}
             </div>
           </div>
         </div>
       </div>
 
-      {data.nodes.length <= 1 && (
-        <div className="tx-tray">
-          <div className="tx-card" style={{ padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-              当前仅内置「物理网卡直出通道」，建议点击右侧导入您的独立 <span className="mono">SOCKS5 / HTTP(S)</span> 静态住宅线路，即可为 Claude、ChatGPT 与 Antigravity 分配不同国家独立 IP。
-            </span>
-            <button className="tx-btn tx-btn-primary tx-btn-sm" onClick={onOpenBatch}>立即批量导入线路</button>
-          </div>
-        </div>
-      )}
-
-      {/* 2x2 Bento AI 专属席位卡片 */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
+      {/* 下半区：4 张圆弧席位卡片 */}
+      <div className="seat-gauges-grid">
         {data.seats.map(seat => {
           const bound = data.nodes.find(n => n.id === seat.boundNodeId);
-          const snap = data.trafficSnapshots.find(t => t.seatId === seat.id);
+          const isSelected = seat.id === selectedSeatId;
+          const isOffline = seat.enabled && bound?.status === 'offline';
+
+          let progress = 0.16;
+          let ringColor = '#CBD3E6';
+          let centerText = '待命';
+
+          if (seat.enabled) {
+            if (isOffline) {
+              progress = 0.24;
+              ringColor = '#F27973';
+              centerText = '超时';
+            } else if (bound?.latencyMs) {
+              const ms = bound.latencyMs;
+              if (ms >= 1500) {
+                progress = 0.36;
+                ringColor = '#F59E0B';
+              } else {
+                progress = Math.max(0.45, Math.min(0.92, 1 - ms / 1600));
+                ringColor = '#4A56E2';
+              }
+              centerText = ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+            } else {
+              progress = 0.68;
+              ringColor = '#4A56E2';
+              centerText = '在线';
+            }
+          }
+
+          const radius = 37;
+          const circumference = 2 * Math.PI * radius;
+          const dashOffset = circumference * (1 - progress);
+
           return (
-            <div className="tx-tray" key={seat.id}>
-              <div className="tx-card">
-                <div style={{ padding: '12px 15px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={{
-                      width: 34, height: 34, borderRadius: 11, background: 'var(--card-subtle)',
-                      border: '1px solid var(--card-border)', display: 'flex', alignItems: 'center',
-                      justifyContent: 'center', fontWeight: 700, fontSize: 12.5
-                    }}>{seat.glyph}</div>
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-                        <strong style={{ fontSize: 13.5 }}>{seat.name}</strong>
-                        <span className={`badge ${seat.enabled ? 'badge-emerald' : 'badge-neutral'}`}>
-                          {seat.enabled ? '独立端口监听中' : '未启用'}
-                        </span>
-                      </div>
-                      <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{seat.subtitle}</div>
-                    </div>
-                  </div>
-                  <label className="tx-switch">
-                    <input type="checkbox" checked={seat.enabled} onChange={e => handleToggleSeat(seat, e.target.checked)} />
-                    <span className="tx-slider" />
-                  </label>
-                </div>
-
-                <div className="tx-sep" />
-
-                <div style={{ padding: '12px 15px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1.35fr 1fr', gap: 10, alignItems: 'end' }}>
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>绑定独立出口线路</div>
-                      <select
-                        className="tx-select"
-                        value={seat.boundNodeId ?? ''}
-                        onChange={e => handleBindNode(seat, e.target.value)}
-                      >
-                        {data.nodes.map(n => (
-                          <option key={n.id} value={n.id}>
-                            {n.name} ({n.protocol})
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>本地混合入口 (HTTP/SOCKS5)</div>
-                      <div className="tx-input mono" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span>127.0.0.1:{seat.localPort}</span>
-                        <span style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>自适应</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rule-well" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>真实出口 IP · 属性</div>
-                      <div className="mono" style={{ fontSize: 12, fontWeight: 700 }}>
-                        {bound?.exitIp ?? '—'} <span style={{ fontWeight: 500, color: 'var(--text-secondary)' }}>· {bound?.ispSummary ?? '未绑定'}</span>
-                      </div>
-                    </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div className="mono" style={{ fontSize: 12, fontWeight: 700, color: bound?.latencyMs ? 'var(--emerald-text)' : 'var(--text-secondary)' }}>
-                        {bound?.latencyMs ? `${bound.latencyMs} ms` : (seat.enabled ? '待验真' : '待命')}
-                      </div>
-                      <div className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                        {snap ? `${snap.totalConnections} 次 · ↑${formatBytes(snap.bytesTx)} ↓${formatBytes(snap.bytesRx)}` : '0 次连接'}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="tx-sep" />
-
-                <div style={{ padding: '9px 15px', background: 'var(--card-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11.5 }}>
-                  <span style={{ color: 'var(--text-secondary)' }}>
-                    防串 IP 熔断：<strong>{seat.killSwitchEnabled ? '已锁' : '关闭'}</strong>
-                    {snap && snap.killSwitchBlockedCount > 0 ? `（已拦截 ${snap.killSwitchBlockedCount} 次）` : ''}
-                  </span>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={() => copyEnv(seat)}>复制变量</button>
-                    <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={() => verifyBoundNode(bound)}>出口验真</button>
-                  </div>
-                </div>
+            <button
+              key={seat.id}
+              type="button"
+              className={`seat-gauge-card ${isSelected ? 'selected' : ''}`}
+              onClick={() => onSelectSeat(seat.id)}
+            >
+              <div style={{ color: isSelected ? 'var(--accent-indigo)' : 'var(--text-muted)', transition: 'color 0.18s ease' }}>
+                <SeatBrandIcon seatId={seat.id} size={18} />
               </div>
-            </div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text-primary)', marginTop: 8 }}>
+                {seat.name}
+              </div>
+
+              <div className="gauge-ring-wrap">
+                <svg width="92" height="92" viewBox="0 0 92 92" style={{ position: 'absolute', inset: 0 }} aria-hidden="true">
+                  <circle cx="46" cy="46" r="40" fill="var(--bg-subtle)" />
+                  <circle cx="46" cy="46" r={radius} fill="none" stroke="var(--ring-track)" strokeWidth="3.5" />
+                  <circle
+                    cx="46"
+                    cy="46"
+                    r={radius}
+                    fill="none"
+                    stroke={ringColor}
+                    strokeWidth="3.5"
+                    strokeLinecap="round"
+                    strokeDasharray={circumference}
+                    strokeDashoffset={dashOffset}
+                    transform="rotate(-90 46 46)"
+                    style={{ transition: 'stroke-dashoffset 0.38s cubic-bezier(0.22, 1, 0.36, 1), stroke 0.25s ease' }}
+                  />
+                </svg>
+                <span className="gauge-center-label num">{centerText}</span>
+              </div>
+
+              <div
+                className="num"
+                style={{
+                  fontSize: 11,
+                  color: 'var(--text-muted)',
+                  maxWidth: '100%',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                :{seat.localPort} · {bound?.name ?? '未绑定线路'}
+              </div>
+            </button>
           );
         })}
       </div>

@@ -1,11 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import {
   ModelPricingRule,
   UsageDashboardResponse,
   api,
   formatBytes,
-  formatCompactTokens
+  formatCompactTokens,
+  formatRate
 } from '../api';
+import { CustomSelect } from '../components/CustomSelect';
+import { ClockRangeIcon, CpuModelIcon, PlusIcon, RefreshSpinIcon } from '../components/Icons';
+import { SegmentedTabs } from '../components/SegmentedTabs';
 
 interface Props {
   onToast: (msg: string) => void;
@@ -13,6 +17,19 @@ interface Props {
 
 type MetricKey = 'cost' | 'requests' | 'tokens' | 'cacheRate';
 type SubTab = 'logs' | 'models' | 'appsProxy' | 'pricing';
+
+const RANGE_OPTIONS = [
+  { value: 'today', label: '当天' },
+  { value: '24h', label: '近 24 小时' },
+  { value: '7d', label: '近 7 天' },
+  { value: '30d', label: '近 30 天' },
+  { value: 'all', label: '全部历史' }
+];
+
+const PAGE_SIZE_OPTIONS = [
+  { value: '20', label: '每页 20 条' },
+  { value: '50', label: '每页 50 条' }
+];
 
 export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
   const urlRange = new URLSearchParams(window.location.search).get('range');
@@ -28,28 +45,37 @@ export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
   const [data, setData] = useState<UsageDashboardResponse | null>(null);
   const [pricings, setPricings] = useState<ModelPricingRule[]>([]);
   const [syncing, setSyncing] = useState(false);
+  const [autoSync, setAutoSync] = useState(true);
 
-  // 快速配置单价弹窗状态
   const [pricingDraft, setPricingDraft] = useState<Omit<ModelPricingRule, 'isCustom'> | null>(null);
 
-  async function loadAll(targetPage = page) {
+  const loadAll = useCallback(async (targetPage: number) => {
     const [dash, rules] = await Promise.all([
       api.getStatsDashboard({ range, appFilter, modelFilter, page: targetPage, pageSize }),
       api.getPricings()
     ]);
     setData(dash);
     setPricings(rules);
-  }
-
-  useEffect(() => {
-    void loadAll(1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range, appFilter, modelFilter, pageSize]);
 
   useEffect(() => {
+    void loadAll(1);
+  }, [range, appFilter, modelFilter, pageSize, loadAll]);
+
+  useEffect(() => {
     void loadAll(page);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
+  }, [page, loadAll]);
+
+  // 用量统计每 5 秒自动无感同步，新增对话无需手动点击刷新即可实时呈现
+  useEffect(() => {
+    if (!autoSync) return;
+    const timer = window.setInterval(() => {
+      if (!pricingDraft && !syncing) {
+        void loadAll(page).catch(() => {});
+      }
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [autoSync, pricingDraft, syncing, page, loadAll]);
 
   async function handleSyncNow() {
     setSyncing(true);
@@ -72,6 +98,20 @@ export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
     onToast(`已更新模型 ${pricingDraft.pattern} 单价并重算全部历史成本`);
   }
 
+  const appSegItems = useMemo(() => {
+    return [
+      { value: 'all', label: '全部应用' },
+      ...(data?.appChips ?? []).map(c => ({ value: c.name, label: c.name, count: c.count }))
+    ];
+  }, [data?.appChips]);
+
+  const modelOptions = useMemo(() => {
+    return [
+      { value: 'all', label: `全部模型 (${data?.availableModels.length ?? 0})` },
+      ...(data?.availableModels ?? []).map(m => ({ value: m, label: m }))
+    ];
+  }, [data?.availableModels]);
+
   const timeline = data?.timeline ?? [];
   const metricValues = timeline.map(pt => {
     if (activeMetric === 'cost') return pt.costUsd;
@@ -80,7 +120,6 @@ export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
     return pt.cacheHitRate;
   });
   const maxVal = activeMetric === 'cacheRate' ? 100 : Math.max(1, ...metricValues);
-
   const totalPages = data ? Math.max(1, Math.ceil(data.totalLogsCount / data.pageSize)) : 1;
 
   const metricLabel = {
@@ -95,441 +134,431 @@ export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
     : '等待同步';
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* 顶部筛选栏 + 按需同步 + 代理专线流量标识 */}
-      <div className="tx-tray">
-        <div className="tx-card" style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <select
-              className="tx-select"
-              style={{ width: 'auto', minWidth: 104, fontWeight: 600 }}
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+      {/* 无框筛选条（接入定制下拉与滑动分段选择器） */}
+      <div className="surface-card" style={{ padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <CustomSelect
+              variant="light"
               value={range}
-              onChange={e => { setPage(1); setRange(e.target.value); }}
-            >
-              <option value="today">当天</option>
-              <option value="24h">近 24 小时</option>
-              <option value="7d">近 7 天</option>
-              <option value="30d">近 30 天</option>
-              <option value="all">全部历史</option>
-            </select>
+              options={RANGE_OPTIONS}
+              prefixIcon={<ClockRangeIcon size={13} />}
+              onChange={v => { setPage(1); setRange(v); }}
+              style={{ width: 122 }}
+              ariaLabel="选择统计时间范围"
+            />
 
-            <div className="dock-tray" style={{ padding: 3, borderRadius: 11 }}>
-              <button
-                className={`dock-tab ${appFilter === 'all' ? 'active' : ''}`}
-                style={{ height: 25, fontSize: 11.5, padding: '0 10px', borderRadius: 8 }}
-                onClick={() => { setPage(1); setAppFilter('all'); }}
-              >
-                全部应用
-              </button>
-              {(data?.appChips ?? []).map(chip => (
-                <button
-                  key={chip.name}
-                  className={`dock-tab ${appFilter === chip.name ? 'active' : ''}`}
-                  style={{ height: 25, fontSize: 11.5, padding: '0 10px', borderRadius: 8 }}
-                  onClick={() => { setPage(1); setAppFilter(chip.name); }}
-                >
-                  <span>{chip.name}</span>
-                  <span className="kbd">{chip.count}</span>
-                </button>
-              ))}
-            </div>
+            <SegmentedTabs
+              value={appFilter}
+              items={appSegItems}
+              onChange={v => { setPage(1); setAppFilter(v); }}
+            />
+          </div>
 
-            <select
-              className="tx-select"
-              style={{ width: 'auto', minWidth: 155 }}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <CustomSelect
+              variant="light"
               value={modelFilter}
-              onChange={e => { setPage(1); setModelFilter(e.target.value); }}
+              options={modelOptions}
+              prefixIcon={<CpuModelIcon size={13} />}
+              minMenuWidth={256}
+              onChange={v => { setPage(1); setModelFilter(v); }}
+              style={{ width: 164 }}
+              ariaLabel="筛选 AI 模型"
+            />
+            <button
+              type="button"
+              className={`btn-pill btn-sm ${autoSync ? 'btn-soft' : 'btn-soft'}`}
+              style={{
+                border: autoSync ? '1px solid rgba(16, 185, 129, 0.28)' : '1px solid transparent',
+                color: autoSync ? 'var(--accent-emerald-text)' : 'var(--text-muted)'
+              }}
+              title="切换每 5 秒自动增量同步会话用量"
+              onClick={() => setAutoSync(v => !v)}
             >
-              <option value="all">全部模型 ({data?.availableModels.length ?? 0})</option>
-              {(data?.availableModels ?? []).map(m => (
-                <option key={m} value={m}>{m}</option>
-              ))}
-            </select>
+              <span className={`live-sync-dot ${autoSync ? 'on' : ''}`} />
+              <span>{autoSync ? '5s 自动同步' : '已暂停自动'}</span>
+            </button>
+            <button type="button" className="btn-pill btn-soft btn-sm" onClick={handleSyncNow} disabled={syncing}>
+              <RefreshSpinIcon size={13} spinning={syncing} />
+              <span>{syncing ? '同步中' : '立即同步'}</span>
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 11.5, color: 'var(--text-muted)', flexWrap: 'wrap', gap: 8 }}>
+          <span>数据来源：本地 <span className="mono">.claude / .codex / .gemini</span> 会话日志增量解析（端到端 TLS 不拆包）</span>
+          <span className="num">
+            实时：↑ {formatRate(data?.totalProxyTxBytesPerSec ?? 0)} · ↓ {formatRate(data?.totalProxyRxBytesPerSec ?? 0)}
+            <span style={{ margin: '0 8px', opacity: 0.45 }}>|</span>
+            累计：↑ {formatBytes(data?.totalProxyTxBytes ?? 0)} · ↓ {formatBytes(data?.totalProxyRxBytes ?? 0)}
+          </span>
+        </div>
+      </div>
+
+      {/* 四大指标联动柱图 */}
+      <div className="surface-card">
+        <div className="kpi-strip">
+          <button type="button" className={`kpi-strip-btn ${activeMetric === 'cost' ? 'active' : ''}`} onClick={() => setActiveMetric('cost')}>
+            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>总成本 (已定价请求)</div>
+            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em' }}>${(data?.totalCostUsd ?? 0).toFixed(2)}</div>
+            <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
+              {data && data.unpricedRequests > 0 ? `${data.unpricedRequests} 条未配单价` : '全部请求已按单价核算'}
+            </div>
+          </button>
+
+          <button type="button" className={`kpi-strip-btn ${activeMetric === 'requests' ? 'active' : ''}`} onClick={() => setActiveMetric('requests')}>
+            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>总请求数</div>
+            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em' }}>{(data?.totalRequests ?? 0).toLocaleString('en-US')}</div>
+            <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
+              代理 {data?.totalProxyConnections ?? 0} 次 · 已扫 {data?.scannedFilesCount ?? 0} 文件
+            </div>
+          </button>
+
+          <button type="button" className={`kpi-strip-btn ${activeMetric === 'tokens' ? 'active' : ''}`} onClick={() => setActiveMetric('tokens')}>
+            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>真实消耗 Tokens</div>
+            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em' }}>{formatCompactTokens(data?.totalTokens ?? 0)}</div>
+            <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
+              入 {formatCompactTokens(data?.effectiveInputTokens ?? 0)} · 出 {formatCompactTokens(data?.outputTokens ?? 0)} · 缓 {formatCompactTokens(data?.cacheReadTokens ?? 0)}
+            </div>
+          </button>
+
+          <button type="button" className={`kpi-strip-btn ${activeMetric === 'cacheRate' ? 'active' : ''}`} onClick={() => setActiveMetric('cacheRate')}>
+            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>缓存命中率</div>
+            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--accent-indigo)' }}>
+              {(data?.cacheHitRate ?? 0).toFixed(1)}%
+            </div>
+            <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
+              上次同步 {syncTimeStr} ({data?.syncElapsedMs ?? 0} ms)
+            </div>
+          </button>
+        </div>
+
+        <div className="soft-divider" />
+
+        <div style={{ padding: '16px 20px 14px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <span className="card-title-sm">{metricLabel}</span>
+            <span className="card-subtitle-sm">免解密本地会话日志 + 独立代理隧道遥测</span>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span className="badge badge-neutral mono" title="经过本软件独立代理隧道的真实网络上下行总量">
-              专线流量 ↑ {formatBytes(data?.totalProxyTxBytes ?? 0)} · ↓ {formatBytes(data?.totalProxyRxBytes ?? 0)}
-            </span>
-            <button className="tx-btn tx-btn-sec tx-btn-sm" onClick={handleSyncNow} disabled={syncing}>
-              <span>{syncing ? '同步中...' : '↻ 按需同步'}</span>
-            </button>
+          <div className="bar-stage">
+            {timeline.map((pt, i) => {
+              const v = metricValues[i];
+              const pct = maxVal > 0 ? Math.round((v / maxVal) * 100) : 0;
+              const h = v > 0 ? Math.max(8, pct) : 0;
+              const tip = `${pt.label} | 请求 ${pt.requests} 次 | Tokens ${formatCompactTokens(pt.totalTokens)} | 缓存 ${pt.cacheHitRate}% | $${pt.costUsd.toFixed(3)}`;
+              return (
+                <div className="bar-col" key={pt.label} title={tip}>
+                  <div className={`bar-fill ${v <= 0 ? 'empty' : ''}`} style={{ height: `${h}%` }} />
+                </div>
+              );
+            })}
+          </div>
+          <div className="bar-labels-row">
+            {timeline.map((pt, idx) => {
+              const step = timeline.length <= 12 ? 1 : Math.ceil(timeline.length / 9);
+              const show = idx === 0 || idx % step === 0;
+              return (
+                <div className="bar-lbl num" key={pt.label}>
+                  {show ? pt.label : ''}
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
 
-      {/* 4 大可点击联动指标卡 + 分时段柱状图 */}
-      <div className="tx-tray">
-        <div className="tx-card">
-          <div className="kpi-4-grid">
-            <button className={`kpi-btn ${activeMetric === 'cost' ? 'active' : ''}`} onClick={() => setActiveMetric('cost')}>
-              <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>总成本 (已定价请求)</div>
-              <div className="mono" style={{ fontSize: 22, fontWeight: 700 }}>${(data?.totalCostUsd ?? 0).toFixed(2)}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                {data && data.unpricedRequests > 0
-                  ? `${data.unpricedRequests} 条未配单价`
-                  : '全部请求已按单价核算'}
-              </div>
-            </button>
-
-            <button className={`kpi-btn ${activeMetric === 'requests' ? 'active' : ''}`} onClick={() => setActiveMetric('requests')}>
-              <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>总请求数</div>
-              <div className="mono" style={{ fontSize: 22, fontWeight: 700 }}>{(data?.totalRequests ?? 0).toLocaleString('en-US')}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                代理连接 {data?.totalProxyConnections ?? 0} 次 · 已扫 {data?.scannedFilesCount ?? 0} 文件
-              </div>
-            </button>
-
-            <button className={`kpi-btn ${activeMetric === 'tokens' ? 'active' : ''}`} onClick={() => setActiveMetric('tokens')}>
-              <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>真实消耗 Tokens</div>
-              <div className="mono" style={{ fontSize: 22, fontWeight: 700 }}>{formatCompactTokens(data?.totalTokens ?? 0)}</div>
-              <div className="mono" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                入 {formatCompactTokens(data?.effectiveInputTokens ?? 0)} · 出 {formatCompactTokens(data?.outputTokens ?? 0)} · 缓 {formatCompactTokens(data?.cacheReadTokens ?? 0)}
-              </div>
-            </button>
-
-            <button className={`kpi-btn ${activeMetric === 'cacheRate' ? 'active' : ''}`} onClick={() => setActiveMetric('cacheRate')}>
-              <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>缓存命中率</div>
-              <div className="mono" style={{ fontSize: 22, fontWeight: 700, color: 'var(--sky-text)' }}>
-                {(data?.cacheHitRate ?? 0).toFixed(1)}%
-              </div>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                上次同步 {syncTimeStr} ({data?.syncElapsedMs ?? 0} ms)
-              </div>
-            </button>
-          </div>
-
-          <div className="tx-sep" />
-
-          <div className="chart-area">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>{metricLabel}</span>
-              <span className="mono" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                数据来源：本地免解密会话日志 + 独立物理直出代理遥测
-              </span>
-            </div>
-
-            <div className="chart-bars">
-              {timeline.map((pt, i) => {
-                const v = metricValues[i];
-                const pct = maxVal > 0 ? Math.round((v / maxVal) * 100) : 0;
-                const h = v > 0 ? Math.max(8, pct) : 0;
-                const tip = `${pt.label} | 请求 ${pt.requests} 次 | Tokens ${formatCompactTokens(pt.totalTokens)} | 缓存命中 ${pt.cacheHitRate}% | $${pt.costUsd.toFixed(3)}`;
-                return (
-                  <div className="chart-col" key={pt.label} title={tip}>
-                    <div
-                      className={`chart-bar ${v <= 0 ? 'empty' : ''}`}
-                      style={{ height: `${h}%` }}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-            <div className="chart-labels">
-              {timeline.map((pt, idx) => {
-                const show = timeline.length <= 16 || idx % 2 === 0 || idx === timeline.length - 1;
-                return (
-                  <div className="chart-lbl" key={pt.label}>
-                    {show ? pt.label : ''}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 底部多维明细卡片：请求日志 / 模型分布 / 应用与专线归属 / 模型定价 */}
-      <div className="tx-tray">
-        <div className="tx-card">
-          <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-            <div className="dock-tray" style={{ padding: 3, borderRadius: 11 }}>
-              <button className={`dock-tab ${subTab === 'logs' ? 'active' : ''}`} style={{ height: 26, fontSize: 12, borderRadius: 8 }} onClick={() => setSubTab('logs')}>
-                请求日志 <span className="kbd">{data?.totalLogsCount ?? 0}</span>
-              </button>
-              <button className={`dock-tab ${subTab === 'models' ? 'active' : ''}`} style={{ height: 26, fontSize: 12, borderRadius: 8 }} onClick={() => setSubTab('models')}>
-                按模型统计 <span className="kbd">{data?.modelBreakdown.length ?? 0}</span>
-              </button>
-              <button className={`dock-tab ${subTab === 'appsProxy' ? 'active' : ''}`} style={{ height: 26, fontSize: 12, borderRadius: 8 }} onClick={() => setSubTab('appsProxy')}>
-                应用与专线归属 <span className="kbd">{data?.appAndProxyBreakdown.length ?? 0}</span>
-              </button>
-              <button className={`dock-tab ${subTab === 'pricing' ? 'active' : ''}`} style={{ height: 26, fontSize: 12, borderRadius: 8 }} onClick={() => setSubTab('pricing')}>
-                模型定价表 <span className="kbd">{pricings.length}</span>
-              </button>
-            </div>
-
-            {subTab === 'pricing' && (
-              <button
-                className="tx-btn tx-btn-primary tx-btn-sm"
-                onClick={() => setPricingDraft({
-                  pattern: '',
-                  displayName: '',
-                  inputPerMillion: 1.25,
-                  outputPerMillion: 10.0,
-                  cacheReadPerMillion: 0.125,
-                  cacheWritePerMillion: 0
-                })}
-              >
-                + 新增模型单价
-              </button>
-            )}
-          </div>
-
-          <div className="tx-sep" />
-
-          {subTab === 'logs' && (
-            <>
-              <div style={{ overflowX: 'auto' }}>
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>时间</th>
-                      <th>应用</th>
-                      <th>来源</th>
-                      <th>模型</th>
-                      <th>成本</th>
-                      <th className="num-r">有效输入</th>
-                      <th className="num-r">输出</th>
-                      <th className="num-r">缓存命中</th>
-                      <th className="num-r">流速</th>
-                      <th className="num-r">耗时</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(data?.logs ?? []).length === 0 ? (
-                      <tr>
-                        <td colSpan={10} style={{ textAlign: 'center', padding: 26, color: 'var(--text-muted)' }}>
-                          当前时间范围内暂无会话记录（可切换「全部历史」或点击右上角「按需同步」）
-                        </td>
-                      </tr>
-                    ) : (
-                      (data?.logs ?? []).map(row => (
-                        <tr key={row.id}>
-                          <td className="mono" style={{ color: 'var(--text-secondary)' }}>
-                            {new Date(row.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}
-                          </td>
-                          <td><span className="badge badge-neutral">{row.appName}</span></td>
-                          <td style={{ color: 'var(--text-secondary)' }}>{row.source}</td>
-                          <td className="mono" style={{ fontWeight: 600 }}>{row.model}</td>
-                          <td>
-                            {row.isPriced && row.costUsd !== null && row.costUsd !== undefined ? (
-                              <span className="mono" style={{ color: 'var(--emerald-text)', fontWeight: 600 }}>
-                                ${row.costUsd.toFixed(4)}
-                              </span>
-                            ) : (
-                              <button
-                                className="tx-btn tx-btn-sec tx-btn-sm"
-                                style={{ height: 22, fontSize: 11, padding: '0 7px' }}
-                                onClick={() => setPricingDraft({
-                                  pattern: row.model,
-                                  displayName: row.model,
-                                  inputPerMillion: 1.25,
-                                  outputPerMillion: 10.0,
-                                  cacheReadPerMillion: 0.125,
-                                  cacheWritePerMillion: 0
-                                })}
-                                title="点击为该模型配置百万 Token 单价"
-                              >
-                                未定价 · 配价
-                              </button>
-                            )}
-                          </td>
-                          <td className="num-r mono">{row.effectiveInputTokens.toLocaleString('en-US')}</td>
-                          <td className="num-r mono">{row.outputTokens.toLocaleString('en-US')}</td>
-                          <td className="num-r mono">{formatCompactTokens(row.cacheReadTokens)}</td>
-                          <td className="num-r mono" style={{ color: row.tokensPerSecond ? 'var(--emerald-text)' : 'var(--text-muted)' }}>
-                            {row.tokensPerSecond ? `~${row.tokensPerSecond} tok/s` : '—'}
-                          </td>
-                          <td className="num-r mono" style={{ color: 'var(--text-secondary)' }}>
-                            {row.durationSeconds > 0 ? `~${row.durationSeconds}s` : '—'}
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-              <div className="tx-sep" />
-              <div style={{ padding: '9px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: 'var(--text-secondary)' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span className="mono">共 {data?.totalLogsCount ?? 0} 条记录</span>
-                  <select className="tx-select" style={{ width: 'auto', padding: '3px 7px' }} value={pageSize} onChange={e => { setPage(1); setPageSize(Number(e.target.value)); }}>
-                    <option value={20}>每页 20 条</option>
-                    <option value={50}>每页 50 条</option>
-                  </select>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <button className="tx-btn tx-btn-sec tx-btn-sm" disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>上一页</button>
-                  <span className="mono" style={{ padding: '0 6px' }}>{page} / {totalPages}</span>
-                  <button className="tx-btn tx-btn-sec tx-btn-sm" disabled={page >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>下一页</button>
-                </div>
-              </div>
-            </>
-          )}
-
-          {subTab === 'models' && (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>模型名称</th>
-                  <th className="num-r">请求数</th>
-                  <th className="num-r">有效输入</th>
-                  <th className="num-r">输出</th>
-                  <th className="num-r">缓存命中</th>
-                  <th className="num-r">命中率</th>
-                  <th className="num-r">平均流速</th>
-                  <th className="num-r">估算成本</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(data?.modelBreakdown ?? []).map(m => (
-                  <tr key={m.model}>
-                    <td className="mono" style={{ fontWeight: 700 }}>{m.model}</td>
-                    <td className="num-r mono">{m.requests}</td>
-                    <td className="num-r mono">{formatCompactTokens(m.effectiveInputTokens)}</td>
-                    <td className="num-r mono">{formatCompactTokens(m.outputTokens)}</td>
-                    <td className="num-r mono">{formatCompactTokens(m.cacheReadTokens)}</td>
-                    <td className="num-r mono" style={{ color: 'var(--sky-text)', fontWeight: 600 }}>{m.cacheHitRate}%</td>
-                    <td className="num-r mono">{m.avgTokensPerSecond > 0 ? `~${m.avgTokensPerSecond} tok/s` : '—'}</td>
-                    <td className="num-r mono">
-                      {m.hasPricing ? `$${m.costUsd.toFixed(4)}` : (
-                        <button
-                          className="tx-btn tx-btn-sec tx-btn-sm"
-                          style={{ height: 22, fontSize: 11 }}
-                          onClick={() => setPricingDraft({
-                            pattern: m.model,
-                            displayName: m.model,
-                            inputPerMillion: 1.25,
-                            outputPerMillion: 10.0,
-                            cacheReadPerMillion: 0.125,
-                            cacheWritePerMillion: 0
-                          })}
-                        >
-                          配置单价
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-          {subTab === 'appsProxy' && (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>AI 应用 / 席位</th>
-                  <th className="num-r">调用次数</th>
-                  <th className="num-r">总消耗 Tokens</th>
-                  <th className="num-r">缓存命中率</th>
-                  <th>独立入口端口</th>
-                  <th>当前绑定专线与出口 IP</th>
-                  <th className="num-r">代理上行 / 下行流量</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(data?.appAndProxyBreakdown ?? []).map(row => (
-                  <tr key={row.appName}>
-                    <td style={{ fontWeight: 700 }}>{row.appName}</td>
-                    <td className="num-r mono">{row.requests}</td>
-                    <td className="num-r mono">{formatCompactTokens(row.totalTokens)}</td>
-                    <td className="num-r mono">{row.cacheHitRate}%</td>
-                    <td className="mono">{row.seatPort ?? '—'}</td>
-                    <td>
-                      <div style={{ fontWeight: 600 }}>{row.boundNodeName ?? '—'}</div>
-                      <div className="mono" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{row.exitIp ?? '—'}</div>
-                    </td>
-                    <td className="num-r mono">
-                      ↑ {formatBytes(row.bytesTx)} · ↓ {formatBytes(row.bytesRx)} ({row.proxyConnections} 次)
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+      {/* 底部多维明细无框纯白卡片 */}
+      <div className="surface-card">
+        <div style={{ padding: '12px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+          <SegmentedTabs<SubTab>
+            value={subTab}
+            onChange={setSubTab}
+            items={[
+              { value: 'logs', label: '请求日志', count: data?.totalLogsCount ?? 0 },
+              { value: 'models', label: '按模型统计', count: data?.modelBreakdown.length ?? 0 },
+              { value: 'appsProxy', label: '应用与专线归属', count: data?.appAndProxyBreakdown.length ?? 0 },
+              { value: 'pricing', label: '模型定价表', count: pricings.length }
+            ]}
+          />
 
           {subTab === 'pricing' && (
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>模型匹配规则</th>
-                  <th>显示名称</th>
-                  <th className="num-r">输入 ($/1M)</th>
-                  <th className="num-r">输出 ($/1M)</th>
-                  <th className="num-r">缓存读 ($/1M)</th>
-                  <th className="num-r">缓存写 ($/1M)</th>
-                  <th className="num-r">来源</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pricings.map(r => (
-                  <tr key={r.pattern}>
-                    <td className="mono" style={{ fontWeight: 700 }}>{r.pattern}</td>
-                    <td>{r.displayName}</td>
-                    <td className="num-r mono">${r.inputPerMillion}</td>
-                    <td className="num-r mono">${r.outputPerMillion}</td>
-                    <td className="num-r mono">${r.cacheReadPerMillion}</td>
-                    <td className="num-r mono">${r.cacheWritePerMillion}</td>
-                    <td className="num-r">
-                      <span className={`badge ${r.isCustom ? 'badge-indigo' : 'badge-neutral'}`}>
-                        {r.isCustom ? '自定义' : '内置'}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <button
+              type="button"
+              className="btn-pill btn-indigo btn-sm"
+              onClick={() => setPricingDraft({
+                pattern: '',
+                displayName: '',
+                inputPerMillion: 1.25,
+                outputPerMillion: 10.0,
+                cacheReadPerMillion: 0.125,
+                cacheWritePerMillion: 0
+              })}
+            >
+              <PlusIcon size={12} />
+              <span>新增模型单价</span>
+            </button>
           )}
         </div>
+
+        <div className="soft-divider" />
+
+        {subTab === 'logs' && (
+          <>
+            <div style={{ overflowX: 'auto' }}>
+              <table className="clean-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>应用</th>
+                    <th>来源</th>
+                    <th>模型</th>
+                    <th>成本</th>
+                    <th className="num-r">有效输入</th>
+                    <th className="num-r">输出</th>
+                    <th className="num-r">缓存命中</th>
+                    <th className="num-r">流速</th>
+                    <th className="num-r">耗时</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(data?.logs ?? []).length === 0 ? (
+                    <tr>
+                      <td colSpan={10} style={{ textAlign: 'center', padding: 30, color: 'var(--text-muted)' }}>
+                        当前时间范围内暂无会话记录（可切换「全部历史」或点击右上角「按需同步」）
+                      </td>
+                    </tr>
+                  ) : (
+                    (data?.logs ?? []).map(row => (
+                      <tr key={row.id}>
+                        <td className="num nowrap" style={{ color: 'var(--text-secondary)' }}>
+                          {new Date(row.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}
+                        </td>
+                        <td className="nowrap"><span className="pill-tag tag-neutral">{row.appName}</span></td>
+                        <td className="nowrap" style={{ color: 'var(--text-secondary)' }}>{row.source}</td>
+                        <td className="mono nowrap" style={{ fontWeight: 500, fontSize: 12 }}>{row.model}</td>
+                        <td className="nowrap">
+                          {row.isPriced && row.costUsd !== null && row.costUsd !== undefined ? (
+                            <span className="num" style={{ color: 'var(--accent-emerald-text)', fontWeight: 600 }}>
+                              ${row.costUsd.toFixed(4)}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn-pill btn-soft btn-sm"
+                              style={{ height: 24, fontSize: 11, padding: '0 8px' }}
+                              onClick={() => setPricingDraft({
+                                pattern: row.model,
+                                displayName: row.model,
+                                inputPerMillion: 1.25,
+                                outputPerMillion: 10.0,
+                                cacheReadPerMillion: 0.125,
+                                cacheWritePerMillion: 0
+                              })}
+                            >
+                              配价
+                            </button>
+                          )}
+                        </td>
+                        <td className="num-r num nowrap">{row.effectiveInputTokens.toLocaleString('en-US')}</td>
+                        <td className="num-r num nowrap">{row.outputTokens.toLocaleString('en-US')}</td>
+                        <td className="num-r num nowrap">{formatCompactTokens(row.cacheReadTokens)}</td>
+                        <td className="num-r num nowrap" style={{ color: row.tokensPerSecond ? 'var(--accent-emerald-text)' : 'var(--text-muted)' }}>
+                          {row.tokensPerSecond ? `~${row.tokensPerSecond} tok/s` : '—'}
+                        </td>
+                        <td className="num-r num nowrap" style={{ color: 'var(--text-secondary)' }}>
+                          {row.durationSeconds > 0 ? `~${row.durationSeconds}s` : '—'}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="soft-divider" />
+            <div style={{ padding: '10px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: 'var(--text-secondary)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span className="num">共 {data?.totalLogsCount ?? 0} 条记录</span>
+                <CustomSelect
+                  variant="light"
+                  size="sm"
+                  value={String(pageSize)}
+                  options={PAGE_SIZE_OPTIONS}
+                  onChange={v => { setPage(1); setPageSize(Number(v)); }}
+                  style={{ width: 108 }}
+                  ariaLabel="选择每页显示条数"
+                />
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <button type="button" className="btn-pill btn-soft btn-sm" disabled={page <= 1} onClick={() => setPage(p => Math.max(1, p - 1))}>上一页</button>
+                <span className="num" style={{ padding: '0 6px' }}>{page} / {totalPages}</span>
+                <button type="button" className="btn-pill btn-soft btn-sm" disabled={page >= totalPages} onClick={() => setPage(p => Math.min(totalPages, p + 1))}>下一页</button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {subTab === 'models' && (
+          <table className="clean-table">
+            <thead>
+              <tr>
+                <th>模型名称</th>
+                <th className="num-r">请求数</th>
+                <th className="num-r">有效输入</th>
+                <th className="num-r">输出</th>
+                <th className="num-r">缓存命中</th>
+                <th className="num-r">命中率</th>
+                <th className="num-r">平均流速</th>
+                <th className="num-r">估算成本</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data?.modelBreakdown ?? []).map(m => (
+                <tr key={m.model}>
+                  <td className="mono" style={{ fontWeight: 600, fontSize: 12 }}>{m.model}</td>
+                  <td className="num-r num">{m.requests}</td>
+                  <td className="num-r num">{formatCompactTokens(m.effectiveInputTokens)}</td>
+                  <td className="num-r num">{formatCompactTokens(m.outputTokens)}</td>
+                  <td className="num-r num">{formatCompactTokens(m.cacheReadTokens)}</td>
+                  <td className="num-r num" style={{ color: 'var(--accent-indigo)', fontWeight: 600 }}>{m.cacheHitRate}%</td>
+                  <td className="num-r num">{m.avgTokensPerSecond > 0 ? `~${m.avgTokensPerSecond} tok/s` : '—'}</td>
+                  <td className="num-r num">
+                    {m.hasPricing ? `$${m.costUsd.toFixed(4)}` : (
+                      <button
+                        type="button"
+                        className="btn-pill btn-soft btn-sm"
+                        style={{ height: 24, fontSize: 11 }}
+                        onClick={() => setPricingDraft({
+                          pattern: m.model,
+                          displayName: m.model,
+                          inputPerMillion: 1.25,
+                          outputPerMillion: 10.0,
+                          cacheReadPerMillion: 0.125,
+                          cacheWritePerMillion: 0
+                        })}
+                      >
+                        配置单价
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {subTab === 'appsProxy' && (
+          <table className="clean-table">
+            <thead>
+              <tr>
+                <th>AI 应用 / 席位</th>
+                <th className="num-r">调用次数</th>
+                <th className="num-r">总消耗 Tokens</th>
+                <th className="num-r">缓存命中率</th>
+                <th>独立入口端口</th>
+                <th>绑定专线与出口 IP</th>
+                <th className="num-r">代理上行 / 下行流量</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data?.appAndProxyBreakdown ?? []).map(row => (
+                <tr key={row.appName}>
+                  <td style={{ fontWeight: 600 }}>{row.appName}</td>
+                  <td className="num-r num">{row.requests}</td>
+                  <td className="num-r num">{formatCompactTokens(row.totalTokens)}</td>
+                  <td className="num-r num">{row.cacheHitRate}%</td>
+                  <td className="mono">{row.seatPort ?? '—'}</td>
+                  <td>
+                    <div style={{ fontWeight: 600 }}>{row.boundNodeName ?? '—'}</div>
+                    <div className="num" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{row.exitIp ?? '—'}</div>
+                  </td>
+                  <td className="num-r num">
+                    ↑ {formatBytes(row.bytesTx)} · ↓ {formatBytes(row.bytesRx)} ({row.proxyConnections} 次)
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        {subTab === 'pricing' && (
+          <table className="clean-table">
+            <thead>
+              <tr>
+                <th>模型匹配规则</th>
+                <th>显示名称</th>
+                <th className="num-r">输入 ($/1M)</th>
+                <th className="num-r">输出 ($/1M)</th>
+                <th className="num-r">缓存读 ($/1M)</th>
+                <th className="num-r">缓存写 ($/1M)</th>
+                <th className="num-r">来源</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pricings.map(r => (
+                <tr key={r.pattern}>
+                  <td className="mono" style={{ fontWeight: 600, fontSize: 12 }}>{r.pattern}</td>
+                  <td>{r.displayName}</td>
+                  <td className="num-r num">${r.inputPerMillion}</td>
+                  <td className="num-r num">${r.outputPerMillion}</td>
+                  <td className="num-r num">${r.cacheReadPerMillion}</td>
+                  <td className="num-r num">${r.cacheWritePerMillion}</td>
+                  <td className="num-r">
+                    <span className={`pill-tag ${r.isCustom ? 'tag-indigo' : 'tag-neutral'}`}>
+                      {r.isCustom ? '自定义' : '内置'}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
-      {/* 新增/修改模型定价弹窗 */}
       {pricingDraft && (
-        <div className="modal-mask">
-          <div className="modal-tray narrow">
-            <form className="modal-card" onSubmit={handleSavePricing}>
-              <div style={{ padding: '14px 18px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div>
-                  <strong style={{ fontSize: 14 }}>配置模型百万 Token 单价</strong>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>保存后将立即重算全量历史调用成本（单位：USD / 1M Tokens）</div>
-                </div>
-                <button type="button" className="tx-btn tx-btn-sec tx-btn-sm" onClick={() => setPricingDraft(null)}>关闭</button>
+        <div className="modal-backdrop" onClick={() => setPricingDraft(null)}>
+          <form className="modal-surface narrow" onSubmit={handleSavePricing} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '18px 22px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>配置模型百万 Token 单价</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>保存后立即重算全量历史调用成本（USD / 1M Tokens）</div>
               </div>
-              <div className="tx-sep" />
-              <div style={{ padding: '15px 18px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>模型匹配关键字 / 完整名</div>
-                  <input className="tx-input mono" required value={pricingDraft.pattern} onChange={e => setPricingDraft({ ...pricingDraft, pattern: e.target.value })} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>显示名称</div>
-                  <input className="tx-input" value={pricingDraft.displayName} onChange={e => setPricingDraft({ ...pricingDraft, displayName: e.target.value })} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>输入单价 ($/1M)</div>
-                  <input className="tx-input mono" type="number" step="0.001" value={pricingDraft.inputPerMillion} onChange={e => setPricingDraft({ ...pricingDraft, inputPerMillion: Number(e.target.value) })} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>输出单价 ($/1M)</div>
-                  <input className="tx-input mono" type="number" step="0.001" value={pricingDraft.outputPerMillion} onChange={e => setPricingDraft({ ...pricingDraft, outputPerMillion: Number(e.target.value) })} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>缓存读取 ($/1M)</div>
-                  <input className="tx-input mono" type="number" step="0.001" value={pricingDraft.cacheReadPerMillion} onChange={e => setPricingDraft({ ...pricingDraft, cacheReadPerMillion: Number(e.target.value) })} />
-                </div>
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>缓存创建 ($/1M)</div>
-                  <input className="tx-input mono" type="number" step="0.001" value={pricingDraft.cacheWritePerMillion} onChange={e => setPricingDraft({ ...pricingDraft, cacheWritePerMillion: Number(e.target.value) })} />
-                </div>
+              <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => setPricingDraft(null)}>关闭</button>
+            </div>
+            <div className="soft-divider" />
+            <div style={{ padding: '18px 22px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>模型匹配关键字</div>
+                <input className="clean-input mono" required value={pricingDraft.pattern} onChange={e => setPricingDraft({ ...pricingDraft, pattern: e.target.value })} />
               </div>
-              <div className="tx-sep" />
-              <div style={{ padding: '12px 18px', background: 'var(--card-subtle)', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                <button type="button" className="tx-btn tx-btn-sec" onClick={() => setPricingDraft(null)}>取消</button>
-                <button type="submit" className="tx-btn tx-btn-primary">保存并重算成本</button>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>显示名称</div>
+                <input className="clean-input" value={pricingDraft.displayName} onChange={e => setPricingDraft({ ...pricingDraft, displayName: e.target.value })} />
               </div>
-            </form>
-          </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>输入 ($/1M)</div>
+                <input className="clean-input num" type="number" step="0.001" value={pricingDraft.inputPerMillion} onChange={e => setPricingDraft({ ...pricingDraft, inputPerMillion: Number(e.target.value) })} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>输出 ($/1M)</div>
+                <input className="clean-input num" type="number" step="0.001" value={pricingDraft.outputPerMillion} onChange={e => setPricingDraft({ ...pricingDraft, outputPerMillion: Number(e.target.value) })} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>缓存读取 ($/1M)</div>
+                <input className="clean-input num" type="number" step="0.001" value={pricingDraft.cacheReadPerMillion} onChange={e => setPricingDraft({ ...pricingDraft, cacheReadPerMillion: Number(e.target.value) })} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 5 }}>缓存创建 ($/1M)</div>
+                <input className="clean-input num" type="number" step="0.001" value={pricingDraft.cacheWritePerMillion} onChange={e => setPricingDraft({ ...pricingDraft, cacheWritePerMillion: Number(e.target.value) })} />
+              </div>
+            </div>
+            <div className="modal-footer-bar">
+              <button type="button" className="btn-pill btn-soft" onClick={() => setPricingDraft(null)}>取消</button>
+              <button type="submit" className="btn-pill btn-indigo">保存并重算</button>
+            </div>
+          </form>
         </div>
       )}
     </div>

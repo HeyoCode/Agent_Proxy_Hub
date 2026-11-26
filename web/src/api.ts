@@ -40,6 +40,8 @@ export interface NetworkAdapterInfo {
   description: string;
   interfaceIndex: number;
   iPv4Address?: string | null;
+  iPv6InterfaceIndex?: number;
+  iPv6Address?: string | null;
   gatewayAddress?: string | null;
   status: string;
   isVirtualOrTunnel: boolean;
@@ -56,6 +58,7 @@ export interface IsolationSettings {
   directPhysicalDohEnabled: boolean;
   dohServerIp: string;
   globalKillSwitch: boolean;
+  enableIpv6: boolean;
 }
 
 export interface SeatTrafficSnapshot {
@@ -68,8 +71,35 @@ export interface SeatTrafficSnapshot {
   totalConnections: number;
   bytesTx: number;
   bytesRx: number;
+  bytesTxPerSec?: number;
+  bytesRxPerSec?: number;
   sniRecoveredCount: number;
   killSwitchBlockedCount: number;
+  ipv6BlockedCount?: number;
+}
+
+export interface SeatTakeoverStatus {
+  seatId: string;
+  isProcessRunning: boolean;
+  supportsConfigTakeover: boolean;
+  isTakenOver: boolean;
+  modeSummary: string;
+  targetPath?: string | null;
+  launchExecutable?: string | null;
+  statusHint: string;
+}
+
+export interface TunnelVerificationResult {
+  ok: boolean;
+  seatId: string;
+  localPort: number;
+  exitIp: string;
+  latencyMs?: number | null;
+  bytesTx: number;
+  bytesRx: number;
+  aiReachability: string[];
+  message: string;
+  node?: ProxyNode | null;
 }
 
 export interface ProjectMetadataDto {
@@ -96,6 +126,7 @@ export interface OverviewResponse {
   seats: AppSeat[];
   nodes: ProxyNode[];
   trafficSnapshots: SeatTrafficSnapshot[];
+  seatTakeovers?: SeatTakeoverStatus[];
   cliSnippets: Record<string, string>;
 }
 
@@ -186,6 +217,8 @@ export interface UsageDashboardResponse {
   unpricedRequests: number;
   totalProxyTxBytes: number;
   totalProxyRxBytes: number;
+  totalProxyTxBytesPerSec?: number;
+  totalProxyRxBytesPerSec?: number;
   totalProxyConnections: number;
   appChips: { name: string; count: number }[];
   availableModels: string[];
@@ -246,6 +279,20 @@ export const api = {
   verifyAllNodes: () => requestJson<ProxyNode[]>('/api/nodes/verify-all', { method: 'POST' }),
   updateSeat: (id: string, body: { enabled?: boolean; boundNodeId?: string; killSwitchEnabled?: boolean }) =>
     requestJson<AppSeat>(`/api/seats/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  toggleAllSeats: (enabled: boolean) =>
+    requestJson<AppSeat[]>('/api/seats/toggle-all', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  setSeatTakeover: (id: string, enabled: boolean) =>
+    requestJson<{ ok: boolean; message: string; status: SeatTakeoverStatus; seatTakeovers: SeatTakeoverStatus[] }>(
+      `/api/seats/${id}/takeover`,
+      { method: 'POST', body: JSON.stringify({ enabled }) }
+    ),
+  launchSeatApp: (id: string) =>
+    requestJson<{ ok: boolean; message: string; seatTakeovers: SeatTakeoverStatus[] }>(
+      `/api/seats/${id}/launch`,
+      { method: 'POST' }
+    ),
+  verifySeatTunnel: (id: string) =>
+    requestJson<TunnelVerificationResult>(`/api/seats/${id}/verify-tunnel`, { method: 'POST' }),
   getIsolation: () =>
     requestJson<{ settings: IsolationSettings; adapters: NetworkAdapterInfo[]; lockedAdapter?: NetworkAdapterInfo | null }>('/api/isolation'),
   rescanNics: () =>
@@ -283,6 +330,11 @@ export function formatBytes(bytes: number): string {
     i++;
   }
   return `${v >= 10 ? v.toFixed(1) : v.toFixed(2)} ${units[i]}`;
+}
+
+export function formatRate(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec <= 0) return '0 B/s';
+  return `${formatBytes(bytesPerSec)}/s`;
 }
 
 export function formatCompactTokens(tokens: number): string {

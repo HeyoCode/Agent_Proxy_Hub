@@ -11,6 +11,7 @@ public sealed class UsageStatsService
     private readonly SessionLogScanner _scanner;
     private readonly ModelPricingCatalog _pricing;
     private readonly object _lock = new();
+    private readonly object _syncExecLock = new();
     private List<UsageLogEntry> _entries = new();
     private SyncStatsResult? _lastSync;
 
@@ -22,14 +23,27 @@ public sealed class UsageStatsService
 
     public SyncStatsResult SyncNow()
     {
-        var (parsed, info) = _scanner.ScanIncremental();
-        ApplyPricing(parsed);
-        lock (_lock)
+        lock (_syncExecLock)
         {
-            _entries = parsed;
-            _lastSync = info;
+            var (parsed, info, hasChanges) = _scanner.ScanIncrementalWithChangeFlag();
+            if (hasChanges || _lastSync == null)
+            {
+                ApplyPricing(parsed);
+                lock (_lock)
+                {
+                    _entries = parsed;
+                    _lastSync = info;
+                }
+            }
+            else
+            {
+                lock (_lock)
+                {
+                    _lastSync = info;
+                }
+            }
+            return info;
         }
-        return info;
     }
 
     public void RecalculatePricing()
@@ -178,6 +192,8 @@ public sealed class UsageStatsService
             UnpricedRequests = filtered.Count(e => !e.IsPriced),
             TotalProxyTxBytes = proxySnapshots.Sum(s => s.BytesTx),
             TotalProxyRxBytes = proxySnapshots.Sum(s => s.BytesRx),
+            TotalProxyTxBytesPerSec = proxySnapshots.Sum(s => s.BytesTxPerSec),
+            TotalProxyRxBytesPerSec = proxySnapshots.Sum(s => s.BytesRxPerSec),
             TotalProxyConnections = proxySnapshots.Sum(s => s.TotalConnections),
             AppChips = appChips,
             AvailableModels = availableModels,
