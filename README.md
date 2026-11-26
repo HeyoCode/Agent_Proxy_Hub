@@ -6,7 +6,7 @@
 
 **专为海外 AI 应用打造的跨平台独立出口代理网关、无损接管器与免解密用量统计中心**
 
-*让 Claude、ChatGPT / Codex、Antigravity、Cursor 各自独占纯净静态出口 IP，与 Clash / Mihomo / Surge 平行共处、互不串线*
+*让 Claude (Code / Desktop)、ChatGPT / Codex、Antigravity、Cursor、Gemini CLI、OpenClaw、Kimi / DeepSeek 等 **15 款 AI 应用**各自独占纯净静态出口 IP，与 Clash / Mihomo / Surge 平行共处、互不串线*
 
 <p>
   <a href="https://github.com/HeyoCode/Agent_Proxy_Hub/releases">
@@ -36,10 +36,11 @@
   <a href="#-核心特性">核心特性</a> •
   <a href="#-界面预览">界面预览</a> •
   <a href="#-物理硬件直出架构">架构原理</a> •
-  <a href="#-默认席位与一键接管矩阵">应用接管</a> •
+  <a href="#-支持应用与无损接管矩阵">15 款支持应用</a> •
   <a href="#-快速安装与使用">快速上手</a> •
   <a href="#-本地-rest-api-与开发构建">API 与开发</a> •
-  <a href="#-常见问题-faq">FAQ</a>
+  <a href="#-常见问题-faq">FAQ</a> •
+  <a href="CHANGELOG.md">更新日志</a>
 </p>
 
 </div>
@@ -58,27 +59,27 @@
   <tr>
     <td width="50%" valign="top">
       <h3>🛡️ 物理硬件网卡直绑 · 彻底绕过 Clash</h3>
-      <p>自动扫描并排除所有虚拟/隧道网卡，所有代理上游连接直接绑定物理以太网/Wi-Fi 出口；支持 <strong>TLS ClientHello SNI 域名还原</strong>，自动剥离 Clash Fake-IP (<code>198.18.0.0/15</code>)，上游域名走物理直连干净 DNS 解析。</p>
+      <p>自动扫描并排除所有虚拟/隧道网卡，代理上游连接直绑物理以太网/Wi-Fi 出口；内置 <strong>TLS ClientHello SNI 域名还原</strong> 与<strong>物理网卡 UDP 53 + RFC 8484 HTTPS DoH 双层干净解析</strong>，全程过滤并剥离 Clash Fake-IP (<code>198.18.0.0/15</code>)。</p>
     </td>
     <td width="50%" valign="top">
-      <h3>🔌 AI 应用一键无损接管 & 受控启动</h3>
-      <p>内置 <code>AppProxyTakeoverService</code>，自动备份原配置并精准写入/还原代理入口，保留全部已有凭据与自定义项；Antigravity 启动器内置 <strong>150ms 端口探活守卫</strong>，网关开启时自动导流，关闭时自动直连绝不断网。</p>
+      <h3>🔌 15 款 AI 应用无损接管 & 受控启动</h3>
+      <p>内置支持 <strong>15 款主流 AI 桌面与 CLI 工具</strong>，写配置前自动备份原键值、支持一键精准还原且升级无损合并；Antigravity 启动器内置 <strong>150ms 端口探活守卫</strong>，网关开启自动导流，关闭自动直连绝不断网。</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
       <h3>📊 免解密双源 AI 用量统计（5s 自动同步）</h3>
-      <p>零 MITM 拆包风险，后台每 <strong>5 秒</strong>增量巡检 <code>~/.claude</code>、<code>~/.codex</code>、<code>~/.gemini/antigravity</code> 结构化日志，聚合请求数、有效输入、输出、缓存命中率、Token 流速与自定义百万 Token 成本。</p>
+      <p>零 MITM 拆包风险，后台每 <strong>5 秒</strong>增量巡检 <code>~/.claude</code>、<code>~/.codex</code>、<code>~/.gemini/antigravity</code> 结构化日志，统计请求数、有效输入、输出、缓存命中率、<strong>首字延迟估算 (TTFT)</strong>、Token 流速与自定义百万 Token 成本。</p>
     </td>
     <td width="50%" valign="top">
-      <h3>⚡ 实时吞吐速率 & 累计流量自由切换</h3>
-      <p>引擎内置 1 秒高精度滑动速率采样器，右侧午夜检视栏支持 <code>实时 (B/s · KB/s · MB/s)</code> 与 <code>累计 (B · KB · MB)</code> 一键切换，配合<strong>全链路实流验真</strong>实时观测端口活跃流与熔断拦截数。</p>
+      <h3>⚡ 零 GC 吞吐引擎 & 实时/累计速率切换</h3>
+      <p>转发热路径采用 <code>ArrayPool</code> 零 GC 缓冲池、双工半关闭尾包排空与 1 秒滑动速率采样器；右侧双主题检视栏支持 <code>实时 (B/s · KB/s · MB/s)</code> 与 <code>累计 (B · KB · MB)</code> 一键切换及<strong>全链路实流验真</strong>。</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>🌐 L1 原生多协议 + L2 按需 <code>sing-box</code> 扩展 & 机场订阅</h3>
-      <p><strong>L1 核心层</strong>纯 .NET 零依赖原生支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code> Sidecar 支持 <code>VLESS (Reality) / Hysteria2 / TUIC / WireGuard</code>（无 L2 节点时 0 进程占用）；全面支持 <strong>L1+L2 手动动态填表</strong>、单条链接回填与 <strong>Clash YAML / Base64 机场订阅链接一键拉取</strong>。</p>
+      <h3>🌐 L1 原生多协议 + L2 按需 <code>sing-box</code> & 订阅同步</h3>
+      <p><strong>L1 核心层</strong>纯 .NET 零依赖支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code> 支持 <code>VLESS (Reality) / Hysteria2 / TUIC / WireGuard</code>（空闲 0 进程，验真与在用并集隔离）；支持 <strong>L1+L2 手动填表</strong>、双模式导入工作台与<strong>机场订阅记忆一键刷新</strong>。</p>
     </td>
     <td width="50%" valign="top">
       <h3>🔀 双跳链式加速（高速中转 → 静态住宅落地）</h3>
@@ -88,11 +89,11 @@
   <tr>
     <td width="50%" valign="top">
       <h3>🧊 全窗浅色/深色统一主题 · 跟随系统实时联动</h3>
-      <p>Windows 11 DWM 原生圆角无外边框窗口 + <strong>跟随系统 / 浅色 / 深色三态切换</strong>（主窗与托盘浮层实时同步），内置 Claude / ChatGPT / Antigravity / Cursor <strong>官方原版矢量品牌标</strong>，彻底告别传统灰底右键菜单。</p>
+      <p>Windows 11 DWM 原生圆角无外边框窗口 + <strong>跟随系统 / 浅色 / 深色三态切换</strong>（主窗与托盘浮层实时同步），内置 15 款 AI 应用离线矢量品牌标与总控拓扑 <code>‹ 1/4 ›</code> 动态翻页。</p>
     </td>
     <td width="50%" valign="top">
-      <h3>🔒 防串 IP 熔断锁 & IPv6 双栈独立开关</h3>
-      <p>开启 <strong>Fail-Close 熔断锁</strong>后，若专线节点掉线则直接阻断连接，绝不回退本地宽带或机场 IP；内置全局 <strong>IPv6 开关</strong>（默认关闭以防单栈节点卡顿与 IPv6 真实地址泄漏）。</p>
+      <h3>🔒 防串熔断锁 · IPv6 开关 · 环回安全守卫</h3>
+      <p>开启 <strong>Fail-Close 熔断锁</strong>后专线掉线直接阻断绝不回退本地或机场 IP；内置全局 <strong>IPv6 开关</strong>防泄漏；本地管理接口内置 <code>LoopbackSecurityGuard</code>，阻断 DNS Rebinding 与外部网页跨站写操作 (CSRF)。</p>
     </td>
   </tr>
 </table>
@@ -111,14 +112,14 @@
     <td width="50%" align="center">
       <img src="docs/screenshots/usage-stats.png" alt="双源用量统计大盘" />
       <br />
-      <sub><strong>双源用量统计</strong> · 5s 自动增量同步、缓存命中率分时柱图、模型与专线二维归属</sub>
+      <sub><strong>双源用量统计</strong> · 5s 自动增量同步、首字延迟(估)与流速计算、缓存命中率分时柱图与模型归属</sub>
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
       <img src="docs/screenshots/apps-takeover.png" alt="AI 应用一键无损接管工作台" />
       <br />
-      <sub><strong>应用接管与 CLI 工作台</strong> · 实时进程识别、一键接管/无损还原、专线启动与终端变量</sub>
+      <sub><strong>15 款应用接管与 CLI 工作台</strong> · 搜索筛选、一键接管/无损还原、专线启动与随应用联动的终端命令</sub>
     </td>
     <td width="50%" align="center">
       <img src="docs/screenshots/tray-quick-panel.png" alt="系统托盘原生快捷面板" />
@@ -142,16 +143,16 @@
 
 ```mermaid
 flowchart LR
-    subgraph APPS["独立 AI 应用层（互不串线）"]
-        A1["Claude Code / Desktop<br/>:17891"]
-        A2["ChatGPT / Codex CLI<br/>:17892"]
-        A3["Antigravity IDE / Agent<br/>:17893"]
-        A4["Cursor Editor<br/>:17894"]
+    subgraph APPS["15 款独立 AI 应用层（互不串线）"]
+        A1["Claude Code (:17891)<br/>Claude Desktop (:17895)"]
+        A2["ChatGPT / Codex<br/>:17892"]
+        A3["Antigravity IDE<br/>:17893"]
+        A4["Cursor (:17894) + Gemini / Grok /<br/>OpenClaw / Kimi 等 10 款 (:17896~17905)"]
     end
 
     subgraph CORE["Agent Proxy Hub Core (.NET 10)"]
         IN["多端口混合入站引擎<br/>SOCKS5 / SOCKS4 / HTTP(S)"]
-        SNI["TLS SNI 还原<br/>剥离 198.18.x.x Fake-IP"]
+        SNI["TLS SNI 还原 + 物理直连 DoH<br/>剥离并过滤 198.18.x.x Fake-IP"]
         KS["Fail-Close 熔断锁 + 双跳链式路由<br/>L1 原生 (Trojan/SS/SOCKS/HTTP) · L2 按需 sing-box"]
         NIC["物理网卡 Socket 直绑<br/>IP_UNICAST_IF / IP_BOUND_IF / bind_interface"]
     end
@@ -254,14 +255,16 @@ socks5://u6:p6@[2001:db8::1]:1080#IPv6-双栈节点
 ```text
 Agent_Proxy_Hub/
 ├── AgentProxyHub.sln                   # .NET 10 解决方案
+├── CHANGELOG.md                        # 版本演进与 Release Notes 权威变更记录
+├── LICENSE                             # PolyForm Noncommercial 1.0.0 非商用开源协议
 ├── src/
-│   ├── AgentProxyHub.Core/             # 核心代理引擎、物理网卡直绑、无损接管、双源统计库
-│   ├── AgentProxyHub.Host/             # 跨平台本地守护与 REST API 服务 (127.0.0.1:17880)
+│   ├── AgentProxyHub.Core/             # 多协议代理内核、sing-box 并集桥、物理 DoH、15 应用接管、统计库
+│   ├── AgentProxyHub.Host/             # 跨平台本地守护与环回受保护 REST API 服务 (127.0.0.1:17880)
 │   └── AgentProxyHub.Desktop.Win/      # Windows 无边框 WebView2 主窗与原生圆角托盘悬浮窗
 ├── macos/                              # macOS 原生菜单栏 NSPopover + WKWebView 宿主与脚本
-├── web/                                # React 19 + TypeScript + Vite 前端（本地内嵌字体零外链）
+├── web/                                # React 19 + TypeScript + Vite 前端（双主题自适应 + 本地字体零外链）
 ├── installer/                          # Inno Setup 6 (Windows) 与 DMG (macOS) 打包脚本
-├── tests/AgentProxyHub.Tests/          # xUnit 单元测试与端到端 SOCKS5 / IPv6 / 接管 / 速率测试
+├── tests/AgentProxyHub.Tests/          # 19 项 xUnit 测试（多协议 / 双跳链路 / Clash YAML / 热切换 / 安全守卫）
 └── docs/screenshots/                   # README 展示截图资源
 ```
 
@@ -302,22 +305,25 @@ chmod +x installer/macos/build-dmg.sh
 </details>
 
 <details>
-<summary>🔌 <strong>本地 REST API 端点速查（默认监听 <code>127.0.0.1:17880</code>）</strong></summary>
+<summary>🔌 <strong>本地 REST API 端点速查（默认监听 <code>127.0.0.1:17880</code>，受环回 Origin/Host 守卫保护）</strong></summary>
 
 | 方法 | 路径 | 说明 |
 | :---: | :--- | :--- |
-| `GET` | `/api/overview` | 获取物理网卡、绕过隧道、席位配置、节点池、实时吞吐/速率与接管状态 |
+| `GET` | `/api/overview` | 获取物理网卡、绕过隧道、15 款席位配置、节点池、实时吞吐/速率与接管状态 |
+| `POST` | `/api/nodes/manual` | 手动添加单条 L1/L2 全协议独立代理线路（含扩展参数 `extra`） |
 | `POST` | `/api/nodes/batch-import` | 批量解析并去重导入多协议代理节点（支持 Clash YAML / Base64 / URI） |
 | `POST` | `/api/nodes/fetch-subscription` | 拉取机场订阅链接（自动兼容 `clash.meta` / `v2rayN` 与可选代理）并实时预览 |
 | `POST` | `/api/nodes/{id}/verify` | 物理网卡直连并发验真单个节点（单次最快 RTT + 出口 IP） |
-| `PUT` | `/api/seats/{id}` | 更新席位启停、绑定线路、前置中转 (`relayNodeId`)、本地端口与防串熔断锁 |
+| `POST` | `/api/nodes/verify-all` | 全量节点物理直连验真（L2 单次并集预热 + 8 路并发限流防 NAT 拥塞） |
+| `PUT` | `/api/seats/{id}` | 更新席位启停、绑定线路、前置中转 (`relayNodeId`)、本地端口在线热切换与熔断锁 |
 | `POST` | `/api/seats/{id}/takeover` | 对目标 AI 应用执行一键无损代理接管或还原默认配置 |
 | `POST` | `/api/seats/{id}/launch` | 注入席位独立代理环境变量受控启动目标应用或终端 |
 | `POST` | `/api/seats/{id}/verify-tunnel` | 经由 `127.0.0.1:{localPort}` 发起全链路实流验真并刷新吞吐 |
-| `GET` | `/api/engine/singbox` | 查询 L2 `sing-box` Sidecar 安装状态、版本、运行 PID 与托管节点数 |
+| `GET` | `/api/engine/singbox` | 查询 L2 `sing-box` Sidecar 安装状态、版本与活跃桥接节点数 |
 | `POST` | `/api/engine/singbox/install` | 一键从官方 Release 下载安装 `sing-box` 至本地隔离目录 |
+| `POST` | `/api/engine/singbox/stop` | 手动停止 `sing-box` Sidecar 进程并释放临时桥接端口 |
 | `PUT` | `/api/isolation` | 切换锁定物理网卡、SNI 还原、全局熔断锁与 IPv6 双栈开关 |
-| `GET` | `/api/stats/dashboard` | 查询双源 AI 用量统计（支持 `today / 24h / 7d / 30d / all` 与分页筛选） |
+| `GET` | `/api/stats/dashboard` | 查询双源 AI 用量统计（含首字延迟估算，支持 `today / 24h / 7d / 30d / all`） |
 | `POST` | `/api/stats/sync` | 立即触发一次增量会话日志同步（后台默认每 5 秒自动执行） |
 
 </details>
@@ -330,7 +336,7 @@ chmod +x installer/macos/build-dmg.sh
 <summary><strong>1. 为什么「Token 消耗趋势」有数据，但右栏吞吐一开始是 0 B/s？</strong></summary>
 
 - **Token 统计**直接增量扫描本地 `.claude / .codex / .gemini` 会话日志，不依赖代理流量；
-- **吞吐计数**统计流经 `127.0.0.1:17891~17894` 端口的真实 TCP 流量。请先点击席位右侧的 **「一键接管」**（已运行中的桌面端应用需彻底退出后重开一次），或直接点击 **「全链路验真」** 立即观测实流穿透数据。
+- **吞吐计数**统计流经 `127.0.0.1:17891~17905` 各席位独立端口的真实 TCP 流量。请先点击席位右侧的 **「一键接管」**（已运行中的桌面端应用需彻底退出后重开一次），或直接点击 **「全链路验真」** 立即观测实流穿透数据。
 
 </details>
 
