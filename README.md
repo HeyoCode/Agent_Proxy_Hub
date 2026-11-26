@@ -175,16 +175,29 @@ flowchart LR
 
 ---
 
-## 🎯 默认席位与一键接管矩阵
+## 🎯 支持应用与无损接管矩阵
 
-| AI 席位 | 本地混合端口 | 支持协议 | 一键无损接管机制 | 备份与还原策略 |
-| :--- | :---: | :--- | :--- | :--- |
-| **Claude** *(Code / Desktop)* | `127.0.0.1:17891` | HTTP / SOCKS5 / SOCKS4 | 原地合并 `~/.claude/settings.json` 的 `env.HTTP(S)_PROXY` 与 `NO_PROXY` | 保留全部 Token/模型配置，点击「还原默认」精准复原 |
-| **ChatGPT / Codex** | `127.0.0.1:17892` | HTTP / SOCKS5 / SOCKS4 | 生成专属隔离启动脚本 + 一键拉起已注入代理环境的独立终端 | 一键清理托管脚本，零改动系统环境变量 |
-| **Antigravity** *(IDE / Agent)* | `127.0.0.1:17893` | HTTP / SOCKS5 / SOCKS4 | 兼容自愈汉化启动器与独立启动脚本，内置 **150ms 端口探活守卫** | 网关关闭时自动跳过代理直连；一键剥离托管块还原 |
-| **Cursor** *(AI 代码编辑器)* | `127.0.0.1:17894` | HTTP / SOCKS5 / SOCKS4 | 安全解析带注释的 `User/settings.json`，热写入 `http.proxy` | 保留字体/插件等全部用户配置，一键恢复原值 |
-| **Claude Desktop** *(桌面路由)* | `127.0.0.1:17895` | HTTP / SOCKS5 / SOCKS4 | 自动探测 `Claude.exe` / `Claude.app` 注入 `--proxy-server` 与代理环境变量 | 生成专属桌面路由启动器，一键清理还原 |
-| **10 款扩展 CLI / Agent** *(Gemini CLI · Grok Build · OpenCode · OpenClaw · Hermes · Pi · MiniMax Code · Kimi Code · DeepSeek Harness · Oh My Pi)* | `127.0.0.1:17896 ~ 17905` | HTTP / SOCKS5 / SOCKS4 | 自动按应用生成隔离启动脚本与预注入代理环境的独立终端，支持实时进程检测与总控翻页 | 零改动系统全局代理，一键清除托管启动脚本 |
+> 所有席位均原生监听**单端口多协议混合入站**（同时兼容 `HTTP / SOCKS5 / SOCKS4`），写入配置前自动备份原文件，随时一键无损还原。
+
+### 核心桌面与深度配置接管（5 款）
+
+| 应用 | 默认端口 | 无损接管与还原方式 |
+| :--- | :---: | :--- |
+| **Claude Code** | `:17891` | 原地合并 `~/.claude/settings.json` 中的代理环境变量，保留全部 Token 与模型配置，一键精准还原 |
+| **ChatGPT / Codex** | `:17892` | 生成专属隔离启动脚本，一键拉起已注入独立出口的受控终端，零改动系统环境变量 |
+| **Antigravity** | `:17893` | 兼容自愈启动器并内置 **150ms 端口探活守卫**（网关关闭时自动直连不断网），一键剥离还原 |
+| **Cursor** | `:17894` | 安全解析带注释的 `User/settings.json` 热写入 `http.proxy`，保留全部字体与插件配置 |
+| **Claude Desktop** | `:17895` | 自动探测本机 `Claude.exe` / `Claude.app` 注入 `--proxy-server` 桌面路由参数，支持一键清理 |
+
+### 扩展 CLI / Agent 支持矩阵（10 款，一键隔离启动器）
+
+| 应用 | 默认端口 | 启动命令 | 应用 | 默认端口 | 启动命令 |
+| :--- | :---: | :---: | :--- | :---: | :---: |
+| **Gemini CLI** | `:17896` | `gemini` | **Pi** | `:17901` | `pi` |
+| **Grok Build** | `:17897` | `grok` | **MiniMax Code** | `:17902` | `minimax` |
+| **OpenCode** | `:17898` | `opencode` | **Kimi Code** | `:17903` | `kimi` |
+| **OpenClaw** | `:17899` | `openclaw` | **DeepSeek Harness** | `:17904` | `deepseek` |
+| **Hermes** | `:17900` | `hermes` | **Oh My Pi** | `:17905` | `omp` |
 
 > [!TIP]
 > **接管后何时生效？**
