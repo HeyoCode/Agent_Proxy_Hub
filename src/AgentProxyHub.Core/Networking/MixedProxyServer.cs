@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -19,6 +20,8 @@ public sealed class MixedProxyServer : IDisposable
     private sealed class SeatListenerState
     {
         public required AppSeat Seat { get; set; }
+        public int BoundConfigPort { get; set; } = -1;
+        public bool BoundIpv6 { get; set; }
         public TcpListener? Listener { get; set; }
         public TcpListener? ListenerV6 { get; set; }
         public CancellationTokenSource? Cts { get; set; }
@@ -70,15 +73,15 @@ public sealed class MixedProxyServer : IDisposable
             foreach (var seat in seats)
             {
                 var st = _seats.GetOrAdd(seat.Id, _ => new SeatListenerState { Seat = seat });
-                bool portChanged = st.Seat.LocalPort != seat.LocalPort;
-                bool enableChanged = st.Seat.Enabled != seat.Enabled;
+                bool portChanged = st.BoundConfigPort != seat.LocalPort;
+                bool v6Mismatch = st.BoundIpv6 != isolation.EnableIpv6;
                 st.Seat = seat;
 
-                if (!seat.Enabled || seat.LocalPort <= 0)
+                if (!seat.Enabled || seat.LocalPort < 0)
                 {
                     StopListener(st);
                 }
-                else if (st.Listener == null || portChanged || enableChanged || ipv6Changed)
+                else if (st.Listener == null || portChanged || v6Mismatch || ipv6Changed)
                 {
                     StopListener(st);
                     StartListener(st);
@@ -200,6 +203,8 @@ public sealed class MixedProxyServer : IDisposable
 
         var cts = new CancellationTokenSource();
         st.Listener = listener;
+        st.BoundConfigPort = st.Seat.LocalPort;
+        st.BoundIpv6 = _isolation.EnableIpv6;
         st.Cts = cts;
 
         _ = Task.Run(() => AcceptLoopAsync(st, listener, cts.Token), cts.Token);
@@ -232,6 +237,7 @@ public sealed class MixedProxyServer : IDisposable
         st.Cts?.Dispose();
         st.Listener = null;
         st.ListenerV6 = null;
+        st.BoundConfigPort = -1;
         st.Cts = null;
     }
 
@@ -264,7 +270,12 @@ public sealed class MixedProxyServer : IDisposable
             {
                 using var clientStream = client.GetStream();
                 byte[] firstByte = new byte[1];
-                int n = await clientStream.ReadAsync(firstByte, ct);
+                int n;
+                using (var firstByteCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
+                {
+                    firstByteCts.CancelAfter(TimeSpan.FromSeconds(15));
+                    n = await clientStream.ReadAsync(firstByte, firstByteCts.Token);
+                }
                 if (n <= 0) return;
 
                 if (firstByte[0] == 0x05)
@@ -605,28 +616,59 @@ public sealed class MixedProxyServer : IDisposable
 
     private static async Task PumpBidirectionalAsync(SeatListenerState st, Stream client, Stream upstream, CancellationToken ct)
     {
-        var t1 = CopyWithCountAsync(client, upstream, bytes => Interlocked.Add(ref st.BytesTx, bytes), ct);
-        var t2 = CopyWithCountAsync(upstream, client, bytes => Interlocked.Add(ref st.BytesRx, bytes), ct);
-        await Task.WhenAny(t1, t2);
+        var tClientToUp = CopyWithCountAsync(client, upstream, bytes => Interlocked.Add(ref st.BytesTx, bytes), halfCloseWriteOnEof: true, ct);
+        var tUpToClient = CopyWithCountAsync(upstream, client, bytes => Interlocked.Add(ref st.BytesRx, bytes), halfCloseWriteOnEof: true, ct);
+
+        var firstDone = await Task.WhenAny(tClientToUp, tUpToClient);
+        var remaining = firstDone == tClientToUp ? tUpToClient : tClientToUp;
+
+        // 给另一方向保留短暂尾包排空窗口，避免客户端发送完请求半关闭后服务端最后一段响应被截断
+        try
+        {
+            using var drainCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            await Task.WhenAny(remaining, Task.Delay(TimeSpan.FromSeconds(3), drainCts.Token));
+            drainCts.Cancel();
+        }
+        catch { }
     }
 
-    private static async Task CopyWithCountAsync(Stream src, Stream dst, Action<long> onBytes, CancellationToken ct)
+    private static async Task CopyWithCountAsync(
+        Stream src,
+        Stream dst,
+        Action<long> onBytes,
+        bool halfCloseWriteOnEof,
+        CancellationToken ct)
     {
-        byte[] buffer = new byte[16384];
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(32768);
+        bool needExplicitFlush = dst is not NetworkStream;
         try
         {
             while (true)
             {
                 int n = await src.ReadAsync(buffer, ct);
-                if (n <= 0) break;
+                if (n <= 0)
+                {
+                    if (halfCloseWriteOnEof && dst is NetworkStream dstNet)
+                    {
+                        try { dstNet.Socket.Shutdown(SocketShutdown.Send); } catch { }
+                    }
+                    break;
+                }
                 await dst.WriteAsync(buffer.AsMemory(0, n), ct);
-                await dst.FlushAsync(ct);
+                if (needExplicitFlush)
+                {
+                    await dst.FlushAsync(ct);
+                }
                 onBytes(n);
             }
         }
         catch
         {
-            // 对端关闭
+            // 对端关闭或取消
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 

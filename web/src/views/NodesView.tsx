@@ -79,18 +79,27 @@ export const NodesView: React.FC<Props> = ({
   const [mWgAddr, setMWgAddr] = useState('10.0.0.2/32');
   const [mWgMtu, setMWgMtu] = useState('1280');
 
-  // 批量导入与机场订阅拉取
+  // 批量导入与机场订阅拉取（支持本地记忆最近一次订阅配置）
   const [importMode, setImportMode] = useState<'subscription' | 'text'>('subscription');
-  const [subUrl, setSubUrl] = useState('');
-  const [subProxy, setSubProxy] = useState('');
+  const [savedSub, setSavedSub] = useState<{ url: string; group: string; proxy: string } | null>(() => {
+    try {
+      const raw = window.localStorage.getItem('aph_saved_sub_meta');
+      return raw ? (JSON.parse(raw) as { url: string; group: string; proxy: string }) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [subUrl, setSubUrl] = useState(() => savedSub?.url ?? '');
+  const [subProxy, setSubProxy] = useState(() => savedSub?.proxy ?? '');
   const [subDetectedFormat, setSubDetectedFormat] = useState<string | null>(null);
   const [fetchingSub, setFetchingSub] = useState(false);
+  const [refreshingSavedSub, setRefreshingSavedSub] = useState(false);
   const [previewSearch, setPreviewSearch] = useState('');
   const [batchText, setBatchText] = useState(
     'socks5://user:pass@38.154.227.14:1080#US-静态住宅\ntrojan://your-pass@jp.example.com:443?sni=jp.example.com#JP-Trojan原生\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@us.example.com:8388#US-SS原生\nvless://uuid@edge.example.com:443?security=reality&sni=www.microsoft.com&pbk=pubkey&sid=01&fp=chrome#Reality-singbox\nhy2://your-pass@hk.example.com:443?sni=hk.example.com#Hy2-singbox'
   );
   const [batchProto, setBatchProto] = useState<ProxyProtocol>('SOCKS5');
-  const [batchGroup, setBatchGroup] = useState('批量导入池');
+  const [batchGroup, setBatchGroup] = useState(() => savedSub?.group || '批量导入池');
   const [preview, setPreview] = useState<BatchParseResult | null>(null);
 
   useEffect(() => {
@@ -199,10 +208,16 @@ export const NodesView: React.FC<Props> = ({
     if (!subUrl.trim() || fetchingSub) return;
     setFetchingSub(true);
     try {
-      const res = await api.fetchSubscription(subUrl.trim(), batchGroup || '订阅导入池', subProxy);
+      const targetGroup = batchGroup || '订阅导入池';
+      const res = await api.fetchSubscription(subUrl.trim(), targetGroup, subProxy);
       setBatchText(res.rawText);
       setPreview(res.preview);
       setSubDetectedFormat(res.detectedFormat);
+      const nextSaved = { url: subUrl.trim(), group: targetGroup, proxy: subProxy.trim() };
+      setSavedSub(nextSaved);
+      try {
+        window.localStorage.setItem('aph_saved_sub_meta', JSON.stringify(nextSaved));
+      } catch { }
       onToast(`订阅拉取成功（${res.detectedFormat}）：识别 ${res.preview.validCount} 条新节点，重复 ${res.preview.duplicateCount} 条`);
     } catch (err) {
       onToast(err instanceof Error ? err.message : '拉取订阅失败');
@@ -210,6 +225,34 @@ export const NodesView: React.FC<Props> = ({
       setFetchingSub(false);
     }
   }
+
+  async function handleQuickRefreshSavedSub() {
+    if (!savedSub?.url || refreshingSavedSub) return;
+    setRefreshingSavedSub(true);
+    try {
+      const fetched = await api.fetchSubscription(savedSub.url, savedSub.group || '订阅导入池', savedSub.proxy);
+      if (fetched.preview.validCount === 0) {
+        onToast(`订阅已是最新（共核对 ${fetched.preview.duplicateCount} 条已有节点，无新增）`);
+        return;
+      }
+      const imported = await api.importBatch(fetched.rawText, 'SOCKS5', savedSub.group || '订阅导入池');
+      await onReload();
+      onToast(`订阅刷新完成：新增 ${imported.addedCount} 条新节点，跳过重复 ${imported.duplicateCount} 条`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '刷新订阅失败');
+    } finally {
+      setRefreshingSavedSub(false);
+    }
+  }
+
+  const savedSubHostHint = (() => {
+    if (!savedSub?.url) return '';
+    try {
+      return new URL(savedSub.url).host;
+    } catch {
+      return '已保存订阅';
+    }
+  })();
 
   function formatCompactCred(node: ProxyNode): string {
     if (node.protocol === 'SHADOWSOCKS') return node.method ?? 'AEAD';
@@ -290,7 +333,19 @@ export const NodesView: React.FC<Props> = ({
             ]}
           />
 
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {savedSub?.url && (
+              <button
+                type="button"
+                className="btn-pill btn-soft btn-sm"
+                title={`一键拉取并增量导入来自 ${savedSubHostHint} 的最新节点`}
+                onClick={handleQuickRefreshSavedSub}
+                disabled={refreshingSavedSub}
+              >
+                <RefreshSpinIcon size={13} spinning={refreshingSavedSub} />
+                <span>{refreshingSavedSub ? '同步中' : '刷新订阅'}</span>
+              </button>
+            )}
             <button type="button" className="btn-pill btn-soft btn-sm" onClick={handleVerifyAll} disabled={testingAll}>
               <RefreshSpinIcon size={13} spinning={testingAll} />
               <span>{testingAll ? '验真中' : '全量直连验真'}</span>

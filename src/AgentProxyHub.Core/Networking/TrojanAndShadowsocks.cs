@@ -193,6 +193,7 @@ public sealed class ShadowsocksAeadStream : Stream
     private bool _readSaltReceived;
     private byte[]? _readSubkey;
     private readonly byte[] _readNonce = new byte[NonceSize];
+    private readonly SemaphoreSlim _readLock = new(1, 1);
     private byte[] _readPlainBuffer = [];
     private int _readPlainOffset;
     private int _readPlainCount;
@@ -264,52 +265,60 @@ public sealed class ShadowsocksAeadStream : Stream
     {
         if (buffer.Length == 0) return 0;
 
-        if (_readPlainCount > 0)
+        await _readLock.WaitAsync(cancellationToken);
+        try
         {
-            int take = Math.Min(buffer.Length, _readPlainCount);
-            _readPlainBuffer.AsSpan(_readPlainOffset, take).CopyTo(buffer.Span);
-            _readPlainOffset += take;
-            _readPlainCount -= take;
-            return take;
-        }
+            if (_readPlainCount > 0)
+            {
+                int take = Math.Min(buffer.Length, _readPlainCount);
+                _readPlainBuffer.AsSpan(_readPlainOffset, take).CopyTo(buffer.Span);
+                _readPlainOffset += take;
+                _readPlainCount -= take;
+                return take;
+            }
 
-        if (!_readSaltReceived)
-        {
-            byte[] salt = new byte[_saltSize];
-            if (!await TryReadExactAsync(_inner, salt, cancellationToken))
+            if (!_readSaltReceived)
+            {
+                byte[] salt = new byte[_saltSize];
+                if (!await TryReadExactAsync(_inner, salt, cancellationToken))
+                    return 0;
+                _readSubkey = HKDF.DeriveKey(HashAlgorithmName.SHA1, _masterKey, _keySize, salt, HkdfInfo);
+                _readSaltReceived = true;
+            }
+
+            byte[] encLenBlock = new byte[2 + TagSize];
+            if (!await TryReadExactAsync(_inner, encLenBlock, cancellationToken))
                 return 0;
-            _readSubkey = HKDF.DeriveKey(HashAlgorithmName.SHA1, _masterKey, _keySize, salt, HkdfInfo);
-            _readSaltReceived = true;
+
+            byte[] plainLenBytes = new byte[2];
+            DecryptBlock(_readSubkey!, _readNonce, encLenBlock.AsSpan(0, 2), encLenBlock.AsSpan(2, TagSize), plainLenBytes);
+            IncrementNonce(_readNonce);
+
+            int payloadLen = BinaryPrimitives.ReadUInt16BigEndian(plainLenBytes) & 0x3FFF;
+            if (payloadLen == 0) return 0;
+
+            byte[] encPayload = new byte[payloadLen + TagSize];
+            if (!await TryReadExactAsync(_inner, encPayload, cancellationToken))
+                return 0;
+
+            byte[] plainPayload = new byte[payloadLen];
+            DecryptBlock(_readSubkey!, _readNonce, encPayload.AsSpan(0, payloadLen), encPayload.AsSpan(payloadLen, TagSize), plainPayload);
+            IncrementNonce(_readNonce);
+
+            int copy = Math.Min(buffer.Length, payloadLen);
+            plainPayload.AsSpan(0, copy).CopyTo(buffer.Span);
+            if (copy < payloadLen)
+            {
+                _readPlainBuffer = plainPayload;
+                _readPlainOffset = copy;
+                _readPlainCount = payloadLen - copy;
+            }
+            return copy;
         }
-
-        byte[] encLenBlock = new byte[2 + TagSize];
-        if (!await TryReadExactAsync(_inner, encLenBlock, cancellationToken))
-            return 0;
-
-        byte[] plainLenBytes = new byte[2];
-        DecryptBlock(_readSubkey!, _readNonce, encLenBlock.AsSpan(0, 2), encLenBlock.AsSpan(2, TagSize), plainLenBytes);
-        IncrementNonce(_readNonce);
-
-        int payloadLen = BinaryPrimitives.ReadUInt16BigEndian(plainLenBytes) & 0x3FFF;
-        if (payloadLen == 0) return 0;
-
-        byte[] encPayload = new byte[payloadLen + TagSize];
-        if (!await TryReadExactAsync(_inner, encPayload, cancellationToken))
-            return 0;
-
-        byte[] plainPayload = new byte[payloadLen];
-        DecryptBlock(_readSubkey!, _readNonce, encPayload.AsSpan(0, payloadLen), encPayload.AsSpan(payloadLen, TagSize), plainPayload);
-        IncrementNonce(_readNonce);
-
-        int copy = Math.Min(buffer.Length, payloadLen);
-        plainPayload.AsSpan(0, copy).CopyTo(buffer.Span);
-        if (copy < payloadLen)
+        finally
         {
-            _readPlainBuffer = plainPayload;
-            _readPlainOffset = copy;
-            _readPlainCount = payloadLen - copy;
+            _readLock.Release();
         }
-        return copy;
     }
 
     public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
@@ -390,6 +399,7 @@ public sealed class ShadowsocksAeadStream : Stream
         if (disposing)
         {
             _writeLock.Dispose();
+            _readLock.Dispose();
             _inner.Dispose();
         }
         base.Dispose(disposing);

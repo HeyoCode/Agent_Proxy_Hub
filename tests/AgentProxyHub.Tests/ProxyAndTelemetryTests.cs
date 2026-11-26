@@ -1113,4 +1113,62 @@ public class ProxyAndTelemetryTests
             if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true);
         }
     }
+
+    [Fact]
+    public async Task MixedProxyServer_ShouldHotReloadPortWhenSameAppSeatReferenceMutated()
+    {
+        var nic = new PhysicalNicManager();
+        var dns = new CleanDnsResolver(nic);
+        var connector = new UpstreamConnector(nic, dns);
+        using var server = new MixedProxyServer(connector);
+
+        int p1 = GetFreeTcpPort();
+        int p2 = GetFreeTcpPort();
+        var seat = new AppSeat { Id = "claude", Name = "Claude", LocalPort = p1, BoundNodeId = "direct-phy", Enabled = true };
+        var direct = new ProxyNode { Id = "direct-phy", Protocol = ProxyProtocol.DIRECT_PHYSICAL, Host = "physical-nic", Enabled = true };
+        var iso = new IsolationSettings { EnableIpv6 = false };
+
+        server.UpdateTopology([seat], [direct], iso);
+        Assert.Equal(p1, server.GetBoundPort("claude"));
+
+        // 模拟 HubHostFactory 原位修改同一个 AppSeat 引用对象的 LocalPort
+        seat.LocalPort = p2;
+        server.UpdateTopology([seat], [direct], iso);
+        Assert.Equal(p2, server.GetBoundPort("claude"));
+
+        using var probe = new TcpClient();
+        await probe.ConnectAsync(IPAddress.Loopback, p2);
+        Assert.True(probe.Connected);
+    }
+
+    [Fact]
+    public void SingBoxSidecarManager_BuildBridgeConfigShouldPreserveExistingPortsOnUnion()
+    {
+        var n1 = new ProxyNode { Id = "n_active", Protocol = ProxyProtocol.VLESS, Host = "a.example.com", Port = 443, Username = "u1" };
+        var n2 = new ProxyNode { Id = "n_verify", Protocol = ProxyProtocol.HYSTERIA2, Host = "b.example.com", Port = 443, Password = "p2" };
+        var iso = new IsolationSettings();
+
+        var (_, map1) = SingBoxSidecarManager.BuildBridgeConfigJson([n1], "Ethernet", iso, basePort: 18500);
+        int originalPort = map1["n_active"];
+
+        // 当新临时验真节点排在前面并入时，已有活跃节点端口必须保持原值不发生漂移
+        var (_, map2) = SingBoxSidecarManager.BuildBridgeConfigJson([n2, n1], "Ethernet", iso, basePort: 18500, previousPorts: map1);
+        Assert.Equal(originalPort, map2["n_active"]);
+        Assert.NotEqual(originalPort, map2["n_verify"]);
+    }
+
+    [Fact]
+    public void LoopbackSecurityGuard_ShouldBlockDnsRebindingAndCrossOriginWrites()
+    {
+        Assert.True(LoopbackSecurityGuard.IsAllowedRequest("127.0.0.1:17880", "POST", "http://127.0.0.1:17880", isApiRoute: true));
+        Assert.True(LoopbackSecurityGuard.IsAllowedRequest("localhost:17880", "PUT", "http://localhost:5173", isApiRoute: true));
+        Assert.True(LoopbackSecurityGuard.IsAllowedRequest("[::1]:17880", "POST", null, isApiRoute: true));
+
+        // 拦截 DNS Rebinding 恶意域名 Host
+        Assert.False(LoopbackSecurityGuard.IsAllowedRequest("evil-rebind.attacker.com:17880", "GET", null, isApiRoute: true));
+        // 拦截外部网页跨站 POST (CSRF)
+        Assert.False(LoopbackSecurityGuard.IsAllowedRequest("127.0.0.1:17880", "POST", "https://malicious.site", isApiRoute: true));
+        // 拦截沙箱 iframe Origin: null 写请求
+        Assert.False(LoopbackSecurityGuard.IsAllowedRequest("127.0.0.1:17880", "DELETE", "null", isApiRoute: true));
+    }
 }

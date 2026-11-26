@@ -153,7 +153,7 @@ public sealed class UpstreamConnector
         if (!bridgePort.HasValue)
         {
             string? boundNic = _nicManager.GetLockedAdapter()?.Name;
-            if (!_sidecar.EnsureNodesReady([node], boundNic, settings, out string? err))
+            if (!_sidecar.EnsureEphemeralNodesReady([node], boundNic, settings, out string? err))
                 throw new InvalidOperationException(err ?? "请先在「网卡隔离」页一键安装 sing-box 扩展内核");
             bridgePort = _sidecar.GetBridgePort(node.Id)
                 ?? throw new InvalidOperationException("sing-box 本地桥接端口尚未就绪");

@@ -26,6 +26,9 @@ public sealed class SingBoxSidecarManager : IDisposable
     private readonly string _configPath;
     private readonly object _syncLock = new();
     private readonly Dictionary<string, int> _nodeBridgePorts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ProxyNode> _topologyNodes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (ProxyNode Node, DateTimeOffset ExpiresAt)> _ephemeralNodes = new(StringComparer.Ordinal);
+    private readonly Queue<string> _recentLogs = new();
 
     private string? _customBinaryPath;
     private Process? _process;
@@ -33,6 +36,7 @@ public sealed class SingBoxSidecarManager : IDisposable
     private string? _lastConfigHash;
     private string? _cachedVersion;
     private string? _boundInterfaceName;
+    private IsolationSettings _lastIsolation = new();
     private string? _lastError;
     private bool _disposed;
 
@@ -118,7 +122,7 @@ public sealed class SingBoxSidecarManager : IDisposable
     }
 
     /// <summary>
-    /// 按需同步活跃 L2 节点：无 L2 节点时自动停机零占用；有 L2 节点时生成配置并静默启动或热重载
+    /// 同步常驻拓扑所需的活跃 L2 节点（与未过期的临时验真节点取并集，不中断在用验真或席位连接）
     /// </summary>
     public bool EnsureNodesReady(
         IReadOnlyList<ProxyNode> l2Nodes,
@@ -126,93 +130,189 @@ public sealed class SingBoxSidecarManager : IDisposable
         IsolationSettings iso,
         out string? error)
     {
-        error = null;
         lock (_syncLock)
         {
-            if (_disposed)
+            _topologyNodes.Clear();
+            foreach (var n in l2Nodes.Where(x => x.RequiresSidecarEngine && x.Enabled))
             {
-                error = "sing-box 管理器已释放";
-                return false;
+                _topologyNodes[n.Id] = n;
             }
+            _boundInterfaceName = boundInterfaceName;
+            _lastIsolation = iso;
+            return ReconcileLocked(out error);
+        }
+    }
 
-            var distinctNodes = l2Nodes
-                .Where(n => n.RequiresSidecarEngine && n.Enabled)
-                .GroupBy(n => n.Id)
-                .Select(g => g.First())
-                .ToList();
+    /// <summary>
+    /// 为单节点或全量节点验真临时扩容 L2 桥接端口（与当前活跃席位 L2 节点取并集，绝不冲掉在用席位）
+    /// </summary>
+    public bool EnsureEphemeralNodesReady(
+        IReadOnlyList<ProxyNode> verifyL2Nodes,
+        string? boundInterfaceName,
+        IsolationSettings iso,
+        out string? error,
+        TimeSpan? ttl = null)
+    {
+        lock (_syncLock)
+        {
+            DateTimeOffset exp = DateTimeOffset.UtcNow.Add(ttl ?? TimeSpan.FromSeconds(90));
+            foreach (var n in verifyL2Nodes.Where(x => x.RequiresSidecarEngine))
+            {
+                _ephemeralNodes[n.Id] = (n, exp);
+            }
+            _boundInterfaceName = boundInterfaceName;
+            _lastIsolation = iso;
+            return ReconcileLocked(out error);
+        }
+    }
 
-            if (distinctNodes.Count == 0)
+    /// <summary>
+    /// 验真结束后释放临时节点引用；若无常驻活跃 L2 席位则自动停机归零占用
+    /// </summary>
+    public void ReleaseEphemeralNodes(IEnumerable<string>? nodeIds = null)
+    {
+        lock (_syncLock)
+        {
+            if (nodeIds == null)
+            {
+                _ephemeralNodes.Clear();
+            }
+            else
+            {
+                foreach (string id in nodeIds) _ephemeralNodes.Remove(id);
+            }
+            if (_topologyNodes.Count == 0 && _ephemeralNodes.Count == 0)
             {
                 StopProcessLocked();
                 _nodeBridgePorts.Clear();
                 _lastConfigHash = null;
-                _boundInterfaceName = boundInterfaceName;
-                _lastError = null;
-                return true;
             }
+        }
+    }
 
-            string? bin = ResolveBinaryPath();
-            if (string.IsNullOrWhiteSpace(bin))
-            {
-                _lastError = "未安装 sing-box 扩展内核，请在「网卡隔离」页点击一键安装后启用 VLESS / Hysteria2 / TUIC / WireGuard 节点。";
-                error = _lastError;
-                return false;
-            }
+    private bool ReconcileLocked(out string? error)
+    {
+        error = null;
+        if (_disposed)
+        {
+            error = "sing-box 管理器已释放";
+            return false;
+        }
 
-            (string configJson, Dictionary<string, int> portMap) = BuildBridgeConfigJson(distinctNodes, boundInterfaceName, iso, BridgePortBase);
-            string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(configJson)));
+        // 清理已过期的临时验真节点
+        var now = DateTimeOffset.UtcNow;
+        foreach (string expiredKey in _ephemeralNodes.Where(kv => kv.Value.ExpiresAt <= now).Select(kv => kv.Key).ToList())
+        {
+            _ephemeralNodes.Remove(expiredKey);
+        }
 
-            if (_process != null && !_process.HasExited && hash == _lastConfigHash)
-            {
-                return true;
-            }
+        // 合并常驻拓扑节点 ∪ 临时验真节点（按稳定顺序排列并尽量复用已有端口）
+        var merged = new Dictionary<string, ProxyNode>(StringComparer.Ordinal);
+        foreach (var kv in _topologyNodes) merged[kv.Key] = kv.Value;
+        foreach (var kv in _ephemeralNodes) merged.TryAdd(kv.Key, kv.Value.Node);
 
-            Directory.CreateDirectory(_runtimeDir);
-            File.WriteAllText(_configPath, configJson, new UTF8Encoding(false));
-
+        if (merged.Count == 0)
+        {
             StopProcessLocked();
             _nodeBridgePorts.Clear();
-            foreach (var kv in portMap) _nodeBridgePorts[kv.Key] = kv.Value;
-            _boundInterfaceName = boundInterfaceName;
+            _lastConfigHash = null;
+            _lastError = null;
+            return true;
+        }
 
-            try
+        string? bin = ResolveBinaryPath();
+        if (string.IsNullOrWhiteSpace(bin))
+        {
+            _lastError = "未安装 sing-box 扩展内核，请在「网卡隔离」页点击一键安装后启用 VLESS / Hysteria2 / TUIC / WireGuard 节点。";
+            error = _lastError;
+            return false;
+        }
+
+        var distinctNodes = merged.Values.OrderBy(n => n.Id, StringComparer.Ordinal).ToList();
+        (string configJson, Dictionary<string, int> portMap) = BuildBridgeConfigJson(
+            distinctNodes,
+            _boundInterfaceName,
+            _lastIsolation,
+            BridgePortBase,
+            _nodeBridgePorts);
+        string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(configJson)));
+
+        if (_process != null && !_process.HasExited && hash == _lastConfigHash)
+        {
+            return true;
+        }
+
+        Directory.CreateDirectory(_runtimeDir);
+        File.WriteAllText(_configPath, configJson, new UTF8Encoding(false));
+
+        StopProcessLocked();
+        _nodeBridgePorts.Clear();
+        foreach (var kv in portMap) _nodeBridgePorts[kv.Key] = kv.Value;
+        _recentLogs.Clear();
+
+        try
+        {
+            var psi = new ProcessStartInfo(bin)
             {
-                var psi = new ProcessStartInfo(bin)
-                {
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardError = true,
-                    RedirectStandardOutput = true,
-                    WorkingDirectory = _runtimeDir
-                };
-                psi.ArgumentList.Add("run");
-                psi.ArgumentList.Add("-c");
-                psi.ArgumentList.Add(_configPath);
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                WorkingDirectory = _runtimeDir
+            };
+            psi.ArgumentList.Add("run");
+            psi.ArgumentList.Add("-c");
+            psi.ArgumentList.Add(_configPath);
 
-                var proc = Process.Start(psi) ?? throw new InvalidOperationException("无法启动 sing-box 子进程");
-                AttachToKillOnCloseJob(proc);
+            var proc = new Process { StartInfo = psi };
+            proc.OutputDataReceived += (_, e) => AppendSidecarLog(e.Data);
+            proc.ErrorDataReceived += (_, e) => AppendSidecarLog(e.Data);
 
-                // 短暂确认子进程未立即配置报错退出
-                if (proc.WaitForExit(350))
-                {
-                    string stderr = proc.StandardError.ReadToEnd();
-                    proc.Dispose();
-                    _lastError = $"sing-box 启动失败：{stderr.Trim()}";
-                    error = _lastError;
-                    return false;
-                }
+            if (!proc.Start())
+                throw new InvalidOperationException("无法启动 sing-box 子进程");
 
-                _process = proc;
-                _lastConfigHash = hash;
-                _lastError = null;
-                return true;
-            }
-            catch (Exception ex)
+            // 立即开启异步排空读取，彻底杜绝长跑日志填满系统管道缓冲区引发的子进程死锁
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
+            AttachToKillOnCloseJob(proc);
+
+            if (proc.WaitForExit(350))
             {
-                _lastError = $"启动 sing-box 异常：{ex.Message}";
+                string errText = GetRecentLogsText();
+                proc.Dispose();
+                _lastError = $"sing-box 启动失败：{(string.IsNullOrWhiteSpace(errText) ? "配置或端口异常" : errText)}";
                 error = _lastError;
                 return false;
             }
+
+            _process = proc;
+            _lastConfigHash = hash;
+            _lastError = null;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _lastError = $"启动 sing-box 异常：{ex.Message}";
+            error = _lastError;
+            return false;
+        }
+    }
+
+    private void AppendSidecarLog(string? line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return;
+        lock (_recentLogs)
+        {
+            if (_recentLogs.Count >= 24) _recentLogs.Dequeue();
+            _recentLogs.Enqueue(line.Trim());
+        }
+    }
+
+    private string GetRecentLogsText()
+    {
+        lock (_recentLogs)
+        {
+            return string.Join(" | ", _recentLogs);
         }
     }
 
@@ -221,6 +321,8 @@ public sealed class SingBoxSidecarManager : IDisposable
         lock (_syncLock)
         {
             StopProcessLocked();
+            _topologyNodes.Clear();
+            _ephemeralNodes.Clear();
             _nodeBridgePorts.Clear();
             _lastConfigHash = null;
         }
@@ -346,20 +448,37 @@ public sealed class SingBoxSidecarManager : IDisposable
         IReadOnlyList<ProxyNode> l2Nodes,
         string? boundInterfaceName,
         IsolationSettings iso,
-        int basePort = BridgePortBase)
+        int basePort = BridgePortBase,
+        IReadOnlyDictionary<string, int>? previousPorts = null)
     {
         var portMap = new Dictionary<string, int>(StringComparer.Ordinal);
+        var usedPorts = new HashSet<int>();
         var inbounds = new JsonArray();
         var outbounds = new JsonArray();
         var rules = new JsonArray();
 
+        // 先保留已分配节点的原端口，确保扩容新验真节点时已有活跃节点端口不漂移
+        foreach (var node in l2Nodes)
+        {
+            if (previousPorts != null && previousPorts.TryGetValue(node.Id, out int existingPort) && usedPorts.Add(existingPort))
+            {
+                portMap[node.Id] = existingPort;
+            }
+        }
+
+        int nextCandidate = basePort;
         for (int i = 0; i < l2Nodes.Count; i++)
         {
             var node = l2Nodes[i];
-            int port = basePort + i;
+            if (!portMap.TryGetValue(node.Id, out int port))
+            {
+                while (usedPorts.Contains(nextCandidate)) nextCandidate++;
+                port = nextCandidate++;
+                usedPorts.Add(port);
+                portMap[node.Id] = port;
+            }
             string inTag = $"in-{node.Id}";
             string outTag = $"out-{node.Id}";
-            portMap[node.Id] = port;
 
             inbounds.Add(new JsonObject
             {

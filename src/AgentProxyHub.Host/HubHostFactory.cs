@@ -125,6 +125,21 @@ public static class HubHostFactory
         var app = builder.Build();
         var stateLock = new object();
 
+        // 本地环回安全守卫：拦截 DNS Rebinding 非法 Host 头与外部网页跨站写请求 (CSRF)
+        app.Use(async (ctx, next) =>
+        {
+            string? hostHdr = ctx.Request.Headers.Host.FirstOrDefault();
+            string? originHdr = ctx.Request.Headers.Origin.FirstOrDefault();
+            string path = ctx.Request.Path.Value ?? "/";
+            if (!LoopbackSecurityGuard.IsAllowedRequest(hostHdr, ctx.Request.Method, originHdr, path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)))
+            {
+                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
+                await ctx.Response.WriteAsJsonAsync(new { message = "Forbidden: loopback origin/host validation failed" });
+                return;
+            }
+            await next();
+        });
+
         // 后台每 5 秒自动增量同步一次本地 AI 会话日志，新产生对话 5 秒内自动呈现在大盘中
         var stoppingToken = app.Lifetime.ApplicationStopping;
         stoppingToken.Register(() =>
@@ -397,9 +412,12 @@ public static class HubHostFactory
             {
                 int removed = doc.Nodes.RemoveAll(n => n.Id == id);
                 if (removed == 0) return Results.NotFound();
-                foreach (var seat in doc.Seats.Where(s => s.BoundNodeId == id))
+                foreach (var seat in doc.Seats)
                 {
-                    seat.BoundNodeId = doc.Nodes.FirstOrDefault()?.Id;
+                    if (seat.BoundNodeId == id)
+                        seat.BoundNodeId = doc.Nodes.FirstOrDefault()?.Id;
+                    if (seat.RelayNodeId == id)
+                        seat.RelayNodeId = null;
                 }
                 store.Save(doc);
                 if (!isVerifyOnly)
@@ -440,12 +458,45 @@ public static class HubHostFactory
         {
             List<ProxyNode> targets;
             IsolationSettings iso;
+            string? lockedNicName;
             lock (stateLock)
             {
                 targets = doc.Nodes.Where(n => n.Protocol != ProxyProtocol.DIRECT_PHYSICAL).ToList();
                 iso = doc.Isolation;
+                lockedNicName = nicManager.GetLockedAdapter()?.Name;
             }
-            await Task.WhenAll(targets.Select(n => healthChecker.VerifyNodeAsync(n, iso, ct)));
+
+            // 批量验真前一次性预热全部待测 L2 节点至 sing-box 并集桥，避免并发连环重启
+            var l2Targets = targets.Where(n => n.RequiresSidecarEngine).ToList();
+            if (l2Targets.Count > 0 && sidecar.GetStatus().Installed)
+            {
+                _ = sidecar.EnsureEphemeralNodesReady(l2Targets, lockedNicName, iso, out _);
+            }
+
+            try
+            {
+                using var gate = new SemaphoreSlim(8, 8);
+                await Task.WhenAll(targets.Select(async n =>
+                {
+                    await gate.WaitAsync(ct);
+                    try
+                    {
+                        await healthChecker.VerifyNodeAsync(n, iso, ct);
+                    }
+                    finally
+                    {
+                        gate.Release();
+                    }
+                }));
+            }
+            finally
+            {
+                if (l2Targets.Count > 0)
+                {
+                    sidecar.ReleaseEphemeralNodes(l2Targets.Select(n => n.Id));
+                }
+            }
+
             lock (stateLock) store.Save(doc);
             return Results.Ok(doc.Nodes);
         });

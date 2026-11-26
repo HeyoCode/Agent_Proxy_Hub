@@ -13,9 +13,24 @@ export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
   const [cliTab, setCliTab] = useState<'ps' | 'zsh' | 'claude' | 'agy'>(data.os === 'mac' ? 'zsh' : 'ps');
   const [copied, setCopied] = useState(false);
   const [busySeat, setBusySeat] = useState<string | null>(null);
+  const [focusedSeatId, setFocusedSeatId] = useState<string>(data.seats[0]?.id ?? 'claude');
   const [appSearch, setAppSearch] = useState('');
   const [appFilter, setAppFilter] = useState<'all' | 'active'>('all');
-  const codeText = data.cliSnippets[cliTab] ?? '';
+
+  const focusedSeat = data.seats.find(s => s.id === focusedSeatId) ?? data.seats[0];
+  const focusedCmdWin = focusedSeat?.launchCommandWin || focusedSeat?.id || 'claude';
+  const focusedCmdMac = focusedSeat?.launchCommandMac || focusedSeat?.id || 'claude';
+  const focusedPort = focusedSeat?.localPort ?? 17891;
+
+  const codeText = (() => {
+    if (cliTab === 'ps' && focusedSeat) {
+      return `# Windows PowerShell · ${focusedSeat.name} 独立专线注入（不改系统代理，绕过 Clash）\n$env:HTTPS_PROXY="http://127.0.0.1:${focusedPort}"\n$env:HTTP_PROXY="http://127.0.0.1:${focusedPort}"\n$env:ALL_PROXY="socks5h://127.0.0.1:${focusedPort}"\n$env:NO_PROXY="localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8"\n${focusedCmdWin}`;
+    }
+    if (cliTab === 'zsh' && focusedSeat) {
+      return `# macOS / Linux Zsh · ${focusedSeat.name} 独立专线注入（不改系统代理，绕过 Surge/Clash）\nexport HTTPS_PROXY="http://127.0.0.1:${focusedPort}"\nexport HTTP_PROXY="http://127.0.0.1:${focusedPort}"\nexport ALL_PROXY="socks5h://127.0.0.1:${focusedPort}"\nexport NO_PROXY="localhost,127.0.0.1,::1"\n${focusedCmdMac}`;
+    }
+    return data.cliSnippets[cliTab] ?? '';
+  })();
 
   const filteredSeats = data.seats.filter(seat => {
     const tk = data.seatTakeovers?.find(t => t.seatId === seat.id);
@@ -103,17 +118,22 @@ export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
             const takeover = data.seatTakeovers?.find(t => t.seatId === seat.id);
             const snap = data.trafficSnapshots.find(t => t.seatId === seat.id);
             const isBusy = busySeat === seat.id;
+            const isFocused = focusedSeat?.id === seat.id;
 
             return (
               <div
                 key={seat.id}
+                onClick={() => setFocusedSeatId(seat.id)}
                 style={{
                   background: 'var(--bg-subtle)',
                   borderRadius: 12,
                   padding: '12px 14px',
+                  border: isFocused ? '1px solid var(--accent-indigo)' : '1px solid transparent',
+                  cursor: 'pointer',
                   display: 'flex',
                   flexDirection: 'column',
-                  gap: 7
+                  gap: 7,
+                  transition: 'border-color 0.16s ease'
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
@@ -200,10 +220,12 @@ export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
       <div className="surface-card surface-card-pad">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
           <span className="card-title-sm">CLI / IDE 隔离配置命令参考</span>
-          <span className="pill-tag tag-indigo">防串线</span>
+          <span className="pill-tag tag-indigo mono">
+            {focusedSeat ? `${focusedSeat.name} · :${focusedSeat.localPort}` : '防串线'}
+          </span>
         </div>
         <div className="card-subtitle-sm" style={{ marginBottom: 12 }}>
-          如需在任意终端临时覆盖 Clash 系统变量，可一键复制下方环境变量
+          点击左侧任意应用即可切换专属命令；在任意终端粘贴即可临时覆盖 Clash 系统变量
         </div>
 
         <div style={{ marginBottom: 12 }}>

@@ -1,6 +1,8 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Text;
 
@@ -37,43 +39,104 @@ public sealed class CleanDnsResolver
         if (_cache.TryGetValue(cacheKey, out var cached) && cached.ExpiresAt > DateTimeOffset.UtcNow)
             return cached.Ip;
 
-        try
+        if (IPAddress.TryParse(dnsServerIp, out var dnsIp) &&
+            (dnsIp.AddressFamily == AddressFamily.InterNetwork || enableIpv6))
         {
-            if (IPAddress.TryParse(dnsServerIp, out var dnsIp) &&
-                (dnsIp.AddressFamily == AddressFamily.InterNetwork || enableIpv6))
+            // 1. 优先尝试物理网卡直连 UDP 53 查询（极低延迟）
+            try
             {
                 var resolved = await QueryDnsRecordDirectAsync(cleanHost, dnsIp, 1, ct)
                                ?? (enableIpv6 ? await QueryDnsRecordDirectAsync(cleanHost, dnsIp, 28, ct) : null);
-                if (resolved != null)
+                if (resolved != null && !IsFakeIpAddress(resolved))
                 {
                     _cache[cacheKey] = (resolved, DateTimeOffset.UtcNow.AddMinutes(5));
                     return resolved;
                 }
             }
-        }
-        catch
-        {
-            // 若企业内网屏蔽外网 UDP 53，则降级系统解析兜底
+            catch
+            {
+                // 企业内网屏蔽外网 UDP 53 时自动进入下方物理直连 HTTPS DoH
+            }
+
+            // 2. 物理网卡直连 HTTPS DoH (RFC 8484 TCP 443) 兜底，绕过 UDP 53 拦截与 Clash Fake-IP 污染
+            try
+            {
+                var dohResolved = await QueryDnsOverHttpsDirectAsync(cleanHost, dnsIp, 1, ct)
+                                  ?? (enableIpv6 ? await QueryDnsOverHttpsDirectAsync(cleanHost, dnsIp, 28, ct) : null);
+                if (dohResolved != null && !IsFakeIpAddress(dohResolved))
+                {
+                    _cache[cacheKey] = (dohResolved, DateTimeOffset.UtcNow.AddMinutes(5));
+                    return dohResolved;
+                }
+            }
+            catch
+            {
+                // DoH 不可达时继续尝试系统解析并过滤 Fake-IP
+            }
         }
 
         IPAddress? fallback;
         if (!enableIpv6)
         {
             var v4List = await Dns.GetHostAddressesAsync(cleanHost, AddressFamily.InterNetwork, ct);
-            fallback = v4List.FirstOrDefault();
+            fallback = v4List.FirstOrDefault(a => !IsFakeIpAddress(a));
         }
         else
         {
             var all = await Dns.GetHostAddressesAsync(cleanHost, ct);
-            fallback = all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
-                       ?? all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6);
+            fallback = all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork && !IsFakeIpAddress(a))
+                       ?? all.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6 && !IsFakeIpAddress(a));
         }
 
         if (fallback == null)
-            throw new InvalidOperationException($"无法解析主机地址: {cleanHost}");
+            throw new InvalidOperationException($"无法解析干净主机地址（或结果被 Fake-IP 污染）: {cleanHost}");
 
         _cache[cacheKey] = (fallback, DateTimeOffset.UtcNow.AddMinutes(2));
         return fallback;
+    }
+
+    private static bool IsFakeIpAddress(IPAddress ip) =>
+        ip.AddressFamily == AddressFamily.InterNetwork && TlsSniInspector.IsFakeIp(ip.ToString());
+
+    private async Task<IPAddress?> QueryDnsOverHttpsDirectAsync(string domain, IPAddress dohIp, ushort qType, CancellationToken ct)
+    {
+        byte[] wireQuery = BuildDnsQuery(domain, qType, out ushort txId);
+        using var handler = new SocketsHttpHandler
+        {
+            UseProxy = false,
+            ConnectTimeout = TimeSpan.FromSeconds(3),
+            PooledConnectionLifetime = TimeSpan.Zero,
+            ConnectCallback = async (ctx, token) =>
+            {
+                var sock = _nicManager.CreateBoundTcpSocket(dohIp.AddressFamily, dohIp);
+                try
+                {
+                    await sock.ConnectAsync(new IPEndPoint(dohIp, 443), token);
+                    return new NetworkStream(sock, ownsSocket: true);
+                }
+                catch
+                {
+                    sock.Dispose();
+                    throw;
+                }
+            }
+        };
+
+        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(4) };
+        string uri = dohIp.AddressFamily == AddressFamily.InterNetworkV6
+            ? $"https://[{dohIp}]/dns-query"
+            : $"https://{dohIp}/dns-query";
+        using var req = new HttpRequestMessage(HttpMethod.Post, uri)
+        {
+            Content = new ByteArrayContent(wireQuery)
+        };
+        req.Content.Headers.ContentType = new MediaTypeHeaderValue("application/dns-message");
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/dns-message"));
+
+        using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseContentRead, ct);
+        if (!resp.IsSuccessStatusCode) return null;
+        byte[] wireResp = await resp.Content.ReadAsByteArrayAsync(ct);
+        return ParseDnsResponse(wireResp, txId, qType);
     }
 
     private async Task<IPAddress?> QueryDnsRecordDirectAsync(string domain, IPAddress dnsIp, ushort qType, CancellationToken ct)
@@ -165,4 +228,57 @@ public sealed class CleanDnsResolver
         }
         return pos;
     }
+}
+
+/// <summary>
+/// 本地管理 API 环回安全守卫：拦截 DNS Rebinding 非法 Host 头与外部网页跨站写操作 (CSRF)
+/// </summary>
+public static class LoopbackSecurityGuard
+{
+    public static bool IsAllowedRequest(string? hostHeader, string method, string? originHeader, bool isApiRoute)
+    {
+        if (!string.IsNullOrWhiteSpace(hostHeader))
+        {
+            string hostOnly = ExtractHostWithoutPort(hostHeader.Trim());
+            if (!IsLoopbackHost(hostOnly))
+                return false;
+        }
+
+        string m = (method ?? "GET").Trim().ToUpperInvariant();
+        bool isWriteMethod = m is not ("GET" or "HEAD" or "OPTIONS");
+        if (isApiRoute && isWriteMethod && !string.IsNullOrWhiteSpace(originHeader))
+        {
+            string trimmedOrigin = originHeader.Trim();
+            if (trimmedOrigin.Equals("null", StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (Uri.TryCreate(trimmedOrigin, UriKind.Absolute, out var originUri))
+            {
+                if (!IsLoopbackHost(originUri.Host))
+                    return false;
+            }
+            else
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string ExtractHostWithoutPort(string rawHost)
+    {
+        if (rawHost.StartsWith('['))
+        {
+            int end = rawHost.IndexOf(']');
+            return end > 1 ? rawHost[1..end] : rawHost;
+        }
+        int colon = rawHost.IndexOf(':');
+        return colon > 0 ? rawHost[..colon] : rawHost;
+    }
+
+    private static bool IsLoopbackHost(string host) =>
+        host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("::1", StringComparison.OrdinalIgnoreCase) ||
+        host.Equals("[::1]", StringComparison.OrdinalIgnoreCase);
 }
