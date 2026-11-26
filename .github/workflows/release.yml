@@ -74,13 +74,38 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      - name: Generate Release Notes from Tag & Commits
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PREV_TAG="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          TAG_MSG="$(git tag -l --format='%(contents)' "${TAG}")"
+          {
+            if [ -n "${TAG_MSG}" ]; then
+              echo "${TAG_MSG}"
+              echo ""
+            fi
+            echo "## 📝 本次更新提交记录"
+            if [ -n "${PREV_TAG}" ]; then
+              git log "${PREV_TAG}..${TAG}" --no-merges --pretty=format:"- %s (\`%h\`)"
+              echo ""
+              echo ""
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
+            else
+              git log -n 10 --no-merges --pretty=format:"- %s (\`%h\`)"
+              echo ""
+            fi
+          } > release_notes.md
       - name: Publish GitHub Release Assets
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release_notes.md
           files: |
             artifacts/windows-installer/*
             artifacts/macos-dmg/*
-          generate_release_notes: true
