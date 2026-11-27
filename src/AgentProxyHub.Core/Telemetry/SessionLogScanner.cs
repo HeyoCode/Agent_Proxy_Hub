@@ -15,6 +15,7 @@ public sealed class SessionLogScanner
     private sealed record CachedFileResult(DateTime LastWriteUtc, long Length, List<UsageLogEntry> Entries);
 
     private readonly string _antigravityBrainDir;
+    private readonly string _antigravityCliBrainDir;
     private readonly string _claudeProjectsDir;
     private readonly string _codexSessionsDir;
     private readonly ConcurrentDictionary<string, CachedFileResult> _fileCache = new(StringComparer.OrdinalIgnoreCase);
@@ -28,6 +29,7 @@ public sealed class SessionLogScanner
             : userHomeOverride;
 
         _antigravityBrainDir = Path.Combine(home, ".gemini", "antigravity", "brain");
+        _antigravityCliBrainDir = Path.Combine(home, ".gemini", "antigravity-cli", "brain");
         _claudeProjectsDir = Path.Combine(home, ".claude", "projects");
         _codexSessionsDir = Path.Combine(home, ".codex", "sessions");
     }
@@ -39,7 +41,7 @@ public sealed class SessionLogScanner
     }
 
     /// <summary>
-    /// 高频增量扫描（支持 5 秒自动轮询）：文件未变化时零排序直接命中缓存，避免周期性 GC 抖动
+    /// 高频增量扫描（支持 5 秒自动轮询）：同时合并 ~/.gemini/antigravity 与 antigravity-cli 会话日志并按 ID 去重
     /// </summary>
     public (List<UsageLogEntry> Entries, SyncStatsResult SyncInfo, bool HasChanges) ScanIncrementalWithChangeFlag()
     {
@@ -52,6 +54,14 @@ public sealed class SessionLogScanner
             foreach (string file in SafeEnumerateFiles(_antigravityBrainDir, "transcript.jsonl"))
             {
                 if (seenFiles.Add(file)) fileCandidates.Add((file, ParseAntigravityTranscript));
+            }
+        }
+
+        if (Directory.Exists(_antigravityCliBrainDir))
+        {
+            foreach (string file in SafeEnumerateFiles(_antigravityCliBrainDir, "transcript.jsonl"))
+            {
+                if (seenFiles.Add(file)) fileCandidates.Add((file, ParseAntigravityCliTranscript));
             }
         }
 
@@ -74,10 +84,16 @@ public sealed class SessionLogScanner
         int scannedFiles = fileCandidates.Count;
         int reparsedCount = 0;
         var allEntries = new List<UsageLogEntry>();
+        var seenEntryIds = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var (file, parser) in fileCandidates)
         {
-            allEntries.AddRange(ParseWithCache(file, parser, ref reparsedCount));
+            foreach (var item in ParseWithCache(file, parser, ref reparsedCount))
+            {
+                // Desktop 与 antigravity-cli 可能镜像同一对话 ID，严格去重避免双计
+                if (seenEntryIds.Add(item.Id))
+                    allEntries.Add(item);
+            }
         }
 
         // 清理已从磁盘移除文件的旧缓存项
@@ -153,6 +169,14 @@ public sealed class SessionLogScanner
         {
             return [];
         }
+    }
+
+    public static List<UsageLogEntry> ParseAntigravityCliTranscript(string filePath)
+    {
+        var list = ParseAntigravityTranscript(filePath);
+        foreach (var e in list)
+            e.Source = "AGY CLI 日志";
+        return list;
     }
 
     /// <summary>

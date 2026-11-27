@@ -9,6 +9,8 @@ public sealed class ModelPricingCatalog
 {
     private static readonly List<ModelPricingRule> BuiltInRules =
     [
+        new() { Pattern = "claude-opus-4-5", DisplayName = "Claude Opus 4.5", InputPerMillion = 15.0, OutputPerMillion = 75.0, CacheReadPerMillion = 1.50, CacheWritePerMillion = 18.75 },
+        new() { Pattern = "claude-sonnet-4-5", DisplayName = "Claude Sonnet 4.5", InputPerMillion = 3.0, OutputPerMillion = 15.0, CacheReadPerMillion = 0.30, CacheWritePerMillion = 3.75 },
         new() { Pattern = "claude-opus-4", DisplayName = "Claude Opus 4.x", InputPerMillion = 15.0, OutputPerMillion = 75.0, CacheReadPerMillion = 1.50, CacheWritePerMillion = 18.75 },
         new() { Pattern = "claude-sonnet-4", DisplayName = "Claude Sonnet 4.x", InputPerMillion = 3.0, OutputPerMillion = 15.0, CacheReadPerMillion = 0.30, CacheWritePerMillion = 3.75 },
         new() { Pattern = "claude-3-7-sonnet", DisplayName = "Claude 3.7 Sonnet", InputPerMillion = 3.0, OutputPerMillion = 15.0, CacheReadPerMillion = 0.30, CacheWritePerMillion = 3.75 },
@@ -22,6 +24,10 @@ public sealed class ModelPricingCatalog
         new() { Pattern = "o3-mini", DisplayName = "OpenAI o3-mini", InputPerMillion = 1.10, OutputPerMillion = 4.40, CacheReadPerMillion = 0.55, CacheWritePerMillion = 0.0 },
         new() { Pattern = "o3", DisplayName = "OpenAI o3", InputPerMillion = 2.00, OutputPerMillion = 8.00, CacheReadPerMillion = 0.50, CacheWritePerMillion = 0.0 },
         new() { Pattern = "o4-mini", DisplayName = "OpenAI o4-mini", InputPerMillion = 1.10, OutputPerMillion = 4.40, CacheReadPerMillion = 0.275, CacheWritePerMillion = 0.0 },
+        new() { Pattern = "gemini-4-carbon", DisplayName = "Gemini 4 Carbon", InputPerMillion = 1.25, OutputPerMillion = 10.00, CacheReadPerMillion = 0.31, CacheWritePerMillion = 0.0 },
+        new() { Pattern = "gemini-4-neon", DisplayName = "Gemini 4 Neon", InputPerMillion = 1.25, OutputPerMillion = 10.00, CacheReadPerMillion = 0.31, CacheWritePerMillion = 0.0 },
+        new() { Pattern = "gemini-4", DisplayName = "Gemini 4.x", InputPerMillion = 0.50, OutputPerMillion = 3.00, CacheReadPerMillion = 0.125, CacheWritePerMillion = 0.0 },
+        new() { Pattern = "gemini-3-5", DisplayName = "Gemini 3.5", InputPerMillion = 1.25, OutputPerMillion = 10.00, CacheReadPerMillion = 0.31, CacheWritePerMillion = 0.0 },
         new() { Pattern = "gemini-2.5-pro", DisplayName = "Gemini 2.5 Pro", InputPerMillion = 1.25, OutputPerMillion = 10.00, CacheReadPerMillion = 0.31, CacheWritePerMillion = 0.0 },
         new() { Pattern = "gemini-2.5-flash", DisplayName = "Gemini 2.5 Flash", InputPerMillion = 0.15, OutputPerMillion = 0.60, CacheReadPerMillion = 0.0375, CacheWritePerMillion = 0.0 },
         new() { Pattern = "deepseek-reasoner", DisplayName = "DeepSeek R1", InputPerMillion = 0.55, OutputPerMillion = 2.19, CacheReadPerMillion = 0.14, CacheWritePerMillion = 0.0 },
@@ -91,8 +97,14 @@ public sealed class ModelPricingCatalog
 
     public (double? CostUsd, bool IsPriced) CalculateCost(UsageLogEntry entry)
     {
+        var (cost, _, isPriced) = CalculateCostAndSavings(entry);
+        return (cost, isPriced);
+    }
+
+    public (double? CostUsd, double CacheSavedUsd, bool IsPriced) CalculateCostAndSavings(UsageLogEntry entry)
+    {
         var rule = MatchRule(entry.Model);
-        if (rule == null) return (null, false);
+        if (rule == null) return (null, 0.0, false);
 
         double cost =
             (entry.EffectiveInputTokens * rule.InputPerMillion
@@ -100,6 +112,7 @@ public sealed class ModelPricingCatalog
              + entry.CacheReadTokens * rule.CacheReadPerMillion
              + entry.CacheWriteTokens * rule.CacheWritePerMillion) / 1_000_000.0;
 
-        return (cost, true);
+        double saved = entry.CacheReadTokens * Math.Max(0.0, rule.InputPerMillion - rule.CacheReadPerMillion) / 1_000_000.0;
+        return (cost, saved, true);
     }
 }

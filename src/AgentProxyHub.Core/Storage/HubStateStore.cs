@@ -16,7 +16,10 @@ public sealed class HubStateStore
     };
 
     private readonly string _statePath;
+    private readonly CredentialVault _vault;
     private readonly object _ioLock = new();
+
+    private static readonly string[] SensitiveExtraKeys = ["obfs-password", "private_key", "preshared_key", "password"];
 
     public HubStateStore(string? customDirectory = null)
     {
@@ -25,6 +28,7 @@ public sealed class HubStateStore
             : customDirectory;
         Directory.CreateDirectory(dir);
         _statePath = Path.Combine(dir, "state.json");
+        _vault = new CredentialVault(dir);
     }
 
     public HubStateDocument LoadOrCreateDefault()
@@ -37,7 +41,17 @@ public sealed class HubStateStore
                 {
                     string json = File.ReadAllText(_statePath);
                     var doc = JsonSerializer.Deserialize<HubStateDocument>(json, JsonOpts);
-                    if (doc != null) return EnsureDefaults(doc);
+                    if (doc != null)
+                    {
+                        bool needsMigration = DetectUnencryptedSecrets(doc);
+                        DecryptSecretsInPlace(doc);
+                        doc = EnsureDefaults(doc);
+                        if (needsMigration)
+                        {
+                            Save(doc);
+                        }
+                        return doc;
+                    }
                 }
                 catch
                 {
@@ -55,9 +69,129 @@ public sealed class HubStateStore
     {
         lock (_ioLock)
         {
-            string json = JsonSerializer.Serialize(doc, JsonOpts);
-            File.WriteAllText(_statePath, json);
+            var protectedClone = CreateEncryptedClone(doc);
+            string json = JsonSerializer.Serialize(protectedClone, JsonOpts);
+            string tmpPath = _statePath + ".tmp";
+            File.WriteAllText(tmpPath, json);
+            File.Move(tmpPath, _statePath, overwrite: true);
         }
+    }
+
+    private static bool DetectUnencryptedSecrets(HubStateDocument doc)
+    {
+        foreach (var node in doc.Nodes)
+        {
+            if (!string.IsNullOrEmpty(node.Password) && !CredentialVault.IsEncrypted(node.Password))
+                return true;
+            if (node.Extra != null)
+            {
+                foreach (string k in SensitiveExtraKeys)
+                {
+                    if (node.Extra.TryGetValue(k, out string? v) && !string.IsNullOrEmpty(v) && !CredentialVault.IsEncrypted(v))
+                        return true;
+                }
+            }
+        }
+        foreach (var sub in doc.Subscriptions)
+        {
+            if (!string.IsNullOrEmpty(sub.Url) && !CredentialVault.IsEncrypted(sub.Url))
+                return true;
+            if (!string.IsNullOrEmpty(sub.ProxyUrl) && !CredentialVault.IsEncrypted(sub.ProxyUrl))
+                return true;
+        }
+        return false;
+    }
+
+    private void DecryptSecretsInPlace(HubStateDocument doc)
+    {
+        doc.Subscriptions ??= new();
+        foreach (var node in doc.Nodes)
+        {
+            if (!string.IsNullOrEmpty(node.Password))
+            {
+                node.Password = _vault.Unprotect(node.Password);
+                node.HasCredential = !string.IsNullOrEmpty(node.Password);
+            }
+            if (node.Extra != null)
+            {
+                foreach (string k in SensitiveExtraKeys)
+                {
+                    if (node.Extra.TryGetValue(k, out string? v) && !string.IsNullOrEmpty(v))
+                    {
+                        node.Extra[k] = _vault.Unprotect(v);
+                        if (!string.IsNullOrEmpty(node.Extra[k])) node.HasCredential = true;
+                    }
+                }
+            }
+        }
+        foreach (var sub in doc.Subscriptions)
+        {
+            sub.Url = _vault.Unprotect(sub.Url);
+            if (!string.IsNullOrEmpty(sub.ProxyUrl))
+                sub.ProxyUrl = _vault.Unprotect(sub.ProxyUrl);
+        }
+    }
+
+    private HubStateDocument CreateEncryptedClone(HubStateDocument doc)
+    {
+        return new HubStateDocument
+        {
+            Isolation = doc.Isolation,
+            HostApiPort = doc.HostApiPort,
+            CustomPricings = doc.CustomPricings,
+            Seats = doc.Seats,
+            Subscriptions = (doc.Subscriptions ?? []).Select(s => new SubscriptionSource
+            {
+                Id = s.Id,
+                Name = s.Name,
+                Group = s.Group,
+                Url = _vault.Protect(s.Url) ?? string.Empty,
+                ProxyUrl = string.IsNullOrEmpty(s.ProxyUrl) ? s.ProxyUrl : _vault.Protect(s.ProxyUrl),
+                AutoRefreshHours = s.AutoRefreshHours,
+                LastSyncedAt = s.LastSyncedAt,
+                NodeCount = s.NodeCount,
+                DriftCount = s.DriftCount,
+                LastError = s.LastError
+            }).ToList(),
+            Nodes = doc.Nodes.Select(n =>
+            {
+                Dictionary<string, string>? clonedExtra = null;
+                if (n.Extra != null)
+                {
+                    clonedExtra = new Dictionary<string, string>(n.Extra, StringComparer.OrdinalIgnoreCase);
+                    foreach (string k in SensitiveExtraKeys)
+                    {
+                        if (clonedExtra.TryGetValue(k, out string? v) && !string.IsNullOrEmpty(v))
+                            clonedExtra[k] = _vault.Protect(v) ?? v;
+                    }
+                }
+                return new ProxyNode
+                {
+                    Id = n.Id,
+                    Name = n.Name,
+                    Group = n.Group,
+                    Protocol = n.Protocol,
+                    Host = n.Host,
+                    Port = n.Port,
+                    Username = n.Username,
+                    Password = string.IsNullOrEmpty(n.Password) ? n.Password : _vault.Protect(n.Password),
+                    HasCredential = !string.IsNullOrEmpty(n.Password) || n.HasCredential,
+                    Method = n.Method,
+                    Sni = n.Sni,
+                    AllowInsecure = n.AllowInsecure,
+                    InsecureApproved = n.InsecureApproved,
+                    SourceSubscriptionId = n.SourceSubscriptionId,
+                    Extra = clonedExtra,
+                    Enabled = n.Enabled,
+                    Status = n.Status,
+                    LatencyMs = n.LatencyMs,
+                    ExitIp = n.ExitIp,
+                    IspSummary = n.IspSummary,
+                    AiReachability = n.AiReachability,
+                    LastCheckedAt = n.LastCheckedAt
+                };
+            }).ToList()
+        };
     }
 
     private static HubStateDocument EnsureDefaults(HubStateDocument doc)

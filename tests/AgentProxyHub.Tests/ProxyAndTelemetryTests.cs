@@ -1171,4 +1171,193 @@ public class ProxyAndTelemetryTests
         // 拦截沙箱 iframe Origin: null 写请求
         Assert.False(LoopbackSecurityGuard.IsAllowedRequest("127.0.0.1:17880", "DELETE", "null", isApiRoute: true));
     }
+
+    [Fact]
+    public void CredentialVault_EncryptsAtRest_AndMigratesLegacyPlaintextState()
+    {
+        string tmpDir = Path.Combine(Path.GetTempPath(), $"aph_vault_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tmpDir);
+        try
+        {
+            string statePath = Path.Combine(tmpDir, "state.json");
+            // 写入一个模拟 v0.4.4 明文密码与订阅 Token 的旧版配置文件
+            File.WriteAllText(statePath, """
+            {
+              "nodes": [
+                {
+                  "id": "n-legacy",
+                  "name": "Legacy-SS",
+                  "protocol": "SHADOWSOCKS",
+                  "host": "1.2.3.4",
+                  "port": 8388,
+                  "password": "super-secret-legacy-pw",
+                  "method": "aes-256-gcm"
+                }
+              ],
+              "subscriptions": [
+                {
+                  "id": "sub-1",
+                  "name": "LegacySub",
+                  "url": "https://sub.example.com/api/v1/client/subscribe?token=secret999"
+                }
+              ],
+              "seats": []
+            }
+            """);
+
+            var store = new AgentProxyHub.Core.Storage.HubStateStore(tmpDir);
+            var doc = store.LoadOrCreateDefault();
+
+            // 1. 内存中必须已透明解密并可供转发内核零开销读取
+            Assert.Equal("super-secret-legacy-pw", doc.Nodes[0].Password);
+            Assert.Equal("https://sub.example.com/api/v1/client/subscribe?token=secret999", doc.Subscriptions[0].Url);
+
+            // 2. 磁盘上应已自动完成迁移加密，绝不包含明文密码与订阅 Token
+            string rawOnDisk = File.ReadAllText(statePath);
+            Assert.DoesNotContain("super-secret-legacy-pw", rawOnDisk, StringComparison.Ordinal);
+            Assert.DoesNotContain("secret999", rawOnDisk, StringComparison.Ordinal);
+            Assert.Contains("enc:v1:", rawOnDisk, StringComparison.Ordinal);
+
+            // 3. 脱敏副本不得向前端/导出接口返回密码
+            var redacted = doc.Nodes[0].ToRedactedCopy();
+            Assert.Null(redacted.Password);
+            Assert.True(redacted.HasCredential);
+        }
+        finally
+        {
+            if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true);
+        }
+    }
+
+    [Fact]
+    public void Importer_SupportsHostPortAtUserPass_ProfileTitle_AndFlagsInsecureUnapproved()
+    {
+        string raw = "38.154.227.14:1080@alice:pass123#US-Home\ntrojan://pw@jp.example.com:443?allowInsecure=1#JP-Insecure";
+        var parsed = ProxyNodeImporter.Parse(raw, ProxyProtocol.SOCKS5, "测试组");
+        Assert.Equal(2, parsed.ValidCount);
+
+        var homeNode = parsed.Items[0].Node!;
+        Assert.Equal("38.154.227.14", homeNode.Host);
+        Assert.Equal(1080, homeNode.Port);
+        Assert.Equal("alice", homeNode.Username);
+        Assert.Equal("pass123", homeNode.Password);
+        Assert.True(homeNode.InsecureApproved);
+
+        var insecureNode = parsed.Items[1].Node!;
+        Assert.True(insecureNode.AllowInsecure);
+        Assert.False(insecureNode.InsecureApproved);
+
+        string titleB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes("高速住宅专线池"));
+        var headers = new Dictionary<string, IEnumerable<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["profile-title"] = [$"base64:{titleB64}"]
+        };
+        string title = ProxyNodeImporter.ExtractSubscriptionName(headers, new Uri("https://sub.example.com/sub?token=abc"));
+        Assert.Equal("高速住宅专线池", title);
+    }
+
+    [Fact]
+    public void SubscriptionSync_SnapshotDrift_PreservesBoundSeatNode()
+    {
+        var oldBoundNode = new ProxyNode
+        {
+            Id = "n-bound",
+            Name = "US-01",
+            Group = "机场池",
+            Protocol = ProxyProtocol.SOCKS5,
+            Host = "38.154.227.14",
+            Port = 1080,
+            Username = "u1",
+            Password = "p1",
+            SourceSubscriptionId = "sub_1"
+        };
+        var doc = new HubStateDocument
+        {
+            Nodes = [oldBoundNode],
+            Seats =
+            [
+                new AppSeat { Id = "claude", Name = "Claude", LocalPort = 17891, BoundNodeId = "n-bound", Enabled = true }
+            ],
+            Subscriptions =
+            [
+                new SubscriptionSource { Id = "sub_1", Name = "机场池", Group = "机场池", Url = "https://sub.example.com/s" }
+            ]
+        };
+
+        // 模拟订阅刷新：原节点密码改变，触发快照防漂移保护
+        var changedIncoming = new ProxyNode
+        {
+            Id = "n-new",
+            Name = "US-01",
+            Group = "机场池",
+            Protocol = ProxyProtocol.SOCKS5,
+            Host = "38.154.227.14",
+            Port = 1080,
+            Username = "u1",
+            Password = "p2-changed"
+        };
+
+        var diff = SubscriptionSyncEngine.MergeParsedNodes(doc, doc.Subscriptions[0], [changedIncoming]);
+        Assert.Equal(1, diff.DriftCount);
+        Assert.True(doc.Seats[0].HasNodeDrift);
+        Assert.Equal("p1", oldBoundNode.Password);
+        Assert.Contains("[快照锁定]", oldBoundNode.Name);
+        Assert.Null(oldBoundNode.SourceSubscriptionId);
+        Assert.Equal(2, doc.Nodes.Count);
+    }
+
+    [Fact]
+    public void HubEventLogger_RedactsBearerTokensUrlsAndEncryptedBlobs()
+    {
+        string raw = "Fetch https://alice:secretPass99@sub.example.com/config?token=abc12345 failed with Authorization: Bearer sk-live-9876543210abcdef and blob enc:v1:AAAA1234/+==";
+        string sanitized = AgentProxyHub.Core.Diagnostics.HubEventLogger.RedactSecrets(raw);
+
+        Assert.DoesNotContain("secretPass99", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("abc12345", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("sk-live-9876543210abcdef", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("AAAA1234", sanitized, StringComparison.Ordinal);
+        Assert.Contains("://***:***@", sanitized, StringComparison.Ordinal);
+        Assert.Contains("Bearer [REDACTED]", sanitized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SessionScanner_MergesAntigravityCliWithoutDoubleCounting_AndCalculatesCacheSavingsAndHeatmap()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"aph_cli_hm_{Guid.NewGuid():N}");
+        string desktopDir = Path.Combine(tempRoot, ".gemini", "antigravity", "brain", "conv-shared", ".system_generated", "logs");
+        string cliSharedDir = Path.Combine(tempRoot, ".gemini", "antigravity-cli", "brain", "conv-shared", ".system_generated", "logs");
+        string cliOnlyDir = Path.Combine(tempRoot, ".gemini", "antigravity-cli", "brain", "conv-cli-only", ".system_generated", "logs");
+        Directory.CreateDirectory(desktopDir);
+        Directory.CreateDirectory(cliSharedDir);
+        Directory.CreateDirectory(cliOnlyDir);
+
+        try
+        {
+            string todayIso = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string lineShared = $"{{\"step_index\":2,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"{todayIso}\",\"model\":\"gemini-2.5-pro\",\"input_tokens\":100000,\"cache_read_tokens\":1000000,\"output_tokens\":2000}}";
+            string lineCliOnly = $"{{\"step_index\":1,\"type\":\"PLANNER_RESPONSE\",\"created_at\":\"{todayIso}\",\"model\":\"gemini-2.5-pro\",\"input_tokens\":50000,\"cache_read_tokens\":0,\"output_tokens\":1000}}";
+
+            File.WriteAllLines(Path.Combine(desktopDir, "transcript.jsonl"), [lineShared]);
+            File.WriteAllLines(Path.Combine(cliSharedDir, "transcript.jsonl"), [lineShared]);
+            File.WriteAllLines(Path.Combine(cliOnlyDir, "transcript.jsonl"), [lineCliOnly]);
+
+            var scanner = new SessionLogScanner(tempRoot);
+            var pricing = new ModelPricingCatalog();
+            var stats = new UsageStatsService(scanner, pricing);
+
+            var sync = stats.SyncNow();
+            Assert.Equal(2, sync.ParsedEntries); // 共享会话不双计 + CLI 独占会话纳入
+
+            var dash = stats.QueryDashboard("today", "all", "all", 1, 20, []);
+            Assert.Equal(2, dash.TotalRequests);
+            Assert.True(dash.TotalCacheSavedUsd > 0.9); // gemini-2.5-pro: (1.25 - 0.31) * 1M / 1M = 0.94
+            Assert.Equal(365, dash.ActivityHeatmap.Count);
+            Assert.True(dash.ActiveDaysLastYear >= 1);
+            Assert.Contains(dash.ActivityHeatmap, c => c.Requests == 2 && c.Level > 0);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
 }

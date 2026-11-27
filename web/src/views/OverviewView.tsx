@@ -14,10 +14,12 @@ import {
   ShieldCheckIcon
 } from '../components/Icons';
 import { SegmentedTabs } from '../components/SegmentedTabs';
+import { maskIp } from '../privacy';
 
 interface Props {
   data: OverviewResponse;
   selectedSeatId: string;
+  privacyMode?: boolean;
   onSelectSeat: (seatId: string) => void;
   onReload: () => Promise<void>;
   onToast: (msg: string) => void;
@@ -64,6 +66,7 @@ function buildSmoothSvgPath(pts: { x: number; y: number }[]): { line: string; ar
 export const OverviewView: React.FC<Props> = ({
   data,
   selectedSeatId,
+  privacyMode = false,
   onSelectSeat,
   onReload,
   onToast,
@@ -568,7 +571,7 @@ export const OverviewView: React.FC<Props> = ({
                   物理出口 · {nicShort}
                 </div>
                 <div className="num" style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>
-                  {data.lockedNic?.iPv4Address ?? '直绑硬件接口'}
+                  {data.lockedNic?.iPv4Address ? maskIp(data.lockedNic.iPv4Address, privacyMode) : '直绑硬件接口'}
                 </div>
               </div>
             </div>

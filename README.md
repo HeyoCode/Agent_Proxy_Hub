@@ -68,8 +68,8 @@
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>📊 免解密双源 AI 用量统计（5s 自动同步）</h3>
-      <p>零 MITM 拆包风险，后台每 <strong>5 秒</strong>增量巡检 <code>~/.claude</code>、<code>~/.codex</code>、<code>~/.gemini/antigravity</code> 结构化日志，统计请求数、有效输入、输出、缓存命中率、<strong>首字延迟估算 (TTFT)</strong>、Token 流速与自定义百万 Token 成本。</p>
+      <h3>📊 免解密双源 AI 用量统计（365 天热力图 + 缓存节省）</h3>
+      <p>零 MITM 拆包风险，后台每 <strong>5 秒</strong>增量巡检 <code>~/.claude</code>、<code>~/.codex</code>、<code>~/.gemini/antigravity</code> 及 <code>antigravity-cli</code> 日志并去重，统计有效输入、输出、缓存命中率、<strong>Cache 累计节省金额</strong>、<strong>首字延迟估算 (TTFT)</strong> 与 <strong>365 天 AI 编码活跃热力图</strong>。</p>
     </td>
     <td width="50%" valign="top">
       <h3>⚡ 零 GC 吞吐引擎 & 实时/累计速率切换</h3>
@@ -78,8 +78,8 @@
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>🌐 L1 原生多协议 + L2 按需 <code>sing-box</code> & 订阅同步</h3>
-      <p><strong>L1 核心层</strong>纯 .NET 零依赖支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code> 支持 <code>VLESS (Reality) / Hysteria2 / TUIC / WireGuard</code>（空闲 0 进程，验真与在用并集隔离）；支持 <strong>L1+L2 手动填表</strong>、双模式导入工作台与<strong>机场订阅记忆一键刷新</strong>。</p>
+      <h3>🌐 L1/L2 多协议 + 多订阅源托管 + 快照防漂移</h3>
+      <p><strong>L1 核心层</strong>纯 .NET 支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code> 支持 <code>VLESS / Hysteria2 / TUIC / WireGuard</code>；支持 <strong>多订阅源加密托管与自动同步</strong>、<code>skip-cert-verify</code> 风险审批，以及<strong>订阅刷新快照防漂移锁定</strong>。</p>
     </td>
     <td width="50%" valign="top">
       <h3>🔀 双跳链式加速（高速中转 → 静态住宅落地）</h3>
@@ -92,8 +92,8 @@
       <p>Windows 11 DWM 原生圆角无外边框窗口 + <strong>跟随系统 / 浅色 / 深色三态切换</strong>（主窗与托盘浮层实时同步），内置 15 款 AI 应用离线矢量品牌标与总控拓扑 <code>‹ 1/4 ›</code> 动态翻页。</p>
     </td>
     <td width="50%" valign="top">
-      <h3>🔒 防串熔断锁 · IPv6 开关 · 环回安全守卫</h3>
-      <p>开启 <strong>Fail-Close 熔断锁</strong>后专线掉线直接阻断绝不回退本地或机场 IP；内置全局 <strong>IPv6 开关</strong>防泄漏；本地管理接口内置 <code>LoopbackSecurityGuard</code>，阻断 DNS Rebinding 与外部网页跨站写操作 (CSRF)。</p>
+      <h3>🔒 国家硬门禁 · AES-GCM 静态加密 · 隐私护盾 & 审计</h3>
+      <p>支持各席位设置<strong>启动前出口国家硬门禁</strong>（不符即阻断）与 <strong>Fail-Close 熔断锁</strong>；本地凭据与订阅链接采用 <strong>DPAPI + AES-256-GCM 静态加密</strong>，前端可一键开启<strong>隐私护盾</strong>全局打码；提供<strong>近期 20 条 SNI 连接审计</strong>、脱敏日志中心与应用内更新检测。</p>
     </td>
   </tr>
 </table>
@@ -213,8 +213,8 @@ flowchart LR
 ### 方式一：直接下载安装程序（推荐）
 
 前往 [**GitHub Releases**](https://github.com/HeyoCode/Agent_Proxy_Hub/releases) 下载对应平台最新安装包：
-- **Windows x64**：`AgentProxyHub-Setup-v0.4.4-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
-- **macOS**：`AgentProxyHub-v0.4.4-macos-arm64.dmg`
+- **Windows x64**：`AgentProxyHub-Setup-v0.5.0-win-x64.exe`（默认用户级免管理员安装，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动平滑接管托盘旧实例）
+- **macOS**：`AgentProxyHub-v0.5.0-macos-arm64.dmg`
 
 ### 方式二：3 步完成首次配置
 
@@ -258,13 +258,13 @@ Agent_Proxy_Hub/
 ├── CHANGELOG.md                        # 版本演进与 Release Notes 权威变更记录
 ├── LICENSE                             # PolyForm Noncommercial 1.0.0 非商用开源协议
 ├── src/
-│   ├── AgentProxyHub.Core/             # 多协议代理内核、sing-box 并集桥、物理 DoH、15 应用接管、统计库
+│   ├── AgentProxyHub.Core/             # 多协议代理内核、CredentialVault、国家门禁、订阅同步、日志与统计库
 │   ├── AgentProxyHub.Host/             # 跨平台本地守护与环回受保护 REST API 服务 (127.0.0.1:17880)
 │   └── AgentProxyHub.Desktop.Win/      # Windows 无边框 WebView2 主窗与原生圆角托盘悬浮窗
 ├── macos/                              # macOS 原生菜单栏 NSPopover + WKWebView 宿主与脚本
-├── web/                                # React 19 + TypeScript + Vite 前端（双主题自适应 + 本地字体零外链）
+├── web/                                # React 19 + TypeScript + Vite 前端（双主题自适应 + 隐私护盾 + 365天热力图）
 ├── installer/                          # Inno Setup 6 (Windows) 与 DMG (macOS) 打包脚本
-├── tests/AgentProxyHub.Tests/          # 19 项 xUnit 测试（多协议 / 双跳链路 / Clash YAML / 热切换 / 安全守卫）
+├── tests/AgentProxyHub.Tests/          # 24 项 xUnit 测试（多协议 / 加密迁移 / 快照防漂移 / 热切换 / 安全守卫 / 热力图）
 └── docs/screenshots/                   # README 展示截图资源
 ```
 
@@ -275,7 +275,7 @@ Agent_Proxy_Hub/
 pnpm --dir web install
 pnpm --dir web build
 
-# 2. 运行全套 xUnit 单元测试（19 项全绿）
+# 2. 运行全套 xUnit 单元测试（24 项全绿）
 dotnet test AgentProxyHub.sln -c Release
 
 # 3. 启动 Windows 无边框托盘客户端
@@ -290,16 +290,16 @@ dotnet run --project src/AgentProxyHub.Host/AgentProxyHub.Host.csproj -c Release
 
 ```powershell
 # Windows 轻量安装程序（需安装 Inno Setup 6）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.4
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.5.0
 
 # Windows 离线独立版（内置完整 .NET 10 运行时）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.4.4 -SelfContained
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.5.0 -SelfContained
 ```
 
 ```bash
 # macOS Apple Silicon / Intel DMG 镜像
 chmod +x installer/macos/build-dmg.sh
-./installer/macos/build-dmg.sh osx-arm64 0.4.4
+./installer/macos/build-dmg.sh osx-arm64 0.5.0
 ```
 
 </details>
@@ -315,16 +315,24 @@ chmod +x installer/macos/build-dmg.sh
 | `POST` | `/api/nodes/fetch-subscription` | 拉取机场订阅链接（自动兼容 `clash.meta` / `v2rayN` 与可选代理）并实时预览 |
 | `POST` | `/api/nodes/{id}/verify` | 物理网卡直连并发验真单个节点（单次最快 RTT + 出口 IP） |
 | `POST` | `/api/nodes/verify-all` | 全量节点物理直连验真（L2 单次并集预热 + 8 路并发限流防 NAT 拥塞） |
-| `PUT` | `/api/seats/{id}` | 更新席位启停、绑定线路、前置中转 (`relayNodeId`)、本地端口在线热切换与熔断锁 |
+| `GET` | `/api/subscriptions` | 获取已托管订阅源脱敏列表（不含明文 Token/URL 路径） |
+| `POST` | `/api/subscriptions` | 创建或更新托管订阅源并执行首次增量导入（支持 `profile-title` 自动命名） |
+| `POST` | `/api/subscriptions/{id}/refresh` | 手动刷新指定订阅源，含席位出口**快照防漂移锁定**检查 |
+| `POST` | `/api/nodes/{id}/approve-insecure` | 显式批准外部导入的 `allowInsecure` 节点跳过 TLS 证书校验 |
+| `PUT` | `/api/seats/{id}` | 更新席位启停、绑定线路、前置中转、预期国家门禁、自定义路径/`NO_PROXY` 与漂移确认 |
 | `POST` | `/api/seats/{id}/takeover` | 对目标 AI 应用执行一键无损代理接管或还原默认配置 |
-| `POST` | `/api/seats/{id}/launch` | 注入席位独立代理环境变量受控启动目标应用或终端 |
+| `POST` | `/api/seats/{id}/launch` | 先校验预期出口国家硬门禁，通过后注入独立代理环境变量受控启动应用 |
+| `POST` | `/api/seats/{id}/check-country` | 通过 Cloudflare Trace 立即核验当前席位出口国家与历史记录 |
+| `GET` | `/api/seats/{id}/connections` | 查询当前席位近期最多 20 条穿透连接 SNI 审计摘要（零请求正文） |
 | `POST` | `/api/seats/{id}/verify-tunnel` | 经由 `127.0.0.1:{localPort}` 发起全链路实流验真并刷新吞吐 |
 | `GET` | `/api/engine/singbox` | 查询 L2 `sing-box` Sidecar 安装状态、版本与活跃桥接节点数 |
 | `POST` | `/api/engine/singbox/install` | 一键从官方 Release 下载安装 `sing-box` 至本地隔离目录 |
 | `POST` | `/api/engine/singbox/stop` | 手动停止 `sing-box` Sidecar 进程并释放临时桥接端口 |
 | `PUT` | `/api/isolation` | 切换锁定物理网卡、SNI 还原、全局熔断锁与 IPv6 双栈开关 |
-| `GET` | `/api/stats/dashboard` | 查询双源 AI 用量统计（含首字延迟估算，支持 `today / 24h / 7d / 30d / all`） |
+| `GET` | `/api/stats/dashboard` | 查询双源 AI 用量统计（含 TTFT 估算、Cache 节省额与 365 天活跃热力图） |
 | `POST` | `/api/stats/sync` | 立即触发一次增量会话日志同步（后台默认每 5 秒自动执行） |
+| `GET` | `/api/diagnostics/logs` | 查询自动脱敏的运行时事件日志（支持级别与关键字筛选） |
+| `GET` | `/api/system/update-check` | 检查 GitHub Releases 最新版本与发布说明 |
 
 </details>
 

@@ -78,6 +78,13 @@ html[data-theme="light"] {
   --insp-radar-card-bg: rgba(255, 255, 255, 0.94);
   --insp-radar-card-border: rgba(25, 35, 74, 0.08);
   --insp-radar-card-shadow: 0 10px 24px rgba(25, 35, 74, 0.09);
+
+  /* 365 天活跃热力图色阶 (Light) */
+  --heatmap-0: #EAEFF7;
+  --heatmap-1: #C7D2FE;
+  --heatmap-2: #818CF8;
+  --heatmap-3: #4F46E5;
+  --heatmap-4: #312E81;
 }
 
 html[data-theme="dark"] {
@@ -117,6 +124,13 @@ html[data-theme="dark"] {
   --shadow-alert: 0 14px 32px rgba(235, 102, 96, 0.24);
   --shadow-indigo-alert: 0 14px 32px rgba(74, 86, 226, 0.3);
   --shadow-popover: 0 26px 68px rgba(0, 0, 0, 0.65);
+
+  /* 365 天活跃热力图色阶 (Dark) */
+  --heatmap-0: #232C4A;
+  --heatmap-1: #2E3B72;
+  --heatmap-2: #4453B8;
+  --heatmap-3: #6366F1;
+  --heatmap-4: #93A0FF;
 
   /* 右侧观测栏暗夜海军蓝变量 */
   --insp-bg: linear-gradient(176deg, #1B203D 0%, #10142A 52%, #090C19 100%);
@@ -2178,4 +2192,103 @@ html[data-tray="1"] #root {
   box-shadow: 0 8px 20px rgba(10, 14, 30, 0.25);
   white-space: nowrap;
   pointer-events: none;
+}
+
+/* v0.5.0 新增：365 天活跃热力图 & 审计列表 & 告警徽标 */
+.rail-utility-btn.has-badge::after {
+  content: "";
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-emerald);
+  box-shadow: 0 0 0 2px var(--bg-rail);
+}
+.rail-utility-btn.active-privacy {
+  background: var(--accent-indigo-soft);
+  color: var(--accent-indigo);
+}
+
+.heatmap-scroll {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.heatmap-grid {
+  display: grid;
+  grid-template-rows: repeat(7, 10px);
+  grid-auto-flow: column;
+  grid-auto-columns: 10px;
+  gap: 3px;
+}
+
+.heatmap-cell {
+  width: 10px;
+  height: 10px;
+  border-radius: 2.5px;
+  transition: transform 0.12s ease;
+}
+.heatmap-cell:hover {
+  transform: scale(1.28);
+  outline: 1.5px solid var(--accent-indigo);
+}
+.heatmap-cell.lv-0 { background: var(--heatmap-0); }
+.heatmap-cell.lv-1 { background: var(--heatmap-1); }
+.heatmap-cell.lv-2 { background: var(--heatmap-2); }
+.heatmap-cell.lv-3 { background: var(--heatmap-3); }
+.heatmap-cell.lv-4 { background: var(--heatmap-4); }
+
+.insp-drift-banner {
+  background: var(--accent-amber-soft);
+  color: var(--accent-amber-text);
+  border-radius: 9px;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.insp-conn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 116px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.insp-conn-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 10.5px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: var(--insp-mode-bg);
+}
+
+.sub-source-strip {
+  padding: 10px 18px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  background: var(--bg-subtle);
+}
+
+.sub-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: var(--bg-card);
+  border: 1px solid var(--divider);
+  font-size: 11.5px;
 }

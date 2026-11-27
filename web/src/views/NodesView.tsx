@@ -1,11 +1,14 @@
-import React, { useEffect, useState } from 'react';
-import { BatchParseResult, ProxyNode, ProxyProtocol, api } from '../api';
+import React, { useEffect, useRef, useState } from 'react';
+import { BatchParseResult, ProxyNode, ProxyProtocol, SubscriptionSourceDto, api } from '../api';
 import { CustomSelect } from '../components/CustomSelect';
 import { PlusIcon, RefreshSpinIcon, UploadBatchIcon } from '../components/Icons';
 import { SegmentedTabs } from '../components/SegmentedTabs';
+import { maskEndpoint, maskGeneric, maskIp } from '../privacy';
 
 interface Props {
   nodes: ProxyNode[];
+  subscriptions?: SubscriptionSourceDto[];
+  privacyMode?: boolean;
   showManual: boolean;
   showBatch: boolean;
   onCloseModals: () => void;
@@ -49,10 +52,21 @@ const TUIC_CC_OPTIONS = [
 ];
 
 export const NodesView: React.FC<Props> = ({
-  nodes, showManual, showBatch, onCloseModals, onOpenManual, onOpenBatch, onReload, onToast
+  nodes,
+  subscriptions = [],
+  privacyMode = false,
+  showManual,
+  showBatch,
+  onCloseModals,
+  onOpenManual,
+  onOpenBatch,
+  onReload,
+  onToast
 }) => {
   const [filter, setFilter] = useState<'all' | 'NATIVE' | 'SIDECAR'>('all');
   const [testingAll, setTestingAll] = useState(false);
+  const verifyAbortRef = useRef<AbortController | null>(null);
+  const [refreshingSubId, setRefreshingSubId] = useState<string | null>(null);
 
   // 手动添加表单（L1 + L2 全协议）
   const [mProto, setMProto] = useState<ProxyProtocol>('SOCKS5');
@@ -90,7 +104,10 @@ export const NodesView: React.FC<Props> = ({
     }
   });
   const [subUrl, setSubUrl] = useState(() => savedSub?.url ?? '');
+  const [subName, setSubName] = useState('');
   const [subProxy, setSubProxy] = useState(() => savedSub?.proxy ?? '');
+  const [subAutoHours, setSubAutoHours] = useState<number>(6);
+  const [saveSubToBackend, setSaveSubToBackend] = useState(true);
   const [subDetectedFormat, setSubDetectedFormat] = useState<string | null>(null);
   const [fetchingSub, setFetchingSub] = useState(false);
   const [refreshingSavedSub, setRefreshingSavedSub] = useState(false);
@@ -213,17 +230,45 @@ export const NodesView: React.FC<Props> = ({
       setBatchText(res.rawText);
       setPreview(res.preview);
       setSubDetectedFormat(res.detectedFormat);
+      if (res.suggestedTitle && !subName.trim()) setSubName(res.suggestedTitle);
       const nextSaved = { url: subUrl.trim(), group: targetGroup, proxy: subProxy.trim() };
       setSavedSub(nextSaved);
       try {
         window.localStorage.setItem('aph_saved_sub_meta', JSON.stringify(nextSaved));
       } catch { }
-      onToast(`订阅拉取成功（${res.detectedFormat}）：识别 ${res.preview.validCount} 条新节点，重复 ${res.preview.duplicateCount} 条`);
+      onToast(`订阅拉取成功（${res.detectedFormat} · ${res.suggestedTitle || ''}）：识别 ${res.preview.validCount} 条新节点，重复 ${res.preview.duplicateCount} 条`);
     } catch (err) {
       onToast(err instanceof Error ? err.message : '拉取订阅失败');
     } finally {
       setFetchingSub(false);
     }
+  }
+
+  async function handleRefreshBackendSub(sub: SubscriptionSourceDto) {
+    if (refreshingSubId) return;
+    setRefreshingSubId(sub.id);
+    try {
+      const res = await api.refreshSubscription(sub.id);
+      await onReload();
+      const d = res.diff;
+      onToast(`订阅「${sub.name}」同步完成：新增 ${d.addedCount}，更新 ${d.updatedCount}，防漂移快照锁定 ${d.driftCount}`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '刷新订阅失败');
+    } finally {
+      setRefreshingSubId(null);
+    }
+  }
+
+  async function handleDeleteBackendSub(sub: SubscriptionSourceDto) {
+    await api.deleteSubscription(sub.id, false);
+    await onReload();
+    onToast(`已移除订阅源「${sub.name}」（已导入或锁定的节点仍安全保留）`);
+  }
+
+  async function handleApproveInsecure(node: ProxyNode) {
+    await api.approveNodeInsecure(node.id);
+    await onReload();
+    onToast(`已批准节点「${node.name}」跳过 TLS 证书校验`);
   }
 
   async function handleQuickRefreshSavedSub() {
@@ -261,7 +306,7 @@ export const NodesView: React.FC<Props> = ({
     if (node.username) {
       return node.username.length > 14 ? `${node.username.slice(0, 8)}…` : node.username;
     }
-    return node.password ? '密钥认证' : '无认证';
+    return node.hasCredential || node.password ? '密钥加密保存' : '无认证';
   }
 
   const previewItems = (preview?.items ?? []).filter(it => {
@@ -281,6 +326,21 @@ export const NodesView: React.FC<Props> = ({
   );
 
   async function handleImportBatch() {
+    if (importMode === 'subscription' && saveSubToBackend && subUrl.trim()) {
+      const res = await api.upsertSubscription({
+        name: subName.trim() || undefined,
+        url: subUrl.trim(),
+        group: batchGroup || '订阅导入池',
+        proxyUrl: subProxy.trim() || undefined,
+        autoRefreshHours: subAutoHours
+      });
+      onCloseModals();
+      await onReload();
+      const d = res.diff;
+      onToast(`已托管订阅「${res.subscription.name}」：新增 ${d.addedCount} 条，当前池内 ${d.totalInSubscription} 条`);
+      return;
+    }
+
     const res = await api.importBatch(batchText, batchProto, batchGroup);
     onCloseModals();
     await onReload();
@@ -289,18 +349,37 @@ export const NodesView: React.FC<Props> = ({
 
   async function handleVerifyOne(id: string) {
     onToast('正在直绑物理网卡测试出口与 AI 连通性...');
-    const res = await api.verifyNode(id);
-    await onReload();
-    onToast(res.status === 'online' ? `节点在线：${res.exitIp} (${res.latencyMs ?? 1} ms)` : `节点不可达：${res.ispSummary}`);
+    try {
+      const res = await api.verifyNode(id);
+      await onReload();
+      onToast(res.status === 'online' ? `节点在线：${maskIp(res.exitIp, privacyMode)} (${res.latencyMs ?? 1} ms)` : `节点不可达：${res.ispSummary}`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '验真失败');
+    }
   }
 
   async function handleVerifyAll() {
+    if (testingAll) {
+      verifyAbortRef.current?.abort();
+      verifyAbortRef.current = null;
+      setTestingAll(false);
+      onToast('已取消全量节点验真');
+      return;
+    }
+
+    const ctrl = new AbortController();
+    verifyAbortRef.current = ctrl;
     setTestingAll(true);
     try {
-      await api.verifyAllNodes();
+      await api.verifyAllNodes(ctrl.signal);
       await onReload();
       onToast('已完成全量线路物理直连验真');
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        onToast(err instanceof Error ? err.message : '全量验真中断');
+      }
     } finally {
+      verifyAbortRef.current = null;
       setTestingAll(false);
     }
   }
@@ -334,7 +413,7 @@ export const NodesView: React.FC<Props> = ({
           />
 
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {savedSub?.url && (
+            {savedSub?.url && subscriptions.length === 0 && (
               <button
                 type="button"
                 className="btn-pill btn-soft btn-sm"
@@ -346,9 +425,9 @@ export const NodesView: React.FC<Props> = ({
                 <span>{refreshingSavedSub ? '同步中' : '刷新订阅'}</span>
               </button>
             )}
-            <button type="button" className="btn-pill btn-soft btn-sm" onClick={handleVerifyAll} disabled={testingAll}>
+            <button type="button" className={`btn-pill btn-sm ${testingAll ? 'btn-coral' : 'btn-soft'}`} onClick={handleVerifyAll}>
               <RefreshSpinIcon size={13} spinning={testingAll} />
-              <span>{testingAll ? '验真中' : '全量直连验真'}</span>
+              <span>{testingAll ? '取消验真' : '全量直连验真'}</span>
             </button>
             <button type="button" className="btn-pill btn-soft btn-sm" onClick={onOpenManual}>
               <PlusIcon size={12} />
@@ -360,6 +439,48 @@ export const NodesView: React.FC<Props> = ({
             </button>
           </div>
         </div>
+
+        {subscriptions.length > 0 && (
+          <>
+            <div className="soft-divider" />
+            <div className="sub-source-strip">
+              <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>已托管订阅源：</span>
+              {subscriptions.map(sub => {
+                const isBusy = refreshingSubId === sub.id;
+                return (
+                  <div key={sub.id} className="sub-source-chip">
+                    <span style={{ fontWeight: 600 }}>{sub.name}</span>
+                    <span className="pill-tag tag-indigo num">{sub.nodeCount} 节点</span>
+                    {sub.autoRefreshHours > 0 && (
+                      <span className="pill-tag tag-emerald num">{sub.autoRefreshHours}h 自动</span>
+                    )}
+                    {sub.lastError && (
+                      <span className="pill-tag tag-coral" title={sub.lastError}>同步异常</span>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-pill btn-soft btn-sm"
+                      style={{ height: 22, padding: '0 8px', fontSize: 11 }}
+                      disabled={Boolean(refreshingSubId)}
+                      onClick={() => handleRefreshBackendSub(sub)}
+                    >
+                      <RefreshSpinIcon size={11} spinning={isBusy} />
+                      <span>{isBusy ? '同步中' : '刷新'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 12, padding: '0 2px' }}
+                      title="移除该订阅源记录（保留节点）"
+                      onClick={() => handleDeleteBackendSub(sub)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
 
         <div className="soft-divider" />
 
@@ -380,7 +501,12 @@ export const NodesView: React.FC<Props> = ({
               <tr key={n.id}>
                 <td>
                   <div style={{ fontWeight: 600 }}>{n.name}</div>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{n.group}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
+                    <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{n.group}</span>
+                    {n.allowInsecure && !n.insecureApproved && (
+                      <span className="pill-tag tag-amber" style={{ fontSize: 10, padding: '1px 6px' }}>待批准跳过证书</span>
+                    )}
+                  </div>
                 </td>
                 <td className="nowrap">
                   <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
@@ -391,13 +517,19 @@ export const NodesView: React.FC<Props> = ({
                   </div>
                 </td>
                 <td className="nowrap">
-                  <div className="mono" style={{ fontSize: 12 }}>{n.host}:{n.port}</div>
+                  <div className="mono" style={{ fontSize: 12 }}>
+                    {n.protocol === 'DIRECT_PHYSICAL' ? `${n.host}:${n.port}` : maskEndpoint(n.host, n.port, privacyMode)}
+                  </div>
                   <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {n.method ? `算法：${n.method}` : (n.sni ? `SNI：${n.sni}` : (n.username ? `认证：${n.username}` : '无认证'))}
+                    {n.method
+                      ? `算法：${n.method}`
+                      : (n.sni
+                        ? `SNI：${n.sni}`
+                        : (n.username ? `认证：${maskGeneric(n.username, privacyMode)}` : (n.hasCredential ? '凭据已 AES-GCM 加密' : '无认证')))}
                   </div>
                 </td>
                 <td>
-                  <div className="num" style={{ fontWeight: 600 }}>{n.exitIp}</div>
+                  <div className="num" style={{ fontWeight: 600 }}>{maskIp(n.exitIp, privacyMode)}</div>
                   <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{n.ispSummary}</div>
                 </td>
                 <td>
@@ -420,6 +552,9 @@ export const NodesView: React.FC<Props> = ({
                 </td>
                 <td className="num-r nowrap">
                   <div style={{ display: 'inline-flex', gap: 6 }}>
+                    {n.allowInsecure && !n.insecureApproved && (
+                      <button type="button" className="btn-pill btn-indigo btn-sm" onClick={() => handleApproveInsecure(n)}>批准风险</button>
+                    )}
                     <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleVerifyOne(n.id)}>验真</button>
                     {n.id !== 'direct-phy' && (
                       <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleDelete(n.id)}>删除</button>
@@ -723,12 +858,12 @@ export const NodesView: React.FC<Props> = ({
 
                       <div className="import-meta-grid">
                         <div>
-                          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 5 }}>统一分组标签</div>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 5 }}>订阅源名称（自动提取可改）</div>
                           <input
                             className="clean-input"
-                            placeholder="例如：机场高速中转"
-                            value={batchGroup}
-                            onChange={e => setBatchGroup(e.target.value)}
+                            placeholder="留空由 profile-title 自动命名"
+                            value={subName}
+                            onChange={e => setSubName(e.target.value)}
                           />
                         </div>
                         <div>
@@ -740,6 +875,34 @@ export const NodesView: React.FC<Props> = ({
                             value={subProxy}
                             onChange={e => setSubProxy(e.target.value)}
                           />
+                        </div>
+                      </div>
+
+                      <div className="import-meta-grid">
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 5 }}>统一分组标签</div>
+                          <input
+                            className="clean-input"
+                            placeholder="例如：机场高速中转"
+                            value={batchGroup}
+                            onChange={e => setBatchGroup(e.target.value)}
+                          />
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', gap: 5 }}>
+                          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+                            <input type="checkbox" checked={saveSubToBackend} onChange={e => setSaveSubToBackend(e.target.checked)} />
+                            <span>加密托管到订阅池</span>
+                          </label>
+                          {saveSubToBackend && (
+                            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-muted)', cursor: 'pointer' }}>
+                              <input
+                                type="checkbox"
+                                checked={subAutoHours > 0}
+                                onChange={e => setSubAutoHours(e.target.checked ? 6 : 0)}
+                              />
+                              <span>每 6 小时静默检查（防漂移锁定）</span>
+                            </label>
+                          )}
                         </div>
                       </div>
 
@@ -897,7 +1060,7 @@ export const NodesView: React.FC<Props> = ({
                               title={it.valid && it.node ? `${it.node.host}:${it.node.port}` : (it.errorReason ?? '')}
                             >
                               {it.valid && it.node
-                                ? `${it.node.host}:${it.node.port} · ${formatCompactCred(it.node)}`
+                                ? `${maskEndpoint(it.node.host, it.node.port, privacyMode)} · ${formatCompactCred(it.node)}`
                                 : it.errorReason}
                             </div>
                           </div>

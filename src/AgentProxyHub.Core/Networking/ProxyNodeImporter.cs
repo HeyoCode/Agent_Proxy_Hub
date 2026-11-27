@@ -18,6 +18,9 @@ public static partial class ProxyNodeImporter
     [GeneratedRegex(@"^([^:@\s]+):([^@\s]+)@(\[[a-fA-F0-9:%.]+\]|[a-zA-Z0-9.-]+):(\d{1,5})(?:#(.+))?$")]
     private static partial Regex UserPassAtHostPattern();
 
+    [GeneratedRegex(@"^(\[[a-fA-F0-9:%.]+\]|[a-zA-Z0-9.-]+):(\d{1,5})@([^:@\s#]+):([^#\s]+)(?:#(.+))?$")]
+    private static partial Regex HostPortAtUserPassPattern();
+
     [GeneratedRegex(@"^(\[[a-fA-F0-9:%.]+\]|[a-zA-Z0-9.-]+):(\d{1,5}):([^:\s#]+):([^#\s]+)(?:#(.+))?$")]
     private static partial Regex FourColonPattern();
 
@@ -58,7 +61,8 @@ public static partial class ProxyNodeImporter
 
             if (TryParseSingleLine(line, defaultProtocol, defaultGroup, out var node, out string? error))
             {
-                bool isDup = existingFingerprints.Contains(node!.Fingerprint) || !seenInBatch.Add(node.Fingerprint);
+                if (node!.AllowInsecure) node.InsecureApproved = false;
+                bool isDup = existingFingerprints.Contains(node.Fingerprint) || !seenInBatch.Add(node.Fingerprint);
                 result.Items.Add(new BatchParseItem
                 {
                     LineNumber = lineNo,
@@ -168,12 +172,20 @@ public static partial class ProxyNodeImporter
             }
         }
 
-        // 4. user:pass@ip:port#备注
+        // 4. user:pass@ip:port#备注 或 ip:port@user:pass#备注
         var mAt = UserPassAtHostPattern().Match(line);
         if (mAt.Success && TryValidPort(mAt.Groups[4].Value, out int atPort))
         {
             node = BuildNode(defaultProtocol, mAt.Groups[3].Value, atPort,
                 mAt.Groups[1].Value, mAt.Groups[2].Value, NullIfEmpty(SafeUnescape(mAt.Groups[5].Value)), defaultGroup);
+            return true;
+        }
+
+        var mHostAt = HostPortAtUserPassPattern().Match(line);
+        if (mHostAt.Success && TryValidPort(mHostAt.Groups[2].Value, out int hostAtPort))
+        {
+            node = BuildNode(defaultProtocol, mHostAt.Groups[1].Value, hostAtPort,
+                mHostAt.Groups[3].Value, mHostAt.Groups[4].Value, NullIfEmpty(SafeUnescape(mHostAt.Groups[5].Value)), defaultGroup);
             return true;
         }
 
@@ -571,6 +583,52 @@ public static partial class ProxyNodeImporter
         string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
     /// <summary>
+    /// 从订阅响应头（profile-title / Content-Disposition）智能提取干净的订阅名称，绝不保留敏感 URL 路径/Token
+    /// </summary>
+    public static string ExtractSubscriptionName(IDictionary<string, IEnumerable<string>> headers, Uri subUri)
+    {
+        if (headers.TryGetValue("profile-title", out var titleVals))
+        {
+            string? rawTitle = titleVals.FirstOrDefault()?.Trim();
+            if (!string.IsNullOrWhiteSpace(rawTitle))
+            {
+                if (rawTitle.StartsWith("base64:", StringComparison.OrdinalIgnoreCase))
+                {
+                    string? decoded = TryDecodeBase64String(rawTitle[7..].Trim());
+                    if (!string.IsNullOrWhiteSpace(decoded) && !decoded.Contains("://", StringComparison.Ordinal))
+                        return decoded.Trim();
+                }
+                else if (!rawTitle.Contains("://", StringComparison.Ordinal))
+                {
+                    return SafeUnescape(rawTitle).Trim();
+                }
+            }
+        }
+
+        if (headers.TryGetValue("Content-Disposition", out var cdVals))
+        {
+            string? cd = cdVals.FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(cd))
+            {
+                var mStar = Regex.Match(cd, @"filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;\r\n]+)", RegexOptions.IgnoreCase);
+                if (mStar.Success)
+                {
+                    string candidate = Path.GetFileNameWithoutExtension(SafeUnescape(mStar.Groups[1].Value.Trim('"', ' ')));
+                    if (!string.IsNullOrWhiteSpace(candidate)) return candidate;
+                }
+                var mPlain = Regex.Match(cd, @"filename\s*=\s*""?([^"";\r\n]+)""?", RegexOptions.IgnoreCase);
+                if (mPlain.Success)
+                {
+                    string candidate = Path.GetFileNameWithoutExtension(SafeUnescape(mPlain.Groups[1].Value.Trim()));
+                    if (!string.IsNullOrWhiteSpace(candidate)) return candidate;
+                }
+            }
+        }
+
+        return subUri.Host;
+    }
+
+    /// <summary>
     /// 检测文本是否为 Clash / Mihomo YAML 订阅配置
     /// </summary>
     public static bool LooksLikeClashYaml(string text)
@@ -594,7 +652,8 @@ public static partial class ProxyNodeImporter
             int lineNo = i + 1;
             if (TryBuildNodeFromClashMap(map, defaultGroup, out var node, out string? error))
             {
-                bool isDup = existingFingerprints.Contains(node!.Fingerprint) || !seenInBatch.Add(node.Fingerprint);
+                if (node!.AllowInsecure) node.InsecureApproved = false;
+                bool isDup = existingFingerprints.Contains(node.Fingerprint) || !seenInBatch.Add(node.Fingerprint);
                 result.Items.Add(new BatchParseItem
                 {
                     LineNumber = lineNo,

@@ -2,6 +2,26 @@
 
 All notable changes to **Agent Proxy Hub** are documented in this file.
 
+## [v0.5.0] - 2026-11-28
+
+### 🛡️ 防风控门禁、凭据加密与安全护盾
+- **AES-256-GCM + DPAPI 本地凭据静态加密库 (`CredentialVault`)**：首次启动自动无损将旧版 `state.json` 明文节点密码、WireGuard 私钥及订阅 URL 加密迁移为 `enc:v1:...` 密文；`/api/overview`、`/api/nodes` 与批量预览对敏感字段全量脱敏，只返回 `hasCredential` 状态标记。
+- **启动前出口国家硬门禁 (Country Guard)**：每个 AI 席位均可指定预期出口国家/地区（如 `US / JP / SG`）；执行受控启动 (`POST /api/seats/{id}/launch`) 前自动经由席位独立端口做零凭据 Cloudflare Trace 国家核验，若实测国家不符、节点离线或跳过证书未批准则立即硬阻断启动，保留最近 12 条核验记录。
+- **`skip-cert-verify` 显式风险审批与防订阅静默漂移快照**：外部订阅或批量导入的 `allowInsecure` 节点默认进入「待批准跳过证书」状态，未经人工批准禁止验真或绑定；当多订阅源刷新导致已绑定节点的落地主机/密码发生变化时，保留原节点加注 `[快照锁定]` 并提醒用户确认，绝不静默切换出口。
+- **全局一键「隐私护盾 (Privacy Mode)」**：左下角工具栏一键切换打码模式，自动遮蔽真实出口 IP、代理主机地址、用户名与订阅域名，截屏分享零泄密。
+
+### 🌐 订阅源后台托管、连接实流审计与诊断中心
+- **多订阅源后台加密托管与 6h 自动同步**：支持同时管理多个订阅源，`ExtractSubscriptionName` 自动解析 `profile-title`（含 Base64）与 `Content-Disposition` 命名，支持单源一键刷新、`AbortController` 取消全量验真、以及 `host:port@user:pass` 简写解析。
+- **每席位近期 20 条 SNI 连接实流审计**：`MixedProxyServer` 为每个席位记录最近 20 条穿透连接摘要（时间、SNI 还原域名/端口、路由节点、字节数与耗时，零请求正文），在右侧检视栏可随时展开核验流量是否真实经过专线。
+- **脱敏运行日志中心 & 应用内检查更新**：新增 `HubEventLogger`（自动脱敏 `enc:v1:`、`Bearer`、URL 密码/Token），支持应用内分级别检索与复制诊断摘要；GitHub 项目浮窗支持后台静默检查最新版本并直接渲染发布说明。
+
+### 📊 用量统计扩展与终端/路径增强
+- **合并 `antigravity-cli` 日志（零双计）与缓存节省统计**：`SessionLogScanner` 自动扫描并合并 `~/.gemini/antigravity-cli/brain` 会话记录并按 `ID` 去重；用量大盘新增 **「Prompt Cache 累计节省金额」** 与 **365 天 AI 编码活跃热力图**（内置 Gemini 4 / Claude 4.5 等新定价规则）。
+- **按应用自定义路径与 `NO_PROXY`**：支持为 15 款 AI 应用单独配置 `customExecutablePath` 与附加内网绕过规则 `customNoProxy`，同步增强 Windows `wt.exe` / `pwsh.exe` 交互式终端探测。
+- **24 项 xUnit 单元测试全绿**：新增静态加密迁密、订阅防漂移快照、风险审批、`HubEventLogger` 脱敏与 365 天热力图回归测试。
+
+---
+
 ## [v0.4.4] - 2026-11-27
 
 ### 🛡️ 核心稳定性与并发缺陷清零

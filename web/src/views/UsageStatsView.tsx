@@ -10,8 +10,10 @@ import {
 import { CustomSelect } from '../components/CustomSelect';
 import { ClockRangeIcon, CpuModelIcon, PlusIcon, RefreshSpinIcon } from '../components/Icons';
 import { SegmentedTabs } from '../components/SegmentedTabs';
+import { maskIp } from '../privacy';
 
 interface Props {
+  privacyMode?: boolean;
   onToast: (msg: string) => void;
 }
 
@@ -31,7 +33,7 @@ const PAGE_SIZE_OPTIONS = [
   { value: '50', label: '每页 50 条' }
 ];
 
-export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
+export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }) => {
   const urlRange = new URLSearchParams(window.location.search).get('range');
   const [range, setRange] = useState<string>(
     urlRange && ['today', '24h', '7d', '30d', 'all'].includes(urlRange) ? urlRange : 'today'
@@ -225,9 +227,12 @@ export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
           </button>
 
           <button type="button" className={`kpi-strip-btn ${activeMetric === 'cacheRate' ? 'active' : ''}`} onClick={() => setActiveMetric('cacheRate')}>
-            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>缓存命中率</div>
+            <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>缓存命中率 / 累计节省</div>
             <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--accent-indigo)' }}>
               {(data?.cacheHitRate ?? 0).toFixed(1)}%
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent-emerald-text)', marginLeft: 8 }}>
+                省 ${(data?.totalCacheSavedUsd ?? 0).toFixed(2)}
+              </span>
             </div>
             <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
               上次同步 {syncTimeStr} ({data?.syncElapsedMs ?? 0} ms)
@@ -269,6 +274,39 @@ export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
           </div>
         </div>
       </div>
+
+      {/* 365 天 AI 编码活跃热力图 */}
+      {(data?.activityHeatmap?.length ?? 0) > 0 && (
+        <div className="surface-card surface-card-pad" style={{ padding: '14px 20px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span className="card-title-sm">365 天 AI 编码活跃热力图</span>
+              <span className="pill-tag tag-indigo num">
+                过去一年活跃 {data?.activeDaysLastYear ?? 0} 天
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11, color: 'var(--text-muted)' }}>
+              <span>少</span>
+              {[0, 1, 2, 3, 4].map(lv => (
+                <span key={lv} className={`heatmap-cell lv-${lv}`} style={{ display: 'inline-block' }} />
+              ))}
+              <span>多</span>
+            </div>
+          </div>
+
+          <div className="heatmap-scroll">
+            <div className="heatmap-grid">
+              {data?.activityHeatmap?.map(cell => (
+                <div
+                  key={cell.date}
+                  className={`heatmap-cell lv-${cell.level}`}
+                  title={`${cell.date} | 请求 ${cell.requests} 次 | Tokens ${formatCompactTokens(cell.totalTokens)} | 费用 $${cell.costUsd.toFixed(3)}`}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 底部多维明细无框纯白卡片 */}
       <div className="surface-card">
@@ -476,7 +514,7 @@ export const UsageStatsView: React.FC<Props> = ({ onToast }) => {
                   <td className="mono">{row.seatPort ?? '—'}</td>
                   <td>
                     <div style={{ fontWeight: 600 }}>{row.boundNodeName ?? '—'}</div>
-                    <div className="num" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{row.exitIp ?? '—'}</div>
+                    <div className="num" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{maskIp(row.exitIp, privacyMode)}</div>
                   </td>
                   <td className="num-r num">
                     ↑ {formatBytes(row.bytesTx)} · ↓ {formatBytes(row.bytesRx)} ({row.proxyConnections} 次)

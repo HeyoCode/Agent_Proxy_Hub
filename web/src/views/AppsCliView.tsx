@@ -1,15 +1,17 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { OverviewResponse, api, formatBytes } from '../api';
 import { CheckTinyIcon, CopyIcon, PlayLaunchIcon, PlugTakeoverIcon, SeatBrandIcon } from '../components/Icons';
 import { SegmentedTabs } from '../components/SegmentedTabs';
+import { maskIp } from '../privacy';
 
 interface Props {
   data: OverviewResponse;
+  privacyMode?: boolean;
   onReload: () => Promise<void>;
   onToast: (msg: string) => void;
 }
 
-export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
+export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onReload, onToast }) => {
   const [cliTab, setCliTab] = useState<'ps' | 'zsh' | 'claude' | 'agy'>(data.os === 'mac' ? 'zsh' : 'ps');
   const [copied, setCopied] = useState(false);
   const [busySeat, setBusySeat] = useState<string | null>(null);
@@ -18,19 +20,52 @@ export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
   const [appFilter, setAppFilter] = useState<'all' | 'active'>('all');
 
   const focusedSeat = data.seats.find(s => s.id === focusedSeatId) ?? data.seats[0];
+  const [customExeDraft, setCustomExeDraft] = useState('');
+  const [customNoProxyDraft, setCustomNoProxyDraft] = useState('');
+  const [savingSeatPrefs, setSavingSeatPrefs] = useState(false);
+
+  useEffect(() => {
+    setCustomExeDraft(focusedSeat?.customExecutablePath ?? '');
+    setCustomNoProxyDraft(focusedSeat?.customNoProxy ?? '');
+  }, [focusedSeat?.id, focusedSeat?.customExecutablePath, focusedSeat?.customNoProxy]);
+
   const focusedCmdWin = focusedSeat?.launchCommandWin || focusedSeat?.id || 'claude';
   const focusedCmdMac = focusedSeat?.launchCommandMac || focusedSeat?.id || 'claude';
   const focusedPort = focusedSeat?.localPort ?? 17891;
+  const effectiveNoProxyWin = [
+    'localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8',
+    ...(focusedSeat?.customNoProxy ? focusedSeat.customNoProxy.split(',').map(s => s.trim()).filter(Boolean) : [])
+  ].join(',');
+  const effectiveNoProxyMac = [
+    'localhost,127.0.0.1,::1',
+    ...(focusedSeat?.customNoProxy ? focusedSeat.customNoProxy.split(',').map(s => s.trim()).filter(Boolean) : [])
+  ].join(',');
 
   const codeText = (() => {
     if (cliTab === 'ps' && focusedSeat) {
-      return `# Windows PowerShell · ${focusedSeat.name} 独立专线注入（不改系统代理，绕过 Clash）\n$env:HTTPS_PROXY="http://127.0.0.1:${focusedPort}"\n$env:HTTP_PROXY="http://127.0.0.1:${focusedPort}"\n$env:ALL_PROXY="socks5h://127.0.0.1:${focusedPort}"\n$env:NO_PROXY="localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8"\n${focusedCmdWin}`;
+      return `# Windows PowerShell · ${focusedSeat.name} 独立专线注入（不改系统代理，绕过 Clash）\n$env:HTTPS_PROXY="http://127.0.0.1:${focusedPort}"\n$env:HTTP_PROXY="http://127.0.0.1:${focusedPort}"\n$env:ALL_PROXY="socks5h://127.0.0.1:${focusedPort}"\n$env:NO_PROXY="${effectiveNoProxyWin}"\n${focusedCmdWin}`;
     }
     if (cliTab === 'zsh' && focusedSeat) {
-      return `# macOS / Linux Zsh · ${focusedSeat.name} 独立专线注入（不改系统代理，绕过 Surge/Clash）\nexport HTTPS_PROXY="http://127.0.0.1:${focusedPort}"\nexport HTTP_PROXY="http://127.0.0.1:${focusedPort}"\nexport ALL_PROXY="socks5h://127.0.0.1:${focusedPort}"\nexport NO_PROXY="localhost,127.0.0.1,::1"\n${focusedCmdMac}`;
+      return `# macOS / Linux Zsh · ${focusedSeat.name} 独立专线注入（不改系统代理，绕过 Surge/Clash）\nexport HTTPS_PROXY="http://127.0.0.1:${focusedPort}"\nexport HTTP_PROXY="http://127.0.0.1:${focusedPort}"\nexport ALL_PROXY="socks5h://127.0.0.1:${focusedPort}"\nexport NO_PROXY="${effectiveNoProxyMac}"\n${focusedCmdMac}`;
     }
     return data.cliSnippets[cliTab] ?? '';
   })();
+
+  async function handleSaveSeatOverrides(e: React.FormEvent) {
+    e.preventDefault();
+    if (!focusedSeat || savingSeatPrefs) return;
+    setSavingSeatPrefs(true);
+    try {
+      await api.updateSeat(focusedSeat.id, {
+        customExecutablePath: customExeDraft.trim(),
+        customNoProxy: customNoProxyDraft.trim()
+      });
+      await onReload();
+      onToast(`已保存 ${focusedSeat.name} 自定义可执行路径与内网绕过规则`);
+    } finally {
+      setSavingSeatPrefs(false);
+    }
+  }
 
   const filteredSeats = data.seats.filter(seat => {
     const tk = data.seatTakeovers?.find(t => t.seatId === seat.id);
@@ -176,7 +211,7 @@ export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
                 </div>
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: 'var(--text-secondary)' }}>
-                  <span>绑定专线：<strong style={{ color: 'var(--text-primary)' }}>{bound?.name ?? '未绑定'}</strong></span>
+                  <span>绑定专线：<strong style={{ color: 'var(--text-primary)' }}>{bound?.name ?? '未绑定'}{bound?.exitIp && bound.exitIp !== '—' ? ` (${maskIp(bound.exitIp, privacyMode)})` : ''}</strong></span>
                   <span className="num">直出吞吐：<strong style={{ color: 'var(--text-primary)' }}>↑ {formatBytes(snap?.bytesTx ?? 0)} / ↓ {formatBytes(snap?.bytesRx ?? 0)}</strong></span>
                 </div>
 
@@ -259,6 +294,47 @@ export const AppsCliView: React.FC<Props> = ({ data, onReload, onToast }) => {
             Token 用量直接扫描 <span className="mono">.claude / .codex / .gemini</span> 会话日志；右栏「累计直出吞吐」统计经由 <span className="mono">127.0.0.1:1789x</span> 端口的真实 TCP 流量。完成左侧「一键接管」并重启对应软件后，流量与 Token 即会同步归集。
           </div>
         </div>
+
+        {focusedSeat && (
+          <form
+            onSubmit={handleSaveSeatOverrides}
+            style={{ marginTop: 14, padding: '12px 14px', borderRadius: 12, background: 'var(--bg-subtle)', display: 'flex', flexDirection: 'column', gap: 10 }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <strong style={{ fontSize: 12.5 }}>{focusedSeat.name} · 自定义启动路径与绕过域</strong>
+              <span className="pill-tag tag-indigo mono">NO_PROXY</span>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                自定义可执行文件 / CLI 命令路径（留空自动探测）
+              </div>
+              <input
+                className="clean-input mono"
+                style={{ fontSize: 11.5 }}
+                placeholder={data.os === 'mac' ? '例如：/Applications/Cursor.app' : '例如：D:\\Apps\\Cursor\\Cursor.exe'}
+                value={customExeDraft}
+                onChange={e => setCustomExeDraft(e.target.value)}
+              />
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                附加内网绕过规则（追加到 NO_PROXY，逗号分隔）
+              </div>
+              <input
+                className="clean-input mono"
+                style={{ fontSize: 11.5 }}
+                placeholder="例如：*.internal.corp, git.company.local, 172.25.0.0/16"
+                value={customNoProxyDraft}
+                onChange={e => setCustomNoProxyDraft(e.target.value)}
+              />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+              <button type="submit" className="btn-pill btn-indigo btn-sm" disabled={savingSeatPrefs}>
+                {savingSeatPrefs ? '保存中...' : '保存应用级配置'}
+              </button>
+            </div>
+          </form>
+        )}
       </div>
     </div>
   );

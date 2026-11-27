@@ -20,9 +20,12 @@ export interface ProxyNode {
   port: number;
   username?: string | null;
   password?: string | null;
+  hasCredential?: boolean;
   method?: string | null;
   sni?: string | null;
   allowInsecure?: boolean;
+  insecureApproved?: boolean;
+  sourceSubscriptionId?: string | null;
   extra?: Record<string, string> | null;
   requiresSidecarEngine?: boolean;
   engineKind?: 'native' | 'sing-box';
@@ -50,6 +53,67 @@ export interface AppSeat {
   captureMode: string;
   launchCommandWin?: string | null;
   launchCommandMac?: string | null;
+  expectedCountryCode?: string | null;
+  customNoProxy?: string | null;
+  customExecutablePath?: string | null;
+  boundNodeSnapshotHash?: string | null;
+  hasNodeDrift?: boolean;
+}
+
+export interface SubscriptionSourceDto {
+  id: string;
+  name: string;
+  group: string;
+  hostHint: string;
+  maskedUrl: string;
+  proxyUrl?: string | null;
+  autoRefreshHours: number;
+  lastSyncedAt?: string | null;
+  nodeCount: number;
+  driftCount: number;
+  lastError?: string | null;
+}
+
+export interface CountryCheckRecord {
+  timestamp: string;
+  seatId: string;
+  expectedCountry?: string | null;
+  observedCountry?: string | null;
+  exitIp: string;
+  latencyMs?: number | null;
+  passed: boolean;
+  reason: string;
+}
+
+export interface RecentConnectionEntry {
+  timestamp: string;
+  seatId: string;
+  targetHost: string;
+  targetPort: number;
+  sniRecovered: boolean;
+  routeSummary: string;
+  bytesTx: number;
+  bytesRx: number;
+  durationMs: number;
+  outcome: string;
+}
+
+export interface HubLogEntry {
+  timestamp: string;
+  level: string;
+  category: string;
+  message: string;
+}
+
+export interface UpdateCheckResult {
+  ok: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  publishedAt?: string | null;
+  htmlUrl: string;
+  releaseNotes?: string | null;
+  error?: string | null;
 }
 
 export interface NetworkAdapterInfo {
@@ -154,6 +218,7 @@ export interface OverviewResponse {
   isolation: IsolationSettings;
   seats: AppSeat[];
   nodes: ProxyNode[];
+  subscriptions?: SubscriptionSourceDto[];
   trafficSnapshots: SeatTrafficSnapshot[];
   seatTakeovers?: SeatTakeoverStatus[];
   sidecarEngine?: SidecarEngineStatus;
@@ -190,7 +255,17 @@ export interface UsageLogEntry {
   firstTokenSeconds?: number | null;
   tokensPerSecond?: number | null;
   costUsd?: number | null;
+  cacheSavedUsd?: number;
   isPriced: boolean;
+  workspace?: string | null;
+}
+
+export interface DailyHeatmapCell {
+  date: string;
+  requests: number;
+  totalTokens: number;
+  costUsd: number;
+  level: number;
 }
 
 export interface UsageBucketPoint {
@@ -237,6 +312,7 @@ export interface UsageDashboardResponse {
   scannedFilesCount: number;
   syncElapsedMs: number;
   totalCostUsd: number;
+  totalCacheSavedUsd?: number;
   totalRequests: number;
   totalTokens: number;
   effectiveInputTokens: number;
@@ -246,6 +322,8 @@ export interface UsageDashboardResponse {
   cacheHitRate: number;
   pricedRequests: number;
   unpricedRequests: number;
+  activeDaysLastYear?: number;
+  activityHeatmap?: DailyHeatmapCell[];
   totalProxyTxBytes: number;
   totalProxyRxBytes: number;
   totalProxyTxBytesPerSec?: number;
@@ -308,10 +386,25 @@ export const api = {
     extra?: Record<string, string>;
   }) => requestJson<ProxyNode>('/api/nodes/manual', { method: 'POST', body: JSON.stringify(body) }),
   fetchSubscription: (url: string, defaultGroup: string, proxyUrl?: string) =>
-    requestJson<{ rawText: string; preview: BatchParseResult; detectedFormat: string }>('/api/nodes/fetch-subscription', {
+    requestJson<{ rawText: string; preview: BatchParseResult; detectedFormat: string; suggestedTitle?: string }>('/api/nodes/fetch-subscription', {
       method: 'POST',
       body: JSON.stringify({ url, defaultGroup, proxyUrl: proxyUrl?.trim() || undefined })
     }),
+  getSubscriptions: () => requestJson<SubscriptionSourceDto[]>('/api/subscriptions'),
+  upsertSubscription: (body: { id?: string; name?: string; url: string; group?: string; proxyUrl?: string; autoRefreshHours?: number }) =>
+    requestJson<{ subscription: SubscriptionSourceDto; diff: { addedCount: number; updatedCount: number; removedCount: number; driftCount: number; totalInSubscription: number } }>(
+      '/api/subscriptions',
+      { method: 'POST', body: JSON.stringify(body) }
+    ),
+  refreshSubscription: (id: string) =>
+    requestJson<{ subscription: SubscriptionSourceDto; diff: { addedCount: number; updatedCount: number; removedCount: number; driftCount: number; totalInSubscription: number } }>(
+      `/api/subscriptions/${id}/refresh`,
+      { method: 'POST' }
+    ),
+  deleteSubscription: (id: string, removeNodes = false) =>
+    requestJson<{ removed: number }>(`/api/subscriptions/${id}?removeNodes=${removeNodes}`, { method: 'DELETE' }),
+  approveNodeInsecure: (id: string) =>
+    requestJson<ProxyNode>(`/api/nodes/${id}/approve-insecure`, { method: 'POST' }),
   previewBatch: (rawText: string, defaultProtocol: ProxyProtocol, defaultGroup: string) =>
     requestJson<BatchParseResult>('/api/nodes/batch-preview', {
       method: 'POST',
@@ -323,9 +416,18 @@ export const api = {
       body: JSON.stringify({ rawText, defaultProtocol, defaultGroup })
     }),
   deleteNode: (id: string) => requestJson<{ removed: number }>(`/api/nodes/${id}`, { method: 'DELETE' }),
-  verifyNode: (id: string) => requestJson<ProxyNode>(`/api/nodes/${id}/verify`, { method: 'POST' }),
-  verifyAllNodes: () => requestJson<ProxyNode[]>('/api/nodes/verify-all', { method: 'POST' }),
-  updateSeat: (id: string, body: { enabled?: boolean; boundNodeId?: string; relayNodeId?: string; killSwitchEnabled?: boolean }) =>
+  verifyNode: (id: string, signal?: AbortSignal) => requestJson<ProxyNode>(`/api/nodes/${id}/verify`, { method: 'POST', signal }),
+  verifyAllNodes: (signal?: AbortSignal) => requestJson<ProxyNode[]>('/api/nodes/verify-all', { method: 'POST', signal }),
+  updateSeat: (id: string, body: {
+    enabled?: boolean;
+    boundNodeId?: string;
+    relayNodeId?: string;
+    killSwitchEnabled?: boolean;
+    expectedCountryCode?: string;
+    customNoProxy?: string;
+    customExecutablePath?: string;
+    acknowledgeDrift?: boolean;
+  }) =>
     requestJson<AppSeat>(`/api/seats/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   toggleAllSeats: (enabled: boolean) =>
     requestJson<AppSeat[]>('/api/seats/toggle-all', { method: 'POST', body: JSON.stringify({ enabled }) }),
@@ -335,9 +437,18 @@ export const api = {
       { method: 'POST', body: JSON.stringify({ enabled }) }
     ),
   launchSeatApp: (id: string) =>
-    requestJson<{ ok: boolean; message: string; seatTakeovers: SeatTakeoverStatus[] }>(
+    requestJson<{ ok: boolean; blockedByCountryGuard?: boolean; countryCheck?: CountryCheckRecord; message: string; seatTakeovers: SeatTakeoverStatus[] }>(
       `/api/seats/${id}/launch`,
       { method: 'POST' }
+    ),
+  checkSeatCountry: (id: string) =>
+    requestJson<{ check: CountryCheckRecord; history: CountryCheckRecord[] }>(
+      `/api/seats/${id}/check-country`,
+      { method: 'POST' }
+    ),
+  getSeatConnections: (id: string, limit = 20) =>
+    requestJson<{ connections: RecentConnectionEntry[]; countryHistory: CountryCheckRecord[] }>(
+      `/api/seats/${id}/connections?limit=${limit}`
     ),
   verifySeatTunnel: (id: string) =>
     requestJson<TunnelVerificationResult>(`/api/seats/${id}/verify-tunnel`, { method: 'POST' }),
@@ -389,8 +500,25 @@ export const api = {
   getPricings: () => requestJson<ModelPricingRule[]>('/api/stats/pricing'),
   upsertPricing: (body: Omit<ModelPricingRule, 'isCustom'>) =>
     requestJson<ModelPricingRule[]>('/api/stats/pricing', { method: 'PUT', body: JSON.stringify(body) }),
-  openRepo: () =>
-    requestJson<{ opened: boolean; url: string; error?: string }>('/api/system/open-repo', { method: 'POST' })
+  getDiagnosticLogs: (params?: { level?: string; keyword?: string; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.level) qs.set('level', params.level);
+    if (params?.keyword) qs.set('keyword', params.keyword);
+    if (params?.limit) qs.set('limit', String(params.limit));
+    return requestJson<HubLogEntry[]>(`/api/diagnostics/logs?${qs.toString()}`);
+  },
+  clearDiagnosticLogs: () => requestJson<{ cleared: boolean }>('/api/diagnostics/logs', { method: 'DELETE' }),
+  checkUpdate: (force = false, proxyUrl?: string) => {
+    const qs = new URLSearchParams();
+    if (force) qs.set('force', 'true');
+    if (proxyUrl?.trim()) qs.set('proxyUrl', proxyUrl.trim());
+    return requestJson<UpdateCheckResult>(`/api/system/update-check?${qs.toString()}`);
+  },
+  openRepo: (targetUrl?: string) =>
+    requestJson<{ opened: boolean; url: string; error?: string }>(
+      targetUrl ? `/api/system/open-repo?targetUrl=${encodeURIComponent(targetUrl)}` : '/api/system/open-repo',
+      { method: 'POST' }
+    )
 };
 
 export function formatBytes(bytes: number): string {

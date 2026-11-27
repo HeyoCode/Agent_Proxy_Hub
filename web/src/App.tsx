@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { OverviewResponse, api } from './api';
+import { HubLogEntry, OverviewResponse, UpdateCheckResult, api } from './api';
 import {
   AppsNavIcon,
   BrandLogoIcon,
@@ -8,10 +8,15 @@ import {
   MoonIcon,
   NodesNavIcon,
   OverviewNavIcon,
+  RefreshSpinIcon,
+  ShieldPrivacyIcon,
   SunIcon,
   SystemThemeIcon,
+  TerminalLogIcon,
   UsageNavIcon
 } from './components/Icons';
+import { SegmentedTabs } from './components/SegmentedTabs';
+import { loadPrivacyMode, savePrivacyMode } from './privacy';
 import {
   ResolvedTheme,
   ThemePreference,
@@ -40,7 +45,7 @@ type TabKey = 'overview' | 'usage' | 'nodes' | 'apps' | 'isolation';
 
 const FALLBACK_PROJECT = {
   name: 'Agent Proxy Hub',
-  version: '0.4.4',
+  version: '0.5.0',
   repoOwner: 'HeyoCode',
   repoName: 'Agent_Proxy_Hub',
   repoSlug: 'HeyoCode/Agent_Proxy_Hub',
@@ -80,6 +85,13 @@ export const App: React.FC = () => {
   const [showManual, setShowManual] = useState(query.get('manual') === '1');
   const [showBatch, setShowBatch] = useState(query.get('batch') === '1');
   const [showRepoModal, setShowRepoModal] = useState(query.get('about') === '1');
+  const [showLogsModal, setShowLogsModal] = useState(false);
+  const [privacyMode, setPrivacyMode] = useState<boolean>(() => loadPrivacyMode());
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [logs, setLogs] = useState<HubLogEntry[]>([]);
+  const [logLevel, setLogLevel] = useState<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL');
+  const [logSearch, setLogSearch] = useState('');
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -115,6 +127,49 @@ export const App: React.FC = () => {
       window.localStorage.setItem('aph_throughput_mode', mode);
     } catch { }
   }, []);
+
+  const handleTogglePrivacyMode = useCallback(() => {
+    setPrivacyMode(prev => {
+      const next = !prev;
+      savePrivacyMode(next);
+      toast(next ? '已开启隐私护盾：IP、主机与订阅地址已全局打码' : '已关闭隐私护盾：恢复完整网络地址显示');
+      return next;
+    });
+  }, [toast]);
+
+  const loadDiagnosticLogs = useCallback(async (lv = logLevel, kw = logSearch) => {
+    try {
+      const list = await api.getDiagnosticLogs({ level: lv, keyword: kw, limit: 200 });
+      setLogs(list);
+    } catch { }
+  }, [logLevel, logSearch]);
+
+  const handleCheckUpdate = useCallback(async (force = false) => {
+    setCheckingUpdate(true);
+    try {
+      const res = await api.checkUpdate(force);
+      setUpdateInfo(res);
+      if (force) {
+        if (res.hasUpdate) toast(`发现新版本 v${res.latestVersion}（当前 v${res.currentVersion}）`);
+        else if (res.ok) toast(`当前 v${res.currentVersion} 已是最新版本`);
+        else toast(`检查更新失败：${res.error || '请确认网络'}`);
+      }
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      void api.checkUpdate(false).then(setUpdateInfo).catch(() => {});
+    }, 3000);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  useEffect(() => {
+    if (!showLogsModal) return;
+    void loadDiagnosticLogs();
+  }, [showLogsModal, logLevel, logSearch, loadDiagnosticLogs]);
 
   useEffect(() => {
     void reloadOverview();
@@ -232,12 +287,38 @@ export const App: React.FC = () => {
         <div className="rail-bottom">
           <button
             type="button"
+            className={`rail-utility-btn ${privacyMode ? 'active-privacy' : ''}`}
+            aria-label="切换全局隐私护盾打码模式"
+            onClick={handleTogglePrivacyMode}
+          >
+            <ShieldPrivacyIcon masked={privacyMode} size={17} />
+            <span className="rail-tooltip">
+              {privacyMode ? '隐私护盾已开启 · 截屏防泄密' : '隐私护盾 · 隐藏真实 IP 与地址'}
+            </span>
+          </button>
+
+          <button
+            type="button"
             className="rail-utility-btn"
+            aria-label="打开脱敏运行日志与诊断中心"
+            onClick={() => setShowLogsModal(true)}
+          >
+            <TerminalLogIcon size={17} />
+            <span className="rail-tooltip">运行日志 &amp; 诊断</span>
+          </button>
+
+          <button
+            type="button"
+            className={`rail-utility-btn ${updateInfo?.hasUpdate ? 'has-badge' : ''}`}
             aria-label="打开 GitHub 开源项目信息"
             onClick={() => setShowRepoModal(true)}
           >
             <GitHubIcon size={17} />
-            <span className="rail-tooltip">{project.repoSlug} v{project.version}</span>
+            <span className="rail-tooltip">
+              {updateInfo?.hasUpdate
+                ? `发现新版本 v${updateInfo.latestVersion} · 点击查看`
+                : `${project.repoSlug} v${project.version}`}
+            </span>
           </button>
 
           <button
@@ -325,6 +406,7 @@ export const App: React.FC = () => {
                 <OverviewView
                   data={overview}
                   selectedSeatId={selectedSeatId}
+                  privacyMode={privacyMode}
                   onSelectSeat={setSelectedSeatId}
                   onReload={reloadOverview}
                   onToast={toast}
@@ -332,10 +414,12 @@ export const App: React.FC = () => {
                   onGoStats={() => setTab('usage')}
                 />
               )}
-              {tab === 'usage' && <UsageStatsView onToast={toast} />}
+              {tab === 'usage' && <UsageStatsView privacyMode={privacyMode} onToast={toast} />}
               {tab === 'nodes' && (
                 <NodesView
                   nodes={overview.nodes}
+                  subscriptions={overview.subscriptions ?? []}
+                  privacyMode={privacyMode}
                   showManual={showManual}
                   showBatch={showBatch}
                   onCloseModals={() => { setShowManual(false); setShowBatch(false); }}
@@ -345,18 +429,19 @@ export const App: React.FC = () => {
                   onToast={toast}
                 />
               )}
-              {tab === 'apps' && <AppsCliView data={overview} onReload={reloadOverview} onToast={toast} />}
+              {tab === 'apps' && <AppsCliView data={overview} privacyMode={privacyMode} onReload={reloadOverview} onToast={toast} />}
               {tab === 'isolation' && <IsolationView onReloadOverview={reloadOverview} onToast={toast} />}
             </div>
           )}
         </main>
       </div>
 
-      {/* 3. 右侧午夜深蓝常驻检视栏 (308px) */}
+      {/* 3. 右侧主题自适应常驻检视栏 (308px) */}
       <RightInspector
         project={project}
         overview={overview}
         selectedSeatId={selectedSeatId}
+        privacyMode={privacyMode}
         throughputMode={throughputMode}
         onChangeThroughputMode={handleChangeThroughputMode}
         maximized={maximized}
@@ -365,10 +450,10 @@ export const App: React.FC = () => {
         onOpenBatch={() => { setTab('nodes'); setShowBatch(true); }}
       />
 
-      {/* 单层极简 GitHub 项目信息浮窗 */}
+      {/* 单层极简 GitHub 项目信息与更新检查浮窗 */}
       {showRepoModal && (
         <div className="modal-backdrop" onClick={() => setShowRepoModal(false)}>
-          <div className="modal-surface narrow" style={{ maxWidth: 540 }} onClick={e => e.stopPropagation()}>
+          <div className="modal-surface narrow" style={{ maxWidth: 560 }} onClick={e => e.stopPropagation()}>
             <div style={{ padding: '20px 22px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <div
@@ -389,6 +474,9 @@ export const App: React.FC = () => {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <strong style={{ fontSize: 15.5 }}>{project.name}</strong>
                     <span className="pill-tag tag-indigo num">v{project.version}</span>
+                    {updateInfo?.hasUpdate && (
+                      <span className="pill-tag tag-emerald num">新版 v{updateInfo.latestVersion}</span>
+                    )}
                   </div>
                   <div className="num" style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
                     <span className="mono">{project.repoSlug}</span> · {project.author}
@@ -402,12 +490,23 @@ export const App: React.FC = () => {
 
             <div style={{ padding: '16px 22px', display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div style={{ fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-                {project.description}。支持物理网卡直绑绕过 Clash/Wintun、Fake-IP TLS SNI 自动还原、全协议静态代理调度与免解密双源 AI 用量统计。
+                {project.description}。支持物理网卡直绑绕过 Clash/Wintun、Fake-IP TLS SNI 还原、出口国家门禁、全协议静态代理调度与免解密双源 AI 用量统计。
               </div>
+
+              {updateInfo?.hasUpdate && updateInfo.releaseNotes && (
+                <div style={{ background: 'var(--bg-subtle)', borderRadius: 10, padding: '10px 12px', maxHeight: 140, overflowY: 'auto' }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: 'var(--accent-emerald-text)', marginBottom: 4 }}>
+                    🎉 v{updateInfo.latestVersion} 更新说明
+                  </div>
+                  <pre style={{ margin: 0, fontFamily: 'var(--font-sans)', fontSize: 11.5, whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                    {updateInfo.releaseNotes.slice(0, 600)}
+                  </pre>
+                </div>
+              )}
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 <span className="pill-tag tag-emerald">IP_UNICAST_IF / IP_BOUND_IF 直绑</span>
-                <span className="pill-tag tag-indigo mono">SOCKS5 / HTTP / HTTPS</span>
+                <span className="pill-tag tag-indigo mono">AES-256-GCM 凭据加密</span>
                 <span className="pill-tag tag-neutral">Windows &amp; macOS</span>
               </div>
 
@@ -416,14 +515,127 @@ export const App: React.FC = () => {
               </div>
             </div>
 
-            <div className="modal-footer-bar" style={{ justifyContent: 'space-between' }}>
+            <div className="modal-footer-bar" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
               <div style={{ display: 'flex', gap: 8 }}>
                 <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleCopyText(project.repoUrl, '仓库链接')}>复制链接</button>
-                <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleCopyText(`git clone ${project.cloneUrl}`, ' Clone 命令')}>复制 Clone</button>
+                <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleCheckUpdate(true)} disabled={checkingUpdate}>
+                  <RefreshSpinIcon size={12} spinning={checkingUpdate} />
+                  <span>{checkingUpdate ? '检查中' : '检查更新'}</span>
+                </button>
               </div>
-              <button type="button" className="btn-pill btn-indigo" onClick={handleOpenGitHub}>
-                <GitHubIcon size={14} />
-                <span>打开 GitHub 仓库</span>
+              {updateInfo?.hasUpdate ? (
+                <button
+                  type="button"
+                  className="btn-pill btn-indigo"
+                  onClick={() => void api.openRepo(updateInfo.htmlUrl).then(() => toast('已在浏览器打开发布页'))}
+                >
+                  <GitHubIcon size={14} />
+                  <span>下载 v{updateInfo.latestVersion}</span>
+                </button>
+              ) : (
+                <button type="button" className="btn-pill btn-indigo" onClick={handleOpenGitHub}>
+                  <GitHubIcon size={14} />
+                  <span>打开 GitHub 仓库</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 脱敏运行日志与诊断中心弹窗 */}
+      {showLogsModal && (
+        <div className="modal-backdrop" onClick={() => setShowLogsModal(false)}>
+          <div className="modal-surface wide-import" onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '16px 22px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <div>
+                <div style={{ fontSize: 15.5, fontWeight: 700, color: 'var(--text-primary)' }}>运行日志与脱敏诊断中心</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                  自动过滤所有代理密码、Bearer Token 与加密载荷；记录 NIC 锁定、订阅同步、国家门禁与熔断事件
+                </div>
+              </div>
+              <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => setShowLogsModal(false)}>关闭</button>
+            </div>
+            <div className="soft-divider" />
+
+            <div style={{ padding: '12px 22px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <SegmentedTabs<'ALL' | 'INFO' | 'WARN' | 'ERROR'>
+                value={logLevel}
+                onChange={setLogLevel}
+                items={[
+                  { value: 'ALL', label: '全部' },
+                  { value: 'INFO', label: 'INFO' },
+                  { value: 'WARN', label: 'WARN' },
+                  { value: 'ERROR', label: 'ERROR' }
+                ]}
+              />
+              <div style={{ display: 'flex', gap: 8, flex: 1, justifyContent: 'flex-end', minWidth: 220 }}>
+                <input
+                  className="clean-input"
+                  style={{ maxWidth: 240, height: 32, fontSize: 12 }}
+                  placeholder="搜索分类或关键字（如 GUARD / SUB）..."
+                  value={logSearch}
+                  onChange={e => setLogSearch(e.target.value)}
+                />
+                <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => void loadDiagnosticLogs()}>刷新</button>
+                <button
+                  type="button"
+                  className="btn-pill btn-soft btn-sm"
+                  onClick={() => void api.clearDiagnosticLogs().then(() => { setLogs([]); toast('已清空内存运行日志'); })}
+                >
+                  清空
+                </button>
+              </div>
+            </div>
+
+            <div style={{ padding: '0 22px 16px', maxHeight: '54vh', overflowY: 'auto' }}>
+              {logs.length === 0 ? (
+                <div style={{ padding: 36, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12.5 }}>
+                  暂无匹配的运行事件记录
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {logs.map((item, idx) => (
+                    <div
+                      key={`${item.timestamp}-${idx}`}
+                      style={{
+                        background: 'var(--bg-subtle)',
+                        borderRadius: 9,
+                        padding: '8px 12px',
+                        display: 'grid',
+                        gridTemplateColumns: '76px 56px 64px minmax(0, 1fr)',
+                        gap: 10,
+                        alignItems: 'center',
+                        fontSize: 11.5
+                      }}
+                    >
+                      <span className="num" style={{ color: 'var(--text-muted)' }}>
+                        {new Date(item.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}
+                      </span>
+                      <span className={`pill-tag ${item.level === 'ERROR' ? 'tag-coral' : (item.level === 'WARN' ? 'tag-amber' : 'tag-emerald')} mono`}>
+                        {item.level}
+                      </span>
+                      <span className="pill-tag tag-neutral mono">{item.category}</span>
+                      <span style={{ color: 'var(--text-primary)', wordBreak: 'break-all' }}>{item.message}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="modal-footer-bar" style={{ justifyContent: 'space-between' }}>
+              <span className="num" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                当前显示 {logs.length} 条脱敏事件 · 日志目录 ~/.agent-proxy-hub/logs/
+              </span>
+              <button
+                type="button"
+                className="btn-pill btn-indigo btn-sm"
+                onClick={() => {
+                  const summary = logs.slice(0, 60).map(l => `[${l.timestamp}] [${l.level}] [${l.category}] ${l.message}`).join('\n');
+                  void handleCopyText(summary || '暂无日志', '脱敏诊断摘要');
+                }}
+              >
+                复制脱敏诊断摘要
               </button>
             </div>
           </div>

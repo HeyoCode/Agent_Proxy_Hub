@@ -1,5 +1,16 @@
-import React, { useMemo, useState } from 'react';
-import { AppSeat, OverviewResponse, ProjectMetadataDto, ProxyNode, api, formatBytes, formatRate } from '../api';
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  AppSeat,
+  CountryCheckRecord,
+  OverviewResponse,
+  ProjectMetadataDto,
+  ProxyNode,
+  RecentConnectionEntry,
+  api,
+  formatBytes,
+  formatRate
+} from '../api';
+import { maskEndpoint, maskIp } from '../privacy';
 import {
   sendWindowCommand,
   startWindowDrag,
@@ -7,8 +18,10 @@ import {
 } from '../windowBridge';
 import { CustomSelect, SelectOption } from './CustomSelect';
 import {
+  AlertTriangleIcon,
   CheckTinyIcon,
   CopyIcon,
+  GlobeGuardIcon,
   PlayLaunchIcon,
   PlugTakeoverIcon,
   PlusIcon,
@@ -23,6 +36,7 @@ interface Props {
   project: ProjectMetadataDto;
   overview: OverviewResponse | null;
   selectedSeatId: string;
+  privacyMode?: boolean;
   throughputMode: 'realtime' | 'cumulative';
   onChangeThroughputMode: (mode: 'realtime' | 'cumulative') => void;
   maximized: boolean;
@@ -30,6 +44,17 @@ interface Props {
   onToast: (msg: string) => void;
   onOpenBatch: () => void;
 }
+
+const COUNTRY_GUARD_OPTIONS: SelectOption[] = [
+  { value: '', label: '不限制出口地区', sublabel: '按绑定节点直接放行' },
+  { value: 'US', label: '🇺🇸 美国 (US)', sublabel: '推荐用于 Claude / OpenAI / Cursor' },
+  { value: 'JP', label: '🇯🇵 日本 (JP)', sublabel: '亚洲低延迟干净原生出口' },
+  { value: 'SG', label: '🇸🇬 新加坡 (SG)', sublabel: '东南亚低延迟节点' },
+  { value: 'GB', label: '🇬🇧 英国 (GB)', sublabel: '欧洲纯净住宅/原生 IP' },
+  { value: 'DE', label: '🇩🇪 德国 (DE)', sublabel: '欧洲原生出口' },
+  { value: 'CA', label: '🇨🇦 加拿大 (CA)', sublabel: '北美合规出口' },
+  { value: 'TW', label: '🇹🇼 台湾 (TW)', sublabel: '部分 Gemini 服务适用' }
+];
 
 const RADAR_SLOTS: { x: number; y: number }[] = [
   { x: 26, y: 24 },
@@ -44,6 +69,7 @@ export const RightInspector: React.FC<Props> = ({
   project,
   overview,
   selectedSeatId,
+  privacyMode = false,
   throughputMode,
   onChangeThroughputMode,
   maximized,
@@ -54,6 +80,10 @@ export const RightInspector: React.FC<Props> = ({
   const [verifying, setVerifying] = useState(false);
   const [togglingTakeover, setTogglingTakeover] = useState(false);
   const [launching, setLaunching] = useState(false);
+  const [checkingCountry, setCheckingCountry] = useState(false);
+  const [showConnections, setShowConnections] = useState(false);
+  const [recentConns, setRecentConns] = useState<RecentConnectionEntry[]>([]);
+  const [lastCountryCheck, setLastCountryCheck] = useState<CountryCheckRecord | null>(null);
   const [copied, setCopied] = useState(false);
 
   const seats = overview?.seats ?? [];
@@ -63,17 +93,25 @@ export const RightInspector: React.FC<Props> = ({
   const snap = overview?.trafficSnapshots.find(t => t.seatId === seat?.id);
   const takeover = overview?.seatTakeovers?.find(t => t.seatId === seat?.id);
 
+  useEffect(() => {
+    if (!seat?.id) return;
+    void api.getSeatConnections(seat.id, 12).then(res => {
+      setRecentConns(res.connections ?? []);
+      setLastCountryCheck(res.countryHistory?.[0] ?? null);
+    }).catch(() => {});
+  }, [seat?.id, snap?.totalConnections]);
+
   const nodeOptions: SelectOption[] = useMemo(() => {
     return nodes.map(n => ({
       value: n.id,
       label: n.name,
       sublabel: n.protocol === 'DIRECT_PHYSICAL'
         ? '本机物理硬件直出'
-        : `${n.host}:${n.port}${n.requiresSidecarEngine ? ' · sing-box' : ''}`,
+        : `${maskEndpoint(n.host, n.port, privacyMode)}${n.requiresSidecarEngine ? ' · sing-box' : ''}${n.allowInsecure && !n.insecureApproved ? ' · 待批准' : ''}`,
       tag: n.protocol === 'DIRECT_PHYSICAL' ? 'DIRECT' : n.protocol,
       dotColor: n.status === 'offline' ? '#F27973' : (n.status === 'online' ? '#34D399' : '#94A3B8')
     }));
-  }, [nodes]);
+  }, [nodes, privacyMode]);
 
   const relayOptions: SelectOption[] = useMemo(() => {
     const base: SelectOption[] = [
@@ -118,10 +156,40 @@ export const RightInspector: React.FC<Props> = ({
 
   async function handleBindNode(nodeId: string) {
     if (!seat) return;
-    await api.updateSeat(seat.id, { boundNodeId: nodeId });
+    try {
+      await api.updateSeat(seat.id, { boundNodeId: nodeId });
+      await onReload();
+      const target = nodes.find(n => n.id === nodeId);
+      onToast(`${seat.name} 已切换出口：${target?.name ?? nodeId}`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '绑定失败');
+    }
+  }
+
+  async function handleExpectedCountryChange(code: string) {
+    if (!seat) return;
+    await api.updateSeat(seat.id, { expectedCountryCode: code });
     await onReload();
-    const target = nodes.find(n => n.id === nodeId);
-    onToast(`${seat.name} 已切换出口：${target?.name ?? nodeId}`);
+    onToast(code ? `${seat.name} 已启用出口国家硬门禁：仅允许 ${code}` : `${seat.name} 已取消出口国家限制`);
+  }
+
+  async function handleCheckCountryNow() {
+    if (!seat || checkingCountry) return;
+    setCheckingCountry(true);
+    try {
+      const res = await api.checkSeatCountry(seat.id);
+      setLastCountryCheck(res.check);
+      onToast(res.check.reason);
+    } finally {
+      setCheckingCountry(false);
+    }
+  }
+
+  async function handleAckDrift() {
+    if (!seat) return;
+    await api.updateSeat(seat.id, { acknowledgeDrift: true });
+    await onReload();
+    onToast(`${seat.name} 已确认锁定当前快照线路`);
   }
 
   async function handleToggleKillSwitch(killSwitchEnabled: boolean) {
@@ -320,7 +388,24 @@ export const RightInspector: React.FC<Props> = ({
               </div>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {seat.hasNodeDrift && (
+                <div className="insp-drift-banner">
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                    <AlertTriangleIcon size={12} />
+                    <span>订阅已更新，仍锁定原出口快照防漂移</span>
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-pill btn-soft btn-sm"
+                    style={{ height: 22, padding: '0 8px', fontSize: 10.5 }}
+                    onClick={handleAckDrift}
+                  >
+                    确认
+                  </button>
+                </div>
+              )}
+
               <div className="spec-row">
                 <span className="spec-key">绑定线路</span>
                 <CustomSelect
@@ -375,7 +460,35 @@ export const RightInspector: React.FC<Props> = ({
 
               <div className="spec-row">
                 <span className="spec-key">真实出口 IP</span>
-                <span className="spec-val num">{bound?.exitIp ?? '—'}</span>
+                <span className="spec-val num">{maskIp(bound?.exitIp, privacyMode)}</span>
+              </div>
+
+              <div className="spec-row">
+                <span className="spec-key">国家门禁</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <CustomSelect
+                      variant="light"
+                      size="sm"
+                      minMenuWidth={228}
+                      value={seat.expectedCountryCode ?? ''}
+                      options={COUNTRY_GUARD_OPTIONS}
+                      onChange={handleExpectedCountryChange}
+                      ariaLabel="设置启动前出口国家门禁"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="inspector-mini-btn off"
+                    style={{ padding: '0 7px', flexShrink: 0 }}
+                    disabled={checkingCountry}
+                    title={lastCountryCheck?.reason ?? '立即核验出口国家/地区'}
+                    onClick={handleCheckCountryNow}
+                  >
+                    <GlobeGuardIcon size={11} />
+                    <span>{checkingCountry ? '测' : (lastCountryCheck?.observedCountry ?? '核验')}</span>
+                  </button>
+                </div>
               </div>
 
               <div className="spec-row">
@@ -436,6 +549,50 @@ export const RightInspector: React.FC<Props> = ({
                 {verifying ? <RefreshSpinIcon size={13} spinning /> : <RadarVerifyIcon size={13} />}
                 <span>{verifying ? '验真中' : (seat.enabled ? '全链路验真' : '出口验真')}</span>
               </button>
+            </div>
+
+            {/* 近期穿透连接实流审计（零正文隐私，仅域名/路由/字节） */}
+            <div>
+              <button
+                type="button"
+                style={{
+                  width: '100%',
+                  border: 'none',
+                  background: 'transparent',
+                  padding: '2px 0',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  cursor: 'pointer',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  color: 'var(--insp-sub)'
+                }}
+                onClick={() => setShowConnections(v => !v)}
+              >
+                <span>近期穿透审计 ({recentConns.length})</span>
+                <span>{showConnections ? '收起 ▲' : '展开 ▼'}</span>
+              </button>
+              {showConnections && (
+                <div className="insp-conn-list" style={{ marginTop: 6 }}>
+                  {recentConns.length === 0 ? (
+                    <div style={{ fontSize: 10.5, color: 'var(--insp-sub)', padding: '6px 4px' }}>
+                      暂无连接记录（接管后发起对话或点「全链路验真」即可观测）
+                    </div>
+                  ) : (
+                    recentConns.slice(0, 8).map((c, i) => (
+                      <div key={`${c.timestamp}-${i}`} className="insp-conn-item">
+                        <span className="mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--insp-val)' }}>
+                          {privacyMode ? `${c.targetHost.slice(0, 4)}***:${c.targetPort}` : `${c.targetHost}:${c.targetPort}`}
+                        </span>
+                        <span className="num" style={{ flexShrink: 0, color: c.outcome === 'OK' ? 'var(--insp-latency-ok)' : 'var(--insp-latency-err)' }}>
+                          {c.outcome === 'OK' ? `${formatBytes(c.bytesTx + c.bytesRx)}` : c.outcome}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
             </div>
           </div>
         ) : (
@@ -514,7 +671,9 @@ export const RightInspector: React.FC<Props> = ({
                 </span>
               </div>
               <div className="num" style={{ fontSize: 11, color: 'var(--insp-sub)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {bound.exitIp !== '—' ? `${bound.exitIp} · ${bound.ispSummary}` : `${bound.host}:${bound.port} · ${bound.ispSummary}`}
+                {bound.exitIp !== '—'
+                  ? `${maskIp(bound.exitIp, privacyMode)} · ${bound.ispSummary}`
+                  : `${maskEndpoint(bound.host, bound.port, privacyMode)} · ${bound.ispSummary}`}
               </div>
             </div>
           )}

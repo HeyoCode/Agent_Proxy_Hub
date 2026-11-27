@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgentProxyHub.Core.Apps;
+using AgentProxyHub.Core.Diagnostics;
 using AgentProxyHub.Core.Models;
 using AgentProxyHub.Core.Networking;
 using AgentProxyHub.Core.Storage;
@@ -34,6 +35,14 @@ public static class HubHostFactory
         string? DefaultGroup = null,
         string? ProxyUrl = null);
 
+    public sealed record SubscriptionUpsertRequest(
+        string? Id,
+        string? Name,
+        string Url,
+        string? Group = null,
+        string? ProxyUrl = null,
+        int AutoRefreshHours = 0);
+
     public sealed record BatchPreviewRequest(
         string RawText,
         ProxyProtocol DefaultProtocol,
@@ -45,7 +54,11 @@ public static class HubHostFactory
         string? RelayNodeId,
         int? LocalPort,
         bool? KillSwitchEnabled,
-        bool? AllowSameGroupFailover);
+        bool? AllowSameGroupFailover,
+        string? ExpectedCountryCode = null,
+        string? CustomNoProxy = null,
+        string? CustomExecutablePath = null,
+        bool? AcknowledgeDrift = null);
 
     public sealed record ToggleAllSeatsRequest(bool Enabled);
 
@@ -124,6 +137,8 @@ public static class HubHostFactory
 
         var app = builder.Build();
         var stateLock = new object();
+        var subRefreshGate = new SemaphoreSlim(1, 1);
+        HubEventLogger.Default.Info("SYSTEM", $"Agent Proxy Hub v{ProjectMetadata.Version} 核心初始化完成（VerifyOnly={isVerifyOnly}）");
 
         // 本地环回安全守卫：拦截 DNS Rebinding 非法 Host 头与外部网页跨站写请求 (CSRF)
         app.Use(async (ctx, next) =>
@@ -216,6 +231,8 @@ public static class HubHostFactory
                     doc.Seats.FirstOrDefault(s => s.Id == "claude"),
                     doc.Seats.FirstOrDefault(s => s.Id == "agy"));
                 var seatTakeovers = takeoverService.InspectAll(doc.Seats);
+                var redactedNodes = doc.Nodes.Select(n => n.ToRedactedCopy()).ToList();
+                var subDtos = (doc.Subscriptions ?? []).Select(s => s.ToPublicDto()).ToList();
 
                 return Results.Ok(new
                 {
@@ -228,7 +245,8 @@ public static class HubHostFactory
                     excludedVirtualNics = excludedVirtuals,
                     isolation = doc.Isolation,
                     seats = doc.Seats,
-                    nodes = doc.Nodes,
+                    nodes = redactedNodes,
+                    subscriptions = subDtos,
                     trafficSnapshots = traffic,
                     seatTakeovers,
                     sidecarEngine = sidecar.GetStatus(),
@@ -237,10 +255,24 @@ public static class HubHostFactory
             }
         });
 
-        // 2. 线路池：查询、手动添加、批量预览、批量导入、删除、验真
+        // 2. 线路池：查询、手动添加、批量预览、批量导入、删除、风险审批、验真
         app.MapGet("/api/nodes", () =>
         {
-            lock (stateLock) return Results.Ok(doc.Nodes);
+            lock (stateLock) return Results.Ok(doc.Nodes.Select(n => n.ToRedactedCopy()).ToList());
+        });
+
+        app.MapPost("/api/nodes/{id}/approve-insecure", (string id) =>
+        {
+            lock (stateLock)
+            {
+                var node = doc.Nodes.FirstOrDefault(n => n.Id == id);
+                if (node == null) return Results.NotFound();
+                node.InsecureApproved = true;
+                node.IspSummary = "已人工批准跳过证书校验 · 待验真";
+                store.Save(doc);
+                HubEventLogger.Default.Warn("GUARD", $"用户已批准节点「{node.Name}」跳过 TLS 证书校验");
+                return Results.Ok(node.ToRedactedCopy());
+            }
         });
 
         app.MapPost("/api/nodes/manual", (ManualNodeRequest req) =>
@@ -278,21 +310,16 @@ public static class HubHostFactory
                 if (!isVerifyOnly)
                     proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
             }
-            return Results.Ok(node);
+            return Results.Ok(node.ToRedactedCopy());
         });
 
-        app.MapPost("/api/nodes/fetch-subscription", async (SubscriptionFetchRequest req, CancellationToken ct) =>
+        async Task<(string RawText, string SuggestedTitle, string DetectedFormat)> FetchSubscriptionRawAsync(
+            Uri subUri,
+            string? proxyUrl,
+            string fallbackGroup,
+            CancellationToken ct)
         {
-            if (string.IsNullOrWhiteSpace(req.Url) ||
-                !Uri.TryCreate(req.Url.Trim(), UriKind.Absolute, out var subUri) ||
-                (subUri.Scheme != Uri.UriSchemeHttp && subUri.Scheme != Uri.UriSchemeHttps))
-            {
-                return Results.BadRequest(new { message = "请输入有效的 http:// 或 https:// 订阅链接" });
-            }
-
-            string group = string.IsNullOrWhiteSpace(req.DefaultGroup) ? "订阅导入池" : req.DefaultGroup.Trim();
-
-            async Task<string> DownloadSubAsync(string userAgent)
+            async Task<(string Content, Dictionary<string, IEnumerable<string>> Headers)> DownloadAsync(string userAgent)
             {
                 using var handler = new SocketsHttpHandler
                 {
@@ -301,9 +328,9 @@ public static class HubHostFactory
                     MaxAutomaticRedirections = 5,
                     ConnectTimeout = TimeSpan.FromSeconds(10)
                 };
-                if (!string.IsNullOrWhiteSpace(req.ProxyUrl))
+                if (!string.IsNullOrWhiteSpace(proxyUrl))
                 {
-                    handler.Proxy = new System.Net.WebProxy(req.ProxyUrl.Trim());
+                    handler.Proxy = new System.Net.WebProxy(proxyUrl.Trim());
                     handler.UseProxy = true;
                 }
                 else
@@ -315,6 +342,11 @@ public static class HubHostFactory
                 http.DefaultRequestHeaders.UserAgent.ParseAdd(userAgent);
                 using var resp = await http.GetAsync(subUri, HttpCompletionOption.ResponseHeadersRead, ct);
                 resp.EnsureSuccessStatusCode();
+
+                var hdrs = new Dictionary<string, IEnumerable<string>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var h in resp.Headers) hdrs[h.Key] = h.Value;
+                foreach (var h in resp.Content.Headers) hdrs[h.Key] = h.Value;
+
                 await using var stream = await resp.Content.ReadAsStreamAsync(ct);
                 using var ms = new MemoryStream();
                 var buf = new byte[16384];
@@ -327,40 +359,136 @@ public static class HubHostFactory
                     if (total > maxBytes) throw new InvalidOperationException("订阅内容超过 4MB 安全上限");
                     ms.Write(buf, 0, read);
                 }
-                return System.Text.Encoding.UTF8.GetString(ms.ToArray());
+                return (System.Text.Encoding.UTF8.GetString(ms.ToArray()), hdrs);
             }
 
+            var (raw, headers) = await DownloadAsync("clash.meta/1.18");
+            BatchParseResult parsed;
+            lock (stateLock)
+            {
+                parsed = ProxyNodeImporter.Parse(raw, ProxyProtocol.SOCKS5, fallbackGroup, doc.Nodes);
+            }
+
+            if (parsed.ValidCount == 0 && parsed.DuplicateCount == 0)
+            {
+                var (fallbackRaw, fallbackHeaders) = await DownloadAsync("v2rayN/6.45");
+                BatchParseResult fallbackParsed;
+                lock (stateLock)
+                {
+                    fallbackParsed = ProxyNodeImporter.Parse(fallbackRaw, ProxyProtocol.SOCKS5, fallbackGroup, doc.Nodes);
+                }
+                if (fallbackParsed.ValidCount > 0 || fallbackParsed.DuplicateCount > 0)
+                {
+                    raw = fallbackRaw;
+                    headers = fallbackHeaders;
+                }
+            }
+
+            string title = ProxyNodeImporter.ExtractSubscriptionName(headers, subUri);
+            string format = ProxyNodeImporter.LooksLikeClashYaml(raw) ? "Clash YAML" : "URI / Base64";
+            return (raw, title, format);
+        }
+
+        async Task<SubscriptionSyncEngine.SyncDiffResult> RefreshSubscriptionInternalAsync(
+            SubscriptionSource sub,
+            CancellationToken ct)
+        {
+            if (!Uri.TryCreate(sub.Url.Trim(), UriKind.Absolute, out var subUri))
+                throw new InvalidOperationException("订阅 URL 格式无效");
+
+            await subRefreshGate.WaitAsync(ct);
             try
             {
-                string raw = await DownloadSubAsync("clash.meta/1.18");
+                var (raw, suggestedTitle, _) = await FetchSubscriptionRawAsync(subUri, sub.ProxyUrl, sub.Group, ct);
+                var parsed = ProxyNodeImporter.Parse(raw, ProxyProtocol.SOCKS5, sub.Group, []);
+                var validNodes = parsed.Items.Where(i => i.Node != null).Select(i => i.Node!).ToList();
+
+                lock (stateLock)
+                {
+                    if (string.IsNullOrWhiteSpace(sub.Name))
+                        sub.Name = suggestedTitle;
+                    var diff = SubscriptionSyncEngine.MergeParsedNodes(doc, sub, validNodes);
+                    store.Save(doc);
+                    if (!isVerifyOnly)
+                        proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    return diff;
+                }
+            }
+            catch (Exception ex)
+            {
+                lock (stateLock)
+                {
+                    sub.LastError = ex.Message;
+                    store.Save(doc);
+                }
+                HubEventLogger.Default.Error("SUB", $"订阅源「{sub.Name}」刷新失败：{ex.Message}");
+                throw;
+            }
+            finally
+            {
+                subRefreshGate.Release();
+            }
+        }
+
+        // 后台周期巡检：每 15 分钟检查开启了自动同步的订阅源（间隔默认 6 小时）与日志合并
+        _ = Task.Run(async () =>
+        {
+            using var subTimer = new PeriodicTimer(TimeSpan.FromMinutes(15));
+            try
+            {
+                while (await subTimer.WaitForNextTickAsync(stoppingToken))
+                {
+                    List<SubscriptionSource> dueSubs;
+                    lock (stateLock)
+                    {
+                        var now = DateTimeOffset.UtcNow;
+                        dueSubs = (doc.Subscriptions ?? [])
+                            .Where(s => s.AutoRefreshHours > 0 &&
+                                        (!s.LastSyncedAt.HasValue || (now - s.LastSyncedAt.Value).TotalHours >= s.AutoRefreshHours))
+                            .ToList();
+                    }
+                    foreach (var sub in dueSubs)
+                    {
+                        if (stoppingToken.IsCancellationRequested) break;
+                        try { await RefreshSubscriptionInternalAsync(sub, stoppingToken); }
+                        catch { }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+        }, stoppingToken);
+
+        app.MapPost("/api/nodes/fetch-subscription", async (SubscriptionFetchRequest req, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Url) ||
+                !Uri.TryCreate(req.Url.Trim(), UriKind.Absolute, out var subUri) ||
+                (subUri.Scheme != Uri.UriSchemeHttp && subUri.Scheme != Uri.UriSchemeHttps))
+            {
+                return Results.BadRequest(new { message = "请输入有效的 http:// 或 https:// 订阅链接" });
+            }
+
+            string group = string.IsNullOrWhiteSpace(req.DefaultGroup) ? "订阅导入池" : req.DefaultGroup.Trim();
+            try
+            {
+                var (raw, suggestedTitle, format) = await FetchSubscriptionRawAsync(subUri, req.ProxyUrl, group, ct);
                 BatchParseResult parsed;
                 lock (stateLock)
                 {
                     parsed = ProxyNodeImporter.Parse(raw, ProxyProtocol.SOCKS5, group, doc.Nodes);
                 }
 
-                // 若 clash.meta UA 未解析出有效节点，则自动尝试 v2rayN UA 拉取 Base64 订阅
-                if (parsed.ValidCount == 0 && parsed.DuplicateCount == 0)
+                // 预览列表中的节点统一脱敏，避免密码回传到浏览器
+                foreach (var item in parsed.Items)
                 {
-                    string fallbackRaw = await DownloadSubAsync("v2rayN/6.45");
-                    BatchParseResult fallbackParsed;
-                    lock (stateLock)
-                    {
-                        fallbackParsed = ProxyNodeImporter.Parse(fallbackRaw, ProxyProtocol.SOCKS5, group, doc.Nodes);
-                    }
-                    if (fallbackParsed.ValidCount > 0 || fallbackParsed.DuplicateCount > 0)
-                    {
-                        raw = fallbackRaw;
-                        parsed = fallbackParsed;
-                    }
+                    if (item.Node != null) item.Node = item.Node.ToRedactedCopy();
                 }
 
-                string format = ProxyNodeImporter.LooksLikeClashYaml(raw) ? "Clash YAML" : "URI / Base64";
                 return Results.Ok(new
                 {
                     rawText = raw,
                     preview = parsed,
-                    detectedFormat = format
+                    detectedFormat = format,
+                    suggestedTitle
                 });
             }
             catch (Exception ex)
@@ -369,11 +497,120 @@ public static class HubHostFactory
             }
         });
 
+        app.MapGet("/api/subscriptions", () =>
+        {
+            lock (stateLock)
+                return Results.Ok((doc.Subscriptions ?? []).Select(s => s.ToPublicDto()).ToList());
+        });
+
+        app.MapPost("/api/subscriptions", async (SubscriptionUpsertRequest req, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Url) ||
+                !Uri.TryCreate(req.Url.Trim(), UriKind.Absolute, out var subUri) ||
+                (subUri.Scheme != Uri.UriSchemeHttp && subUri.Scheme != Uri.UriSchemeHttps))
+            {
+                return Results.BadRequest(new { message = "请输入有效的 http:// 或 https:// 订阅链接" });
+            }
+
+            SubscriptionSource sub;
+            lock (stateLock)
+            {
+                doc.Subscriptions ??= new();
+                sub = !string.IsNullOrWhiteSpace(req.Id)
+                    ? (doc.Subscriptions.FirstOrDefault(s => s.Id == req.Id) ?? new SubscriptionSource())
+                    : (doc.Subscriptions.FirstOrDefault(s => string.Equals(s.Url, req.Url.Trim(), StringComparison.Ordinal)) ?? new SubscriptionSource());
+
+                if (!doc.Subscriptions.Contains(sub))
+                    doc.Subscriptions.Insert(0, sub);
+
+                sub.Url = req.Url.Trim();
+                sub.Group = string.IsNullOrWhiteSpace(req.Group) ? (string.IsNullOrWhiteSpace(sub.Group) ? "订阅导入池" : sub.Group) : req.Group.Trim();
+                sub.ProxyUrl = string.IsNullOrWhiteSpace(req.ProxyUrl) ? null : req.ProxyUrl.Trim();
+                sub.AutoRefreshHours = req.AutoRefreshHours > 0 ? Math.Clamp(req.AutoRefreshHours, 1, 168) : 0;
+                if (!string.IsNullOrWhiteSpace(req.Name)) sub.Name = req.Name.Trim();
+                store.Save(doc);
+            }
+
+            try
+            {
+                var diff = await RefreshSubscriptionInternalAsync(sub, ct);
+                return Results.Ok(new
+                {
+                    subscription = sub.ToPublicDto(),
+                    diff
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new
+                {
+                    message = $"订阅源已保存但首次拉取失败：{ex.Message}",
+                    subscription = sub.ToPublicDto()
+                });
+            }
+        });
+
+        app.MapPost("/api/subscriptions/{id}/refresh", async (string id, CancellationToken ct) =>
+        {
+            SubscriptionSource? sub;
+            lock (stateLock)
+            {
+                sub = (doc.Subscriptions ?? []).FirstOrDefault(s => s.Id == id);
+            }
+            if (sub == null) return Results.NotFound(new { message = "未找到对应订阅源" });
+
+            try
+            {
+                var diff = await RefreshSubscriptionInternalAsync(sub, ct);
+                return Results.Ok(new
+                {
+                    subscription = sub.ToPublicDto(),
+                    diff
+                });
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { message = $"刷新订阅失败：{ex.Message}", subscription = sub.ToPublicDto() });
+            }
+        });
+
+        app.MapDelete("/api/subscriptions/{id}", (string id, bool? removeNodes) =>
+        {
+            lock (stateLock)
+            {
+                int removedSub = (doc.Subscriptions ?? []).RemoveAll(s => s.Id == id);
+                if (removedSub == 0) return Results.NotFound();
+
+                var boundIds = doc.Seats
+                    .SelectMany(s => new[] { s.BoundNodeId, s.RelayNodeId })
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .ToHashSet(StringComparer.Ordinal);
+
+                if (removeNodes == true)
+                {
+                    doc.Nodes.RemoveAll(n => string.Equals(n.SourceSubscriptionId, id, StringComparison.Ordinal) && !boundIds.Contains(n.Id));
+                }
+                foreach (var n in doc.Nodes.Where(n => string.Equals(n.SourceSubscriptionId, id, StringComparison.Ordinal)))
+                {
+                    n.SourceSubscriptionId = null;
+                }
+                store.Save(doc);
+                if (!isVerifyOnly)
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                HubEventLogger.Default.Info("SUB", $"已移除订阅源 {id}（保留已绑定席位快照）");
+                return Results.Ok(new { removed = removedSub });
+            }
+        });
+
         app.MapPost("/api/nodes/batch-preview", (BatchPreviewRequest req) =>
         {
             lock (stateLock)
             {
                 var parsed = ProxyNodeImporter.Parse(req.RawText ?? string.Empty, req.DefaultProtocol, req.DefaultGroup, doc.Nodes);
+                foreach (var item in parsed.Items)
+                {
+                    if (item.Node != null) item.Node = item.Node.ToRedactedCopy();
+                }
                 return Results.Ok(parsed);
             }
         });
@@ -402,7 +639,7 @@ public static class HubHostFactory
                 addedCount = added.Count,
                 duplicateCount = parsed.DuplicateCount,
                 errorCount = parsed.ErrorCount,
-                addedNodes = added
+                addedNodes = added.Select(n => n.ToRedactedCopy()).ToList()
             });
         });
 
@@ -446,12 +683,12 @@ public static class HubHostFactory
                 target.AiReachability = ["物理直出通道"];
                 target.LastCheckedAt = DateTimeOffset.UtcNow;
                 lock (stateLock) store.Save(doc);
-                return Results.Ok(target);
+                return Results.Ok(target.ToRedactedCopy());
             }
 
             await healthChecker.VerifyNodeAsync(target, iso, ct);
             lock (stateLock) store.Save(doc);
-            return Results.Ok(target);
+            return Results.Ok(target.ToRedactedCopy());
         });
 
         app.MapPost("/api/nodes/verify-all", async (CancellationToken ct) =>
@@ -467,7 +704,7 @@ public static class HubHostFactory
             }
 
             // 批量验真前一次性预热全部待测 L2 节点至 sing-box 并集桥，避免并发连环重启
-            var l2Targets = targets.Where(n => n.RequiresSidecarEngine).ToList();
+            var l2Targets = targets.Where(n => n.RequiresSidecarEngine && (!n.AllowInsecure || n.InsecureApproved)).ToList();
             if (l2Targets.Count > 0 && sidecar.GetStatus().Installed)
             {
                 _ = sidecar.EnsureEphemeralNodesReady(l2Targets, lockedNicName, iso, out _);
@@ -498,7 +735,7 @@ public static class HubHostFactory
             }
 
             lock (stateLock) store.Save(doc);
-            return Results.Ok(doc.Nodes);
+            return Results.Ok(doc.Nodes.Select(n => n.ToRedactedCopy()).ToList());
         });
 
         // 3. AI 软件席位管理与受控环境启动器
@@ -509,13 +746,51 @@ public static class HubHostFactory
                 var seat = doc.Seats.FirstOrDefault(s => s.Id == id);
                 if (seat == null) return Results.NotFound();
 
+                if (req.BoundNodeId != null)
+                {
+                    var cand = doc.Nodes.FirstOrDefault(n => n.Id == req.BoundNodeId);
+                    if (cand != null && cand.AllowInsecure && !cand.InsecureApproved)
+                    {
+                        return Results.BadRequest(new { message = $"节点「{cand.Name}」声明跳过 TLS 证书校验且尚未批准，请先在线路池点击「批准风险」后再绑定。" });
+                    }
+                }
+                if (!string.IsNullOrWhiteSpace(req.RelayNodeId))
+                {
+                    var relayCand = doc.Nodes.FirstOrDefault(n => n.Id == req.RelayNodeId);
+                    if (relayCand != null && relayCand.AllowInsecure && !relayCand.InsecureApproved)
+                    {
+                        return Results.BadRequest(new { message = $"前置中转「{relayCand.Name}」跳过 TLS 证书校验尚未批准，请先批准风险。" });
+                    }
+                }
+
                 bool portChanged = req.LocalPort is >= 1024 and <= 65535 && req.LocalPort.Value != seat.LocalPort;
                 if (req.Enabled.HasValue) seat.Enabled = req.Enabled.Value;
-                if (req.BoundNodeId != null) seat.BoundNodeId = req.BoundNodeId;
+                if (req.BoundNodeId != null)
+                {
+                    seat.BoundNodeId = req.BoundNodeId;
+                    var boundNode = doc.Nodes.FirstOrDefault(n => n.Id == req.BoundNodeId);
+                    seat.BoundNodeSnapshotHash = boundNode?.ConfigSnapshotHash;
+                    seat.HasNodeDrift = false;
+                }
                 if (req.RelayNodeId != null) seat.RelayNodeId = string.IsNullOrWhiteSpace(req.RelayNodeId) ? null : req.RelayNodeId;
                 if (req.LocalPort is >= 1024 and <= 65535) seat.LocalPort = req.LocalPort.Value;
                 if (req.KillSwitchEnabled.HasValue) seat.KillSwitchEnabled = req.KillSwitchEnabled.Value;
                 if (req.AllowSameGroupFailover.HasValue) seat.AllowSameGroupFailover = req.AllowSameGroupFailover.Value;
+                if (req.ExpectedCountryCode != null)
+                {
+                    string trimmedCountry = req.ExpectedCountryCode.Trim().ToUpperInvariant();
+                    seat.ExpectedCountryCode = string.IsNullOrEmpty(trimmedCountry) ? null : trimmedCountry;
+                }
+                if (req.CustomNoProxy != null)
+                    seat.CustomNoProxy = string.IsNullOrWhiteSpace(req.CustomNoProxy) ? null : req.CustomNoProxy.Trim();
+                if (req.CustomExecutablePath != null)
+                    seat.CustomExecutablePath = string.IsNullOrWhiteSpace(req.CustomExecutablePath) ? null : req.CustomExecutablePath.Trim().Trim('"');
+                if (req.AcknowledgeDrift == true)
+                {
+                    var curNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
+                    seat.BoundNodeSnapshotHash = curNode?.ConfigSnapshotHash;
+                    seat.HasNodeDrift = false;
+                }
 
                 store.Save(doc);
                 if (!isVerifyOnly)
@@ -565,7 +840,7 @@ public static class HubHostFactory
             }
         });
 
-        app.MapPost("/api/seats/{id}/launch", (string id) =>
+        app.MapPost("/api/seats/{id}/launch", async (string id, CancellationToken ct) =>
         {
             if (isVerifyOnly)
             {
@@ -577,9 +852,12 @@ public static class HubHostFactory
                 });
             }
 
+            AppSeat? seat;
+            ProxyNode? boundNode;
+            IsolationSettings iso;
             lock (stateLock)
             {
-                var seat = doc.Seats.FirstOrDefault(s => s.Id == id);
+                seat = doc.Seats.FirstOrDefault(s => s.Id == id);
                 if (seat == null) return Results.NotFound();
 
                 if (!seat.Enabled)
@@ -588,15 +866,69 @@ public static class HubHostFactory
                     store.Save(doc);
                     proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
                 }
-
-                var (ok, message) = takeoverService.LaunchWithProxy(seat);
-                return Results.Ok(new
-                {
-                    ok,
-                    message,
-                    seatTakeovers = takeoverService.InspectAll(doc.Seats)
-                });
+                boundNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
+                iso = doc.Isolation;
             }
+
+            // 若配置了「出口国家硬门禁」，启动客户端前强制先走独立端口验明出口国家
+            if (!string.IsNullOrWhiteSpace(seat.ExpectedCountryCode))
+            {
+                var check = await healthChecker.CheckSeatCountryGuardAsync(seat, boundNode, iso, ct);
+                if (!check.Passed)
+                {
+                    return Results.Ok(new
+                    {
+                        ok = false,
+                        blockedByCountryGuard = true,
+                        countryCheck = check,
+                        message = check.Reason,
+                        seatTakeovers = takeoverService.InspectAll(doc.Seats)
+                    });
+                }
+            }
+
+            var (ok, message) = takeoverService.LaunchWithProxy(seat);
+            HubEventLogger.Default.Info("PROXY", $"受控启动 {seat.Name} (:{seat.LocalPort}) -> {message}");
+            return Results.Ok(new
+            {
+                ok,
+                message,
+                seatTakeovers = takeoverService.InspectAll(doc.Seats)
+            });
+        });
+
+        app.MapPost("/api/seats/{id}/check-country", async (string id, CancellationToken ct) =>
+        {
+            AppSeat? seat;
+            ProxyNode? boundNode;
+            IsolationSettings iso;
+            lock (stateLock)
+            {
+                seat = doc.Seats.FirstOrDefault(s => s.Id == id);
+                if (seat == null) return Results.NotFound();
+                if (!seat.Enabled && !isVerifyOnly)
+                {
+                    seat.Enabled = true;
+                    store.Save(doc);
+                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                }
+                boundNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
+                iso = doc.Isolation;
+            }
+
+            var res = await healthChecker.CheckSeatCountryGuardAsync(seat, boundNode, iso, ct);
+            return Results.Ok(new
+            {
+                check = res,
+                history = healthChecker.GetCountryCheckHistory(id)
+            });
+        });
+
+        app.MapGet("/api/seats/{id}/connections", (string id, int? limit) =>
+        {
+            var items = proxyServer.GetRecentConnections(id, limit ?? 20);
+            var countryHistory = healthChecker.GetCountryCheckHistory(id);
+            return Results.Ok(new { connections = items, countryHistory });
         });
 
         app.MapPost("/api/seats/{id}/verify-tunnel", async (string id, CancellationToken ct) =>
@@ -802,21 +1134,117 @@ public static class HubHostFactory
             return Results.Ok(pricingCatalog.GetAllRules());
         });
 
-        // 6. 在系统默认浏览器中安全打开固定 GitHub 项目仓库
-        app.MapPost("/api/system/open-repo", () =>
+        // 6. 脱敏运行日志、版本更新检查与安全打开固定 GitHub 项目仓库
+        app.MapGet("/api/diagnostics/logs", (string? level, string? keyword, int? limit) =>
         {
+            return Results.Ok(HubEventLogger.Default.Query(level, keyword, limit ?? 200));
+        });
+
+        app.MapDelete("/api/diagnostics/logs", () =>
+        {
+            HubEventLogger.Default.ClearMemory();
+            return Results.Ok(new { cleared = true });
+        });
+
+        DateTimeOffset updateCacheAt = DateTimeOffset.MinValue;
+        object? cachedUpdatePayload = null;
+        var updateCacheLock = new object();
+
+        app.MapGet("/api/system/update-check", async (string? proxyUrl, bool? force, CancellationToken ct) =>
+        {
+            lock (updateCacheLock)
+            {
+                if (force != true && cachedUpdatePayload != null && (DateTimeOffset.UtcNow - updateCacheAt).TotalMinutes < 15)
+                {
+                    return Results.Ok(cachedUpdatePayload);
+                }
+            }
+
+            string current = ProjectMetadata.Version;
+            try
+            {
+                using var handler = new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) };
+                if (!string.IsNullOrWhiteSpace(proxyUrl))
+                {
+                    handler.Proxy = new System.Net.WebProxy(proxyUrl.Trim());
+                    handler.UseProxy = true;
+                }
+                else
+                {
+                    handler.UseProxy = false;
+                }
+
+                using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(7) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd($"AgentProxyHub/{current}");
+                http.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+
+                using var resp = await http.GetAsync($"https://api.github.com/repos/{ProjectMetadata.RepoSlug}/releases/latest", ct);
+                resp.EnsureSuccessStatusCode();
+                string json = await resp.Content.ReadAsStringAsync(ct);
+                using var jdoc = JsonDocument.Parse(json);
+                var root = jdoc.RootElement;
+                string tag = root.TryGetProperty("tag_name", out var tEl) ? (tEl.GetString() ?? current) : current;
+                string cleanLatest = tag.TrimStart('v', 'V');
+                string? htmlUrl = root.TryGetProperty("html_url", out var uEl) ? uEl.GetString() : ProjectMetadata.RepoUrl + "/releases";
+                string? publishedAt = root.TryGetProperty("published_at", out var pEl) ? pEl.GetString() : null;
+                string? body = root.TryGetProperty("body", out var bEl) ? bEl.GetString() : string.Empty;
+
+                bool hasUpdate = Version.TryParse(cleanLatest, out var latestVer) &&
+                                 Version.TryParse(current, out var curVer) &&
+                                 latestVer > curVer;
+
+                var payload = new
+                {
+                    ok = true,
+                    currentVersion = current,
+                    latestVersion = cleanLatest,
+                    hasUpdate,
+                    publishedAt,
+                    htmlUrl,
+                    releaseNotes = body
+                };
+                lock (updateCacheLock)
+                {
+                    cachedUpdatePayload = payload;
+                    updateCacheAt = DateTimeOffset.UtcNow;
+                }
+                return Results.Ok(payload);
+            }
+            catch (Exception ex)
+            {
+                return Results.Ok(new
+                {
+                    ok = false,
+                    currentVersion = current,
+                    latestVersion = current,
+                    hasUpdate = false,
+                    htmlUrl = ProjectMetadata.RepoUrl + "/releases",
+                    releaseNotes = string.Empty,
+                    error = ex.Message
+                });
+            }
+        });
+
+        app.MapPost("/api/system/open-repo", (string? targetUrl) =>
+        {
+            string urlToOpen = ProjectMetadata.RepoUrl;
+            if (!string.IsNullOrWhiteSpace(targetUrl) &&
+                targetUrl.StartsWith(ProjectMetadata.RepoUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                urlToOpen = targetUrl;
+            }
             try
             {
                 Process.Start(new ProcessStartInfo
                 {
-                    FileName = ProjectMetadata.RepoUrl,
+                    FileName = urlToOpen,
                     UseShellExecute = true
                 });
-                return Results.Ok(new { opened = true, url = ProjectMetadata.RepoUrl });
+                return Results.Ok(new { opened = true, url = urlToOpen });
             }
             catch (Exception ex)
             {
-                return Results.Ok(new { opened = false, url = ProjectMetadata.RepoUrl, error = ex.Message });
+                return Results.Ok(new { opened = false, url = urlToOpen, error = ex.Message });
             }
         });
 

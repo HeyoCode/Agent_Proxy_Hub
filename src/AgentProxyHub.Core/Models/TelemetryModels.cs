@@ -33,7 +33,21 @@ public sealed class UsageLogEntry
     public double? FirstTokenSeconds { get; set; }
     public double? TokensPerSecond { get; set; }
     public double? CostUsd { get; set; }
+    public double CacheSavedUsd { get; set; }
     public bool IsPriced { get; set; }
+    public string? Workspace { get; set; }
+}
+
+/// <summary>
+/// 过去 365 天活跃热力图单元格
+/// </summary>
+public sealed class DailyHeatmapCell
+{
+    public string Date { get; set; } = string.Empty; // yyyy-MM-dd
+    public int Requests { get; set; }
+    public long TotalTokens { get; set; }
+    public double CostUsd { get; set; }
+    public int Level { get; set; } // 0..4
 }
 
 /// <summary>
@@ -119,6 +133,7 @@ public sealed class UsageDashboardResponse
 
     // 四大核心 KPI
     public double TotalCostUsd { get; set; }
+    public double TotalCacheSavedUsd { get; set; }
     public int TotalRequests { get; set; }
     public long TotalTokens { get; set; }
     public long EffectiveInputTokens { get; set; }
@@ -128,6 +143,10 @@ public sealed class UsageDashboardResponse
     public double CacheHitRate { get; set; }
     public int PricedRequests { get; set; }
     public int UnpricedRequests { get; set; }
+
+    // 365 天活跃热力图
+    public int ActiveDaysLastYear { get; set; }
+    public List<DailyHeatmapCell> ActivityHeatmap { get; set; } = new();
 
     // 代理网络层总流量
     public long TotalProxyTxBytes { get; set; }

@@ -497,3 +497,46 @@ export const PlayLaunchIcon: React.FC<IconProps> = ({ size = 12, className }) =>
     <path d="M5 3.6l7.4 4.4L5 12.4V3.6Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
   </svg>
 );
+
+export const ShieldPrivacyIcon: React.FC<{ masked?: boolean; size?: number; className?: string }> = ({
+  masked,
+  size = 17,
+  className
+}) => (
+  <svg width={size} height={size} viewBox="0 0 20 20" fill="none" className={className} aria-hidden="true">
+    {masked ? (
+      <>
+        <path d="M2.5 10c2.2-3.4 4.8-5 7.5-5s5.3 1.6 7.5 5c-.7 1.1-1.5 2-2.4 2.7" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
+        <path d="M12.2 12.2a2.8 2.8 0 0 1-4.4-3.4" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
+        <path d="M3.5 3.5l13 13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      </>
+    ) : (
+      <>
+        <path d="M2.5 10c2.2-3.4 4.8-5 7.5-5s5.3 1.6 7.5 5c-2.2 3.4-4.8 5-7.5 5s-5.3-1.6-7.5-5Z" stroke="currentColor" strokeWidth="1.55" strokeLinejoin="round" />
+        <circle cx="10" cy="10" r="2.4" stroke="currentColor" strokeWidth="1.55" />
+      </>
+    )}
+  </svg>
+);
+
+export const TerminalLogIcon: React.FC<IconProps> = ({ size = 17, className }) => (
+  <svg width={size} height={size} viewBox="0 0 20 20" fill="none" className={className} aria-hidden="true">
+    <rect x="2.5" y="3.5" width="15" height="13" rx="2.6" stroke="currentColor" strokeWidth="1.55" />
+    <path d="M6 8l2.5 2L6 12M10.5 12h3.5" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+export const GlobeGuardIcon: React.FC<IconProps> = ({ size = 13, className }) => (
+  <svg width={size} height={size} viewBox="0 0 18 18" fill="none" className={className} aria-hidden="true">
+    <circle cx="9" cy="9" r="6.5" stroke="currentColor" strokeWidth="1.45" />
+    <ellipse cx="9" cy="9" rx="3.1" ry="6.5" stroke="currentColor" strokeWidth="1.25" />
+    <path d="M2.8 9h12.4" stroke="currentColor" strokeWidth="1.25" />
+  </svg>
+);
+
+export const AlertTriangleIcon: React.FC<IconProps> = ({ size = 13, className }) => (
+  <svg width={size} height={size} viewBox="0 0 18 18" fill="none" className={className} aria-hidden="true">
+    <path d="M8.13 3.1a1 1 0 0 1 1.74 0l5.6 9.8A1 1 0 0 1 14.6 14.4H3.4a1 1 0 0 1-.87-1.5l5.6-9.8Z" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
+    <path d="M9 6.8v3.4M9 12.1v.3" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
+  </svg>
+);

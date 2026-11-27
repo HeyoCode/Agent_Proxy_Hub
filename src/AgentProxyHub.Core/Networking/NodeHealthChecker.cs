@@ -1,7 +1,9 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Security;
 using System.Text;
+using AgentProxyHub.Core.Diagnostics;
 using AgentProxyHub.Core.Models;
 
 namespace AgentProxyHub.Core.Networking;
@@ -10,18 +12,167 @@ namespace AgentProxyHub.Core.Networking;
 /// 节点物理直连验真器：
 /// - 并行测试落地出口 IP 与 Claude / ChatGPT / Antigravity TLS 单次 RTT（消除串行超时叠加虚高）
 /// - 支持经由本地席位监听端口 (127.0.0.1:localPort) 发起真实流量全链路验真
+/// - 内置启动前出口国家硬门禁校验 (Country Guard)，防止出口 IP 跨区漂移触发风控
 /// </summary>
 public sealed class NodeHealthChecker
 {
     private readonly UpstreamConnector _connector;
+    private readonly ConcurrentDictionary<string, List<CountryCheckRecord>> _countryHistory = new(StringComparer.OrdinalIgnoreCase);
 
     public NodeHealthChecker(UpstreamConnector connector)
     {
         _connector = connector;
     }
 
+    public List<CountryCheckRecord> GetCountryCheckHistory(string seatId)
+    {
+        if (!_countryHistory.TryGetValue(seatId, out var list))
+            return [];
+        lock (list) return list.ToList();
+    }
+
+    public async Task<CountryCheckRecord> CheckSeatCountryGuardAsync(
+        AppSeat seat,
+        ProxyNode? boundNode,
+        IsolationSettings settings,
+        CancellationToken ct = default)
+    {
+        string? expected = string.IsNullOrWhiteSpace(seat.ExpectedCountryCode)
+            ? null
+            : seat.ExpectedCountryCode.Trim().ToUpperInvariant();
+
+        if (boundNode != null && boundNode.AllowInsecure && !boundNode.InsecureApproved)
+        {
+            var unapproved = new CountryCheckRecord
+            {
+                Timestamp = DateTimeOffset.Now,
+                SeatId = seat.Id,
+                ExpectedCountry = expected,
+                Passed = false,
+                Reason = $"出口拦截：{boundNode.Name} 声明跳过 TLS 证书校验且尚未获得批准，请先在线路池点击「批准风险」"
+            };
+            AppendCountryHistory(seat.Id, unapproved);
+            return unapproved;
+        }
+
+        if (boundNode != null && !settings.EnableIpv6 && UpstreamConnector.IsIpv6Literal(boundNode.Host))
+        {
+            var v6Blocked = new CountryCheckRecord
+            {
+                Timestamp = DateTimeOffset.Now,
+                SeatId = seat.Id,
+                ExpectedCountry = expected,
+                Passed = false,
+                Reason = "出口国家核验失败：IPv6 开关处于关闭状态，无法拨通当前 IPv6 绑定线路"
+            };
+            AppendCountryHistory(seat.Id, v6Blocked);
+            return v6Blocked;
+        }
+
+        var sw = Stopwatch.StartNew();
+        string? exitIp = null;
+        string? observedLoc = null;
+        int? latencyMs = null;
+
+        try
+        {
+            if (seat.Enabled && seat.LocalPort > 0)
+            {
+                using var handler = new SocketsHttpHandler
+                {
+                    Proxy = new WebProxy($"http://127.0.0.1:{seat.LocalPort}"),
+                    UseProxy = true,
+                    ConnectTimeout = TimeSpan.FromSeconds(5),
+                    PooledConnectionLifetime = TimeSpan.Zero,
+                    AutomaticDecompression = DecompressionMethods.None
+                };
+                using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.5.0");
+                (exitIp, observedLoc, latencyMs) = await ProbeExitIpViaLocalProxyAsync(http, ct);
+            }
+            else if (boundNode != null)
+            {
+                var directRes = await ProbeExitIpViaNodeAsync(boundNode, settings, ct);
+                exitIp = directRes.Ip;
+                observedLoc = directRes.Loc;
+                latencyMs = directRes.ElapsedMs > 0 ? directRes.ElapsedMs : null;
+            }
+        }
+        catch
+        {
+            // 统一交由下方 Fail-Close 判定处理
+        }
+        sw.Stop();
+
+        string? normLoc = string.IsNullOrWhiteSpace(observedLoc) ? null : observedLoc.Trim().ToUpperInvariant();
+        bool passed;
+        string reason;
+
+        if (string.IsNullOrEmpty(exitIp) || string.IsNullOrEmpty(normLoc))
+        {
+            passed = false;
+            reason = expected != null
+                ? $"出口国家门禁阻断：无法获取 {seat.Name} 实时出口地区（预期 {expected}），已拒绝启动以防回退直连"
+                : $"未能识别 {seat.Name} 出口地区（节点可能离线或无法访问 Cloudflare Trace）";
+        }
+        else if (expected != null && !normLoc.Equals(expected, StringComparison.OrdinalIgnoreCase))
+        {
+            passed = false;
+            reason = $"出口国家门禁阻断：预期 {expected}，实测 {normLoc}（出口 IP {exitIp}），已禁止启动防止风控";
+        }
+        else
+        {
+            passed = true;
+            reason = expected != null
+                ? $"出口国家门禁通过：{normLoc} 符合预期（{exitIp} · {latencyMs ?? (int)sw.ElapsedMilliseconds} ms）"
+                : $"当前出口地区：{normLoc}（{exitIp} · {latencyMs ?? (int)sw.ElapsedMilliseconds} ms）";
+        }
+
+        var record = new CountryCheckRecord
+        {
+            Timestamp = DateTimeOffset.Now,
+            SeatId = seat.Id,
+            ExpectedCountry = expected,
+            ObservedCountry = normLoc,
+            ExitIp = exitIp ?? "—",
+            LatencyMs = latencyMs ?? Math.Max(1, (int)sw.ElapsedMilliseconds),
+            Passed = passed,
+            Reason = reason
+        };
+
+        AppendCountryHistory(seat.Id, record);
+        if (passed)
+            HubEventLogger.Default.Info("GUARD", $"{seat.Name} {reason}");
+        else
+            HubEventLogger.Default.Warn("GUARD", $"{seat.Name} {reason}");
+
+        return record;
+    }
+
+    private void AppendCountryHistory(string seatId, CountryCheckRecord record)
+    {
+        var list = _countryHistory.GetOrAdd(seatId, _ => new List<CountryCheckRecord>());
+        lock (list)
+        {
+            list.Insert(0, record);
+            if (list.Count > 12)
+                list.RemoveRange(12, list.Count - 12);
+        }
+    }
+
     public async Task<ProxyNode> VerifyNodeAsync(ProxyNode node, IsolationSettings settings, CancellationToken ct = default)
     {
+        if (node.AllowInsecure && !node.InsecureApproved)
+        {
+            node.Status = "unverified";
+            node.LatencyMs = null;
+            node.ExitIp = "—";
+            node.IspSummary = "该节点声明跳过 TLS 证书校验，请先点击「批准风险」后再验真或绑定";
+            node.AiReachability = new List<string> { "待批准风险" };
+            node.LastCheckedAt = DateTimeOffset.UtcNow;
+            return node;
+        }
+
         if (!settings.EnableIpv6 && UpstreamConnector.IsIpv6Literal(node.Host))
         {
             node.Status = "offline";
@@ -132,7 +283,7 @@ public sealed class NodeHealthChecker
         {
             Timeout = TimeSpan.FromSeconds(6)
         };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.3.4");
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.5.0");
 
         string? exitIp = null;
         string? loc = null;
@@ -271,7 +422,7 @@ public sealed class NodeHealthChecker
             using var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "cloudflare.com" }, cts.Token);
 
-            byte[] req = "GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.3.4\r\n\r\n"u8.ToArray();
+            byte[] req = "GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.5.0\r\n\r\n"u8.ToArray();
             await ssl.WriteAsync(req, cts.Token);
             await ssl.FlushAsync(cts.Token);
 
@@ -308,7 +459,7 @@ public sealed class NodeHealthChecker
             using var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "api.ipify.org" }, cts.Token);
 
-            byte[] req = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.3.4\r\n\r\n"u8.ToArray();
+            byte[] req = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.5.0\r\n\r\n"u8.ToArray();
             await ssl.WriteAsync(req, cts.Token);
             await ssl.FlushAsync(cts.Token);
 

@@ -138,7 +138,7 @@ public sealed class AppProxyTakeoverService
             var status = InspectSeatInternal(seat);
             string proxyHttp = $"http://127.0.0.1:{seat.LocalPort}";
             string proxySocks = $"socks5h://127.0.0.1:{seat.LocalPort}";
-            string noProxy = "localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12";
+            string noProxy = BuildEffectiveNoProxy(seat, _isMacOs);
 
             if (seat.Id is "agy" or "antigravity")
             {
@@ -150,24 +150,26 @@ public sealed class AppProxyTakeoverService
 
                 if (_isMacOs)
                 {
+                    string macTarget = ResolveCustomOrDetectedExe(seat, () => "Antigravity") ?? "Antigravity";
                     var psi = new ProcessStartInfo("open")
                     {
                         UseShellExecute = false
                     };
                     psi.ArgumentList.Add("-a");
-                    psi.ArgumentList.Add("Antigravity");
+                    psi.ArgumentList.Add(macTarget);
                     psi.ArgumentList.Add("--args");
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
-                    psi.ArgumentList.Add("--proxy-bypass-list=<-loopback>;localhost;127.0.0.1;[::1]");
+                    psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
                     return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Antigravity");
                 }
 
                 string zhScript = GetAntigravityZhLaunchScriptPath();
-                if (File.Exists(zhScript))
+                if (string.IsNullOrWhiteSpace(seat.CustomExecutablePath) && File.Exists(zhScript))
                 {
-                    var psi = new ProcessStartInfo("powershell.exe")
+                    string psExe = ResolveWindowsPowerShellExe();
+                    var psi = new ProcessStartInfo(psExe)
                     {
                         UseShellExecute = false,
                         CreateNoWindow = true
@@ -181,10 +183,10 @@ public sealed class AppProxyTakeoverService
                     psi.ArgumentList.Add(zhScript);
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
-                    return (true, $"已通过独立专线 (: {seat.LocalPort}) 拉起 Antigravity");
+                    return (true, $"已通过独立专线 (:{seat.LocalPort}) 拉起 Antigravity");
                 }
 
-                string? exe = ResolveAntigravityExe();
+                string? exe = ResolveCustomOrDetectedExe(seat, ResolveAntigravityExe);
                 if (!string.IsNullOrEmpty(exe))
                 {
                     var psi = new ProcessStartInfo(exe)
@@ -192,63 +194,67 @@ public sealed class AppProxyTakeoverService
                         UseShellExecute = false
                     };
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
-                    psi.ArgumentList.Add("--proxy-bypass-list=<-loopback>;localhost;127.0.0.1;[::1]");
+                    psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
                     return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Antigravity");
                 }
 
-                return (false, "未找到本机 Antigravity 可执行文件，可使用专属启动脚本或 CLI 参数手动拉起。");
+                return (false, "未找到本机 Antigravity 可执行文件，可使用专属启动脚本或在「应用接管 & CLI」指定自定义路径。");
             }
 
             if (seat.Id == "cursor")
             {
                 if (_isMacOs)
                 {
+                    string macTarget = ResolveCustomOrDetectedExe(seat, () => "Cursor") ?? "Cursor";
                     var psi = new ProcessStartInfo("open") { UseShellExecute = false };
                     psi.ArgumentList.Add("-a");
-                    psi.ArgumentList.Add("Cursor");
+                    psi.ArgumentList.Add(macTarget);
                     psi.ArgumentList.Add("--args");
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
+                    psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
                     return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Cursor");
                 }
 
-                string? cursorExe = ResolveCursorExe();
+                string? cursorExe = ResolveCustomOrDetectedExe(seat, ResolveCursorExe);
                 if (!string.IsNullOrEmpty(cursorExe))
                 {
                     var psi = new ProcessStartInfo(cursorExe) { UseShellExecute = false };
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
-                    psi.ArgumentList.Add("--proxy-bypass-list=<-loopback>;localhost;127.0.0.1;[::1]");
+                    psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
                     return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Cursor");
                 }
 
-                return (false, "未在常见路径找到 Cursor.exe；您可已完成 settings.json 热接管。");
+                return (false, "未在常见路径找到 Cursor.exe；可在「应用接管 & CLI」指定自定义可执行路径，或使用 settings.json 热接管。");
             }
 
             if (seat.Id == "claude-desktop")
             {
                 if (_isMacOs)
                 {
+                    string macTarget = ResolveCustomOrDetectedExe(seat, () => "Claude") ?? "Claude";
                     var psi = new ProcessStartInfo("open") { UseShellExecute = false };
                     psi.ArgumentList.Add("-a");
-                    psi.ArgumentList.Add("Claude");
+                    psi.ArgumentList.Add(macTarget);
                     psi.ArgumentList.Add("--args");
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
+                    psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
                     return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Claude Desktop");
                 }
 
-                string? claudeExe = ResolveClaudeDesktopExe();
+                string? claudeExe = ResolveCustomOrDetectedExe(seat, ResolveClaudeDesktopExe);
                 if (!string.IsNullOrEmpty(claudeExe))
                 {
                     var psi = new ProcessStartInfo(claudeExe) { UseShellExecute = false };
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
-                    psi.ArgumentList.Add("--proxy-bypass-list=<-loopback>;localhost;127.0.0.1;[::1]");
+                    psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
                     return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Claude Desktop");
@@ -257,7 +263,9 @@ public sealed class AppProxyTakeoverService
 
             // Claude Code / Codex / Gemini CLI / Grok Build / OpenCode 等：打开已预注入该席位代理环境变量的独立终端窗口
             string bannerTitle = seat.Name;
-            string cliHint = ResolveCliHint(seat);
+            string cliHint = !string.IsNullOrWhiteSpace(seat.CustomExecutablePath)
+                ? seat.CustomExecutablePath.Trim()
+                : ResolveCliHint(seat);
 
             if (_isMacOs)
             {
@@ -275,16 +283,8 @@ public sealed class AppProxyTakeoverService
                 $"Write-Host '[Agent Proxy Hub] {bannerTitle} 独立专线已挂载 -> {proxyHttp}' -ForegroundColor Cyan; " +
                 $"Write-Host '直接输入 {cliHint} 即可从专属出口通道通信，不影响系统或 Clash。' -ForegroundColor DarkGray";
 
-            var termPsi = new ProcessStartInfo("powershell.exe")
-            {
-                UseShellExecute = true
-            };
-            termPsi.ArgumentList.Add("-NoExit");
-            termPsi.ArgumentList.Add("-NoProfile");
-            termPsi.ArgumentList.Add("-Command");
-            termPsi.ArgumentList.Add(initCmd);
-            Process.Start(termPsi);
-            return (true, $"已打开已注入 :{seat.LocalPort} 独立专线的 PowerShell 终端");
+            StartWindowsInteractiveShell(initCmd);
+            return (true, $"已打开已注入 :{seat.LocalPort} 独立专线的交互式终端");
         }
     }
 
@@ -332,20 +332,21 @@ public sealed class AppProxyTakeoverService
         string path = GetGenericLauncherPath(seat.Id);
         string http = $"http://127.0.0.1:{seat.LocalPort}";
         string socks = $"socks5h://127.0.0.1:{seat.LocalPort}";
+        string noProxy = BuildEffectiveNoProxy(seat, _isMacOs);
         string cli = ResolveCliHint(seat);
 
         if (_isMacOs)
         {
             string body = seat.Id == "claude-desktop"
-                ? $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{http}\"\nexport HTTP_PROXY=\"{http}\"\nexport ALL_PROXY=\"{socks}\"\nexport NO_PROXY=\"localhost,127.0.0.1,::1\"\nopen -a Claude --args --proxy-server=\"{http}\"\n"
-                : $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{http}\"\nexport HTTP_PROXY=\"{http}\"\nexport ALL_PROXY=\"{socks}\"\nexport NO_PROXY=\"localhost,127.0.0.1,::1\"\necho \"[Agent Proxy Hub] {seat.Name} 独立出口已就绪 ({http})\"\nexec {cli} \"$@\"\n";
+                ? $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{http}\"\nexport HTTP_PROXY=\"{http}\"\nexport ALL_PROXY=\"{socks}\"\nexport NO_PROXY=\"{noProxy}\"\nopen -a Claude --args --proxy-server=\"{http}\"\n"
+                : $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{http}\"\nexport HTTP_PROXY=\"{http}\"\nexport ALL_PROXY=\"{socks}\"\nexport NO_PROXY=\"{noProxy}\"\necho \"[Agent Proxy Hub] {seat.Name} 独立出口已就绪 ({http})\"\nexec {cli} \"$@\"\n";
             File.WriteAllText(path, body, new UTF8Encoding(false));
         }
         else
         {
             string body = seat.Id == "claude-desktop"
-                ? $"$env:HTTPS_PROXY=\"{http}\"\r\n$env:HTTP_PROXY=\"{http}\"\r\n$env:ALL_PROXY=\"{socks}\"\r\n$env:NO_PROXY=\"localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8\"\r\n$exe = \"$env:LOCALAPPDATA\\AnthropicClaude\\Claude.exe\"\r\nif (Test-Path $exe) {{ Start-Process -FilePath $exe -ArgumentList \"--proxy-server={http}\" }} else {{ Write-Host \"未在默认目录找到 Claude.exe，请手动启动并附带 --proxy-server={http}\" }}\r\n"
-                : $"$env:HTTPS_PROXY=\"{http}\"\r\n$env:HTTP_PROXY=\"{http}\"\r\n$env:ALL_PROXY=\"{socks}\"\r\n$env:NO_PROXY=\"localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8\"\r\nWrite-Host \"[Agent Proxy Hub] {seat.Name} 独立出口已就绪 ({http})\" -ForegroundColor Cyan\r\nWrite-Host \"直接运行: {cli}\" -ForegroundColor Green\r\n";
+                ? $"$env:HTTPS_PROXY=\"{http}\"\r\n$env:HTTP_PROXY=\"{http}\"\r\n$env:ALL_PROXY=\"{socks}\"\r\n$env:NO_PROXY=\"{noProxy}\"\r\n$exe = \"$env:LOCALAPPDATA\\AnthropicClaude\\Claude.exe\"\r\nif (Test-Path $exe) {{ Start-Process -FilePath $exe -ArgumentList \"--proxy-server={http}\" }} else {{ Write-Host \"未在默认目录找到 Claude.exe，请手动启动并附带 --proxy-server={http}\" }}\r\n"
+                : $"$env:HTTPS_PROXY=\"{http}\"\r\n$env:HTTP_PROXY=\"{http}\"\r\n$env:ALL_PROXY=\"{socks}\"\r\n$env:NO_PROXY=\"{noProxy}\"\r\nWrite-Host \"[Agent Proxy Hub] {seat.Name} 独立出口已就绪 ({http})\" -ForegroundColor Cyan\r\nWrite-Host \"直接运行: {cli}\" -ForegroundColor Green\r\n";
             File.WriteAllText(path, body, new UTF8Encoding(true));
         }
 
@@ -585,7 +586,7 @@ public sealed class AppProxyTakeoverService
         {
             ["HTTP_PROXY"] = JsonValue.Create(proxy),
             ["HTTPS_PROXY"] = JsonValue.Create(proxy),
-            ["NO_PROXY"] = JsonValue.Create("localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8")
+            ["NO_PROXY"] = JsonValue.Create(BuildEffectiveNoProxy(seat, _isMacOs))
         };
 
         UpdateJsonObjectWithBackup("claude", path, ["env"], updates);
@@ -626,7 +627,7 @@ public sealed class AppProxyTakeoverService
     {
         string proxy = $"http://127.0.0.1:{seat.LocalPort}";
         string socksProxy = $"socks5h://127.0.0.1:{seat.LocalPort}";
-        string noProxy = "localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12";
+        string noProxy = BuildEffectiveNoProxy(seat, _isMacOs);
 
         // 1. 生成独立代理启动脚本（Windows .cmd 或 macOS .command）
         Directory.CreateDirectory(_launchersDir);
@@ -717,7 +718,7 @@ public sealed class AppProxyTakeoverService
         Directory.CreateDirectory(_launchersDir);
         string proxy = $"http://127.0.0.1:{seat.LocalPort}";
         string socksProxy = $"socks5h://127.0.0.1:{seat.LocalPort}";
-        string noProxy = "localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12";
+        string noProxy = BuildEffectiveNoProxy(seat, _isMacOs);
         string path = GetCodexLauncherPath();
 
         if (_isMacOs)
@@ -920,12 +921,99 @@ public sealed class AppProxyTakeoverService
             $"export HTTP_PROXY=\"{proxyHttp}\"\n" +
             $"export HTTPS_PROXY=\"{proxyHttp}\"\n" +
             $"export ALL_PROXY=\"{proxySocks}\"\n" +
-            "export NO_PROXY=\"localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8\"\n" +
+            "export NO_PROXY=\"" + BuildEffectiveNoProxy(seat, true) + "\"\n" +
             $"echo \"[Agent Proxy Hub] {title} 独立专线已挂载 -> {proxyHttp}\"\n" +
             $"echo \"输入 {cliHint} 即可走专属出口通道。\"\n" +
             "exec $SHELL -l\n";
         File.WriteAllText(path, script, new UTF8Encoding(false));
         return path;
+    }
+
+    public static string BuildEffectiveNoProxy(AppSeat seat, bool isMacOs)
+    {
+        var list = new List<string>(isMacOs
+            ? ["localhost", "127.0.0.1", "::1", "192.168.0.0/16", "10.0.0.0/8"]
+            : ["localhost", "127.0.0.1", "::1", "192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"]);
+
+        if (!string.IsNullOrWhiteSpace(seat.CustomNoProxy))
+        {
+            foreach (string raw in seat.CustomNoProxy.Split([',', ';', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+            {
+                string item = raw.Trim();
+                if (!string.IsNullOrEmpty(item) && !list.Contains(item, StringComparer.OrdinalIgnoreCase))
+                    list.Add(item);
+            }
+        }
+        return string.Join(",", list);
+    }
+
+    private static string BuildChromiumBypassList(string noProxy)
+    {
+        var items = new List<string> { "<-loopback>" };
+        foreach (string part in noProxy.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            string p = part.Trim();
+            if (p == "::1") p = "[::1]";
+            if (!string.IsNullOrEmpty(p) && !items.Contains(p, StringComparer.OrdinalIgnoreCase))
+                items.Add(p);
+        }
+        return string.Join(";", items);
+    }
+
+    private static string? ResolveCustomOrDetectedExe(AppSeat seat, Func<string?> fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(seat.CustomExecutablePath))
+        {
+            string trimmed = seat.CustomExecutablePath.Trim().Trim('"');
+            if (File.Exists(trimmed) || Directory.Exists(trimmed))
+                return trimmed;
+        }
+        return fallback();
+    }
+
+    private static string ResolveWindowsPowerShellExe()
+    {
+        string pf7 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "PowerShell", "7", "pwsh.exe");
+        if (File.Exists(pf7)) return pf7;
+
+        string storeAlias = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps", "pwsh.exe");
+        if (File.Exists(storeAlias)) return storeAlias;
+
+        return "powershell.exe";
+    }
+
+    private static void StartWindowsInteractiveShell(string initCmd)
+    {
+        string psExe = ResolveWindowsPowerShellExe();
+        string wtAlias = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Microsoft", "WindowsApps", "wt.exe");
+
+        if (File.Exists(wtAlias))
+        {
+            try
+            {
+                var wtPsi = new ProcessStartInfo(wtAlias) { UseShellExecute = true };
+                wtPsi.ArgumentList.Add("-w");
+                wtPsi.ArgumentList.Add("new");
+                wtPsi.ArgumentList.Add(psExe);
+                wtPsi.ArgumentList.Add("-NoExit");
+                wtPsi.ArgumentList.Add("-NoProfile");
+                wtPsi.ArgumentList.Add("-Command");
+                wtPsi.ArgumentList.Add(initCmd);
+                Process.Start(wtPsi);
+                return;
+            }
+            catch
+            {
+                // 回退直接拉起 PowerShell
+            }
+        }
+
+        var termPsi = new ProcessStartInfo(psExe) { UseShellExecute = true };
+        termPsi.ArgumentList.Add("-NoExit");
+        termPsi.ArgumentList.Add("-NoProfile");
+        termPsi.ArgumentList.Add("-Command");
+        termPsi.ArgumentList.Add(initCmd);
+        Process.Start(termPsi);
     }
 
     private static void ApplyProxyEnv(ProcessStartInfo psi, string httpProxy, string socksProxy, string noProxy)

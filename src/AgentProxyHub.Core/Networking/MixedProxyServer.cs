@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using AgentProxyHub.Core.Diagnostics;
 using AgentProxyHub.Core.Models;
 
 namespace AgentProxyHub.Core.Networking;
@@ -12,7 +13,7 @@ namespace AgentProxyHub.Core.Networking;
 /// <summary>
 /// 多端口混合入站代理引擎：
 /// - 首字节自动识别 SOCKS5 / SOCKS4 / HTTP CONNECT / HTTP
-/// - 实时记录上下行流量字节、并发连接、Fake-IP SNI 还原数与熔断拦截数
+/// - 实时记录上下行流量字节、并发连接、Fake-IP SNI 还原数、熔断拦截数与近期 20 条穿透审计摘要
 /// - 严格执行 Fail-Close 防串 IP 熔断锁
 /// </summary>
 public sealed class MixedProxyServer : IDisposable
@@ -37,6 +38,8 @@ public sealed class MixedProxyServer : IDisposable
         public long SniRecoveredCount;
         public long KillSwitchBlockedCount;
         public long Ipv6BlockedCount;
+        public readonly object ConnLogLock = new();
+        public readonly LinkedList<RecentConnectionEntry> RecentConnections = new();
     }
 
     private readonly UpstreamConnector _connector;
@@ -146,6 +149,61 @@ public sealed class MixedProxyServer : IDisposable
             });
         }
         return result;
+    }
+
+    /// <summary>
+    /// 查询指定席位（或全部席位）近期穿透连接审计摘要（仅含域名/端口/路由与流量字节，零请求正文）
+    /// </summary>
+    public List<RecentConnectionEntry> GetRecentConnections(string? seatId = null, int limit = 20)
+    {
+        int cap = Math.Clamp(limit, 1, 50);
+        var items = new List<RecentConnectionEntry>();
+        foreach (var st in _seats.Values)
+        {
+            if (!string.IsNullOrWhiteSpace(seatId) && !st.Seat.Id.Equals(seatId, StringComparison.OrdinalIgnoreCase))
+                continue;
+            lock (st.ConnLogLock)
+            {
+                items.AddRange(st.RecentConnections);
+            }
+        }
+        return items
+            .OrderByDescending(x => x.Timestamp)
+            .Take(cap)
+            .ToList();
+    }
+
+    private static void RecordConnection(
+        SeatListenerState st,
+        string targetHost,
+        int targetPort,
+        bool sniRecovered,
+        string routeSummary,
+        long bytesTx,
+        long bytesRx,
+        long durationMs,
+        string outcome)
+    {
+        var entry = new RecentConnectionEntry
+        {
+            Timestamp = DateTimeOffset.Now,
+            SeatId = st.Seat.Id,
+            TargetHost = targetHost,
+            TargetPort = targetPort,
+            SniRecovered = sniRecovered,
+            RouteSummary = routeSummary,
+            BytesTx = bytesTx,
+            BytesRx = bytesRx,
+            DurationMs = Math.Max(0, durationMs),
+            Outcome = outcome
+        };
+
+        lock (st.ConnLogLock)
+        {
+            st.RecentConnections.AddFirst(entry);
+            while (st.RecentConnections.Count > 20)
+                st.RecentConnections.RemoveLast();
+        }
     }
 
     /// <summary>
@@ -354,6 +412,7 @@ public sealed class MixedProxyServer : IDisposable
         if (!IsIpv6Enabled() && (reqHdr[3] == 0x04 || UpstreamConnector.IsIpv6Literal(targetHost)))
         {
             Interlocked.Increment(ref st.Ipv6BlockedCount);
+            RecordConnection(st, targetHost, targetPort, false, "IPv6 策略拦截", 0, 0, 0, "BLOCKED_IPV6");
             await clientStream.WriteAsync(new byte[] { 0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, ct);
             await clientStream.FlushAsync(ct);
             return;
@@ -366,30 +425,49 @@ public sealed class MixedProxyServer : IDisposable
             await clientStream.WriteAsync(new byte[] { 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, ct);
             await clientStream.FlushAsync(ct);
 
+            var swSni = Stopwatch.StartNew();
+            string beforeSni = targetHost;
             (targetHost, initialPayload) = await TryRecoverSniFromInitialPacketAsync(st, clientStream, targetHost, ct);
-            using var upstream = await DialUpstreamOrBlockAsync(st, targetHost, targetPort, ct);
-            if (upstream == null) return;
+            bool sniRecovered = !targetHost.Equals(beforeSni, StringComparison.OrdinalIgnoreCase);
+            var dialRes = await DialUpstreamOrBlockWithMetaAsync(st, targetHost, targetPort, sniRecovered, ct);
+            using var upstream = dialRes.Stream;
+            if (upstream == null)
+            {
+                swSni.Stop();
+                RecordConnection(st, targetHost, targetPort, sniRecovered, dialRes.RouteSummary, 0, 0, swSni.ElapsedMilliseconds, dialRes.Outcome);
+                return;
+            }
 
+            long tx = 0;
             if (initialPayload is { Length: > 0 })
             {
                 await upstream.WriteAsync(initialPayload, ct);
                 await upstream.FlushAsync(ct);
                 Interlocked.Add(ref st.BytesTx, initialPayload.Length);
+                tx += initialPayload.Length;
             }
-            await PumpBidirectionalAsync(st, clientStream, upstream, ct);
+            var (pTx, pRx) = await PumpBidirectionalAsync(st, clientStream, upstream, ct);
+            swSni.Stop();
+            RecordConnection(st, targetHost, targetPort, sniRecovered, dialRes.RouteSummary, tx + pTx, pRx, swSni.ElapsedMilliseconds, "OK");
             return;
         }
 
-        using var directUpstream = await DialUpstreamOrBlockAsync(st, targetHost, targetPort, ct);
+        var sw = Stopwatch.StartNew();
+        var directRes = await DialUpstreamOrBlockWithMetaAsync(st, targetHost, targetPort, false, ct);
+        using var directUpstream = directRes.Stream;
         if (directUpstream == null)
         {
+            sw.Stop();
+            RecordConnection(st, targetHost, targetPort, false, directRes.RouteSummary, 0, 0, sw.ElapsedMilliseconds, directRes.Outcome);
             await clientStream.WriteAsync(new byte[] { 0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, ct);
             return;
         }
 
         await clientStream.WriteAsync(new byte[] { 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, ct);
         await clientStream.FlushAsync(ct);
-        await PumpBidirectionalAsync(st, clientStream, directUpstream, ct);
+        var (dTx, dRx) = await PumpBidirectionalAsync(st, clientStream, directUpstream, ct);
+        sw.Stop();
+        RecordConnection(st, targetHost, targetPort, false, directRes.RouteSummary, dTx, dRx, sw.ElapsedMilliseconds, "OK");
     }
 
     private async Task HandleSocks4ClientAsync(SeatListenerState st, NetworkStream clientStream, CancellationToken ct)
@@ -410,16 +488,22 @@ public sealed class MixedProxyServer : IDisposable
             ? await ReadNullTerminatedAsciiAsync(clientStream, ct)
             : new IPAddress(hdr.AsSpan(3, 4)).ToString();
 
-        using var upstream = await DialUpstreamOrBlockAsync(st, targetHost, port, ct);
+        var sw = Stopwatch.StartNew();
+        var dialRes = await DialUpstreamOrBlockWithMetaAsync(st, targetHost, port, false, ct);
+        using var upstream = dialRes.Stream;
         if (upstream == null)
         {
+            sw.Stop();
+            RecordConnection(st, targetHost, port, false, dialRes.RouteSummary, 0, 0, sw.ElapsedMilliseconds, dialRes.Outcome);
             await clientStream.WriteAsync(new byte[] { 0x00, 0x5B, 0, 0, 0, 0, 0, 0 }, ct);
             return;
         }
 
         await clientStream.WriteAsync(new byte[] { 0x00, 0x5A, 0, 0, 0, 0, 0, 0 }, ct);
         await clientStream.FlushAsync(ct);
-        await PumpBidirectionalAsync(st, clientStream, upstream, ct);
+        var (tx, rx) = await PumpBidirectionalAsync(st, clientStream, upstream, ct);
+        sw.Stop();
+        RecordConnection(st, targetHost, port, false, dialRes.RouteSummary, tx, rx, sw.ElapsedMilliseconds, "OK");
     }
 
     private async Task HandleHttpClientAsync(SeatListenerState st, NetworkStream clientStream, byte firstByte, CancellationToken ct)
@@ -457,6 +541,7 @@ public sealed class MixedProxyServer : IDisposable
             if (!IsIpv6Enabled() && UpstreamConnector.IsIpv6Literal(host))
             {
                 Interlocked.Increment(ref st.Ipv6BlockedCount);
+                RecordConnection(st, host, port, false, "IPv6 策略拦截", 0, 0, 0, "BLOCKED_IPV6");
                 await clientStream.WriteAsync("HTTP/1.1 502 Bad Gateway (IPv6 Disabled)\r\n\r\n"u8.ToArray(), ct);
                 await clientStream.FlushAsync(ct);
                 return;
@@ -467,30 +552,49 @@ public sealed class MixedProxyServer : IDisposable
                 await clientStream.WriteAsync("HTTP/1.1 200 Connection Established\r\n\r\n"u8.ToArray(), ct);
                 await clientStream.FlushAsync(ct);
 
+                var swSni = Stopwatch.StartNew();
+                string beforeSni = host;
                 (host, byte[]? initialPayload) = await TryRecoverSniFromInitialPacketAsync(st, clientStream, host, ct);
-                using var upstreamSni = await DialUpstreamOrBlockAsync(st, host, port, ct);
-                if (upstreamSni == null) return;
+                bool sniRecovered = !host.Equals(beforeSni, StringComparison.OrdinalIgnoreCase);
+                var dialRes = await DialUpstreamOrBlockWithMetaAsync(st, host, port, sniRecovered, ct);
+                using var upstreamSni = dialRes.Stream;
+                if (upstreamSni == null)
+                {
+                    swSni.Stop();
+                    RecordConnection(st, host, port, sniRecovered, dialRes.RouteSummary, 0, 0, swSni.ElapsedMilliseconds, dialRes.Outcome);
+                    return;
+                }
 
+                long tx = 0;
                 if (initialPayload is { Length: > 0 })
                 {
                     await upstreamSni.WriteAsync(initialPayload, ct);
                     await upstreamSni.FlushAsync(ct);
                     Interlocked.Add(ref st.BytesTx, initialPayload.Length);
+                    tx += initialPayload.Length;
                 }
-                await PumpBidirectionalAsync(st, clientStream, upstreamSni, ct);
+                var (pTx, pRx) = await PumpBidirectionalAsync(st, clientStream, upstreamSni, ct);
+                swSni.Stop();
+                RecordConnection(st, host, port, sniRecovered, dialRes.RouteSummary, tx + pTx, pRx, swSni.ElapsedMilliseconds, "OK");
                 return;
             }
 
-            using var upstream = await DialUpstreamOrBlockAsync(st, host, port, ct);
+            var sw = Stopwatch.StartNew();
+            var dialResDirect = await DialUpstreamOrBlockWithMetaAsync(st, host, port, false, ct);
+            using var upstream = dialResDirect.Stream;
             if (upstream == null)
             {
+                sw.Stop();
+                RecordConnection(st, host, port, false, dialResDirect.RouteSummary, 0, 0, sw.ElapsedMilliseconds, dialResDirect.Outcome);
                 await clientStream.WriteAsync("HTTP/1.1 502 Bad Gateway (Kill Switch Blocked)\r\n\r\n"u8.ToArray(), ct);
                 return;
             }
 
             await clientStream.WriteAsync("HTTP/1.1 200 Connection Established\r\n\r\n"u8.ToArray(), ct);
             await clientStream.FlushAsync(ct);
-            await PumpBidirectionalAsync(st, clientStream, upstream, ct);
+            var (cTx, cRx) = await PumpBidirectionalAsync(st, clientStream, upstream, ct);
+            sw.Stop();
+            RecordConnection(st, host, port, false, dialResDirect.RouteSummary, cTx, cRx, sw.ElapsedMilliseconds, "OK");
         }
         else
         {
@@ -504,14 +608,19 @@ public sealed class MixedProxyServer : IDisposable
             if (!IsIpv6Enabled() && UpstreamConnector.IsIpv6Literal(host))
             {
                 Interlocked.Increment(ref st.Ipv6BlockedCount);
+                RecordConnection(st, host, port, false, "IPv6 策略拦截", 0, 0, 0, "BLOCKED_IPV6");
                 await clientStream.WriteAsync("HTTP/1.1 502 Bad Gateway (IPv6 Disabled)\r\n\r\n"u8.ToArray(), ct);
                 await clientStream.FlushAsync(ct);
                 return;
             }
 
-            using var upstream = await DialUpstreamOrBlockAsync(st, host, port, ct);
+            var sw = Stopwatch.StartNew();
+            var dialResPlain = await DialUpstreamOrBlockWithMetaAsync(st, host, port, false, ct);
+            using var upstream = dialResPlain.Stream;
             if (upstream == null)
             {
+                sw.Stop();
+                RecordConnection(st, host, port, false, dialResPlain.RouteSummary, 0, 0, sw.ElapsedMilliseconds, dialResPlain.Outcome);
                 await clientStream.WriteAsync("HTTP/1.1 502 Bad Gateway (Kill Switch Blocked)\r\n\r\n"u8.ToArray(), ct);
                 return;
             }
@@ -521,7 +630,9 @@ public sealed class MixedProxyServer : IDisposable
             await upstream.WriteAsync(headerBytes, ct);
             await upstream.FlushAsync(ct);
             Interlocked.Add(ref st.BytesTx, headerBytes.Length);
-            await PumpBidirectionalAsync(st, clientStream, upstream, ct);
+            var (pTx, pRx) = await PumpBidirectionalAsync(st, clientStream, upstream, ct);
+            sw.Stop();
+            RecordConnection(st, host, port, false, dialResPlain.RouteSummary, headerBytes.Length + pTx, pRx, sw.ElapsedMilliseconds, "OK");
         }
     }
 
@@ -553,7 +664,14 @@ public sealed class MixedProxyServer : IDisposable
         }
     }
 
-    private async Task<Stream?> DialUpstreamOrBlockAsync(SeatListenerState st, string targetHost, int targetPort, CancellationToken ct)
+    private sealed record DialResult(Stream? Stream, string RouteSummary, string Outcome);
+
+    private async Task<DialResult> DialUpstreamOrBlockWithMetaAsync(
+        SeatListenerState st,
+        string targetHost,
+        int targetPort,
+        bool sniRecovered,
+        CancellationToken ct)
     {
         List<ProxyNode> candidateNodes;
         ProxyNode? relayNode;
@@ -585,18 +703,30 @@ public sealed class MixedProxyServer : IDisposable
             if (killSwitch)
             {
                 Interlocked.Increment(ref st.KillSwitchBlockedCount);
-                return null;
+                HubEventLogger.Default.Warn("PROXY", $"{seat.Name} 无可用绑定线路，触发熔断阻断：{targetHost}:{targetPort}");
+                return new DialResult(null, "熔断锁阻断 (无可用线路)", "KILLSWITCH");
             }
-            return await _connector.ConnectDirectPhysicalAsync(targetHost, targetPort, iso, ct);
+            var phy = await _connector.ConnectDirectPhysicalAsync(targetHost, targetPort, iso, ct);
+            return new DialResult(phy, "物理网卡直出", "OK");
         }
 
+        bool sawUnapprovedTls = false;
         foreach (var node in candidateNodes)
         {
+            if (node.AllowInsecure && !node.InsecureApproved)
+            {
+                sawUnapprovedTls = true;
+                continue;
+            }
             try
             {
                 if (relayNode != null && relayNode.Id != node.Id)
-                    return await _connector.ConnectChainAsync(relayNode, node, targetHost, targetPort, iso, ct);
-                return await _connector.ConnectViaNodeAsync(node, targetHost, targetPort, iso, ct);
+                {
+                    var chainStream = await _connector.ConnectChainAsync(relayNode, node, targetHost, targetPort, iso, ct);
+                    return new DialResult(chainStream, $"{relayNode.Name} → {node.Name}", "OK");
+                }
+                var stream = await _connector.ConnectViaNodeAsync(node, targetHost, targetPort, iso, ct);
+                return new DialResult(stream, node.Name, "OK");
             }
             catch
             {
@@ -604,20 +734,39 @@ public sealed class MixedProxyServer : IDisposable
             }
         }
 
+        if (sawUnapprovedTls && killSwitch)
+        {
+            Interlocked.Increment(ref st.KillSwitchBlockedCount);
+            HubEventLogger.Default.Warn("PROXY", $"{seat.Name} 节点跳过证书校验未获批准，已阻止连接：{targetHost}:{targetPort}");
+            return new DialResult(null, "未批准跳过 TLS 证书校验", "UNAPPROVED_TLS");
+        }
+
         // 所有绑定专线失败：执行 Fail-Close 熔断锁，绝不回退直连或 Clash
         if (killSwitch)
         {
             Interlocked.Increment(ref st.KillSwitchBlockedCount);
-            return null;
+            HubEventLogger.Default.Warn("PROXY", $"{seat.Name} 上游拨号失败，已执行 Fail-Close 熔断：{targetHost}:{targetPort}");
+            return new DialResult(null, "Fail-Close 熔断拦截", "KILLSWITCH");
         }
 
-        return await _connector.ConnectDirectPhysicalAsync(targetHost, targetPort, iso, ct);
+        var direct = await _connector.ConnectDirectPhysicalAsync(targetHost, targetPort, iso, ct);
+        return new DialResult(direct, "物理直连兜底", "OK");
     }
 
-    private static async Task PumpBidirectionalAsync(SeatListenerState st, Stream client, Stream upstream, CancellationToken ct)
+    private static async Task<(long BytesTx, long BytesRx)> PumpBidirectionalAsync(SeatListenerState st, Stream client, Stream upstream, CancellationToken ct)
     {
-        var tClientToUp = CopyWithCountAsync(client, upstream, bytes => Interlocked.Add(ref st.BytesTx, bytes), halfCloseWriteOnEof: true, ct);
-        var tUpToClient = CopyWithCountAsync(upstream, client, bytes => Interlocked.Add(ref st.BytesRx, bytes), halfCloseWriteOnEof: true, ct);
+        long sessionTx = 0;
+        long sessionRx = 0;
+        var tClientToUp = CopyWithCountAsync(client, upstream, bytes =>
+        {
+            Interlocked.Add(ref st.BytesTx, bytes);
+            Interlocked.Add(ref sessionTx, bytes);
+        }, halfCloseWriteOnEof: true, ct);
+        var tUpToClient = CopyWithCountAsync(upstream, client, bytes =>
+        {
+            Interlocked.Add(ref st.BytesRx, bytes);
+            Interlocked.Add(ref sessionRx, bytes);
+        }, halfCloseWriteOnEof: true, ct);
 
         var firstDone = await Task.WhenAny(tClientToUp, tUpToClient);
         var remaining = firstDone == tClientToUp ? tUpToClient : tClientToUp;
@@ -630,6 +779,7 @@ public sealed class MixedProxyServer : IDisposable
             drainCts.Cancel();
         }
         catch { }
+        return (Interlocked.Read(ref sessionTx), Interlocked.Read(ref sessionRx));
     }
 
     private static async Task CopyWithCountAsync(

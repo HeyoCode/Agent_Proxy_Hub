@@ -58,8 +58,9 @@ public sealed class UsageStatsService
     {
         foreach (var e in items)
         {
-            var (cost, isPriced) = _pricing.CalculateCost(e);
+            var (cost, saved, isPriced) = _pricing.CalculateCostAndSavings(e);
             e.CostUsd = cost;
+            e.CacheSavedUsd = saved;
             e.IsPriced = isPriced;
         }
     }
@@ -132,9 +133,18 @@ public sealed class UsageStatsService
         long cacheRead = filtered.Sum(e => e.CacheReadTokens);
         long cacheWrite = filtered.Sum(e => e.CacheWriteTokens);
         long totalTokens = effIn + outTok + cacheRead + cacheWrite;
-        long totalPrompt = effIn + cacheWrite + cacheRead;
-        double cacheHitRate = totalPrompt > 0 ? Math.Round(cacheRead * 100.0 / totalPrompt, 1) : 0.0;
+        long cacheHitDenominator = effIn + cacheWrite + cacheRead;
+        double cacheHitRate = cacheHitDenominator > 0 ? Math.Round(cacheRead * 100.0 / cacheHitDenominator, 1) : 0.0;
         double totalCost = Math.Round(filtered.Where(e => e.IsPriced && e.CostUsd.HasValue).Sum(e => e.CostUsd!.Value), 4);
+        double totalCacheSaved = Math.Round(filtered.Where(e => e.IsPriced).Sum(e => e.CacheSavedUsd), 4);
+
+        // 过去 365 天活跃热力图仅随应用/模型筛选变化，不随 today/24h/7d 时间窗口萎缩
+        IEnumerable<UsageLogEntry> heatmapQuery = snapshot;
+        if (!string.IsNullOrWhiteSpace(appFilter) && !appFilter.Equals("all", StringComparison.OrdinalIgnoreCase))
+            heatmapQuery = heatmapQuery.Where(e => e.AppName.Equals(appFilter, StringComparison.OrdinalIgnoreCase));
+        if (!string.IsNullOrWhiteSpace(modelFilter) && !modelFilter.Equals("all", StringComparison.OrdinalIgnoreCase))
+            heatmapQuery = heatmapQuery.Where(e => e.Model.Equals(modelFilter, StringComparison.OrdinalIgnoreCase));
+        var (heatmapCells, activeDaysLastYear) = BuildYearHeatmap(heatmapQuery, now.Date);
 
         // 生成时间轴分桶（当天/24h 按小时，其余按天）
         var timeline = BuildTimeline(range, filtered, now);
@@ -181,6 +191,7 @@ public sealed class UsageStatsService
             ScannedFilesCount = syncInfo?.ScannedFiles ?? 0,
             SyncElapsedMs = syncInfo?.ElapsedMs ?? 0,
             TotalCostUsd = totalCost,
+            TotalCacheSavedUsd = totalCacheSaved,
             TotalRequests = filtered.Count,
             TotalTokens = totalTokens,
             EffectiveInputTokens = effIn,
@@ -190,6 +201,8 @@ public sealed class UsageStatsService
             CacheHitRate = cacheHitRate,
             PricedRequests = filtered.Count(e => e.IsPriced),
             UnpricedRequests = filtered.Count(e => !e.IsPriced),
+            ActiveDaysLastYear = activeDaysLastYear,
+            ActivityHeatmap = heatmapCells,
             TotalProxyTxBytes = proxySnapshots.Sum(s => s.BytesTx),
             TotalProxyRxBytes = proxySnapshots.Sum(s => s.BytesRx),
             TotalProxyTxBytesPerSec = proxySnapshots.Sum(s => s.BytesTxPerSec),
@@ -283,6 +296,68 @@ public sealed class UsageStatsService
             CacheHitRate = prompt > 0 ? Math.Round(cr * 100.0 / prompt, 1) : 0,
             CostUsd = Math.Round(list.Where(x => x.IsPriced && x.CostUsd.HasValue).Sum(x => x.CostUsd!.Value), 4)
         };
+    }
+
+    private static (List<DailyHeatmapCell> Cells, int ActiveDays) BuildYearHeatmap(
+        IEnumerable<UsageLogEntry> entries,
+        DateTime todayDate)
+    {
+        var startDate = todayDate.AddDays(-364);
+        var byDay = entries
+            .GroupBy(e => e.Timestamp.ToLocalTime().Date)
+            .ToDictionary(
+                g => g.Key,
+                g => (
+                    Requests: g.Count(),
+                    Tokens: g.Sum(x => x.TotalTokens),
+                    Cost: Math.Round(g.Where(x => x.IsPriced && x.CostUsd.HasValue).Sum(x => x.CostUsd!.Value), 4)));
+
+        var positives = byDay
+            .Where(kv => kv.Key >= startDate && kv.Key <= todayDate && kv.Value.Tokens > 0)
+            .Select(kv => kv.Value.Tokens)
+            .OrderBy(v => v)
+            .ToList();
+
+        long q1 = positives.Count > 0 ? positives[(int)(positives.Count * 0.25)] : 1;
+        long q2 = positives.Count > 0 ? positives[(int)(positives.Count * 0.50)] : 2;
+        long q3 = positives.Count > 0 ? positives[(int)(positives.Count * 0.75)] : 3;
+
+        var cells = new List<DailyHeatmapCell>(365);
+        int activeDays = 0;
+
+        for (int i = 0; i < 365; i++)
+        {
+            var d = startDate.AddDays(i);
+            if (byDay.TryGetValue(d, out var stat) && stat.Requests > 0)
+            {
+                activeDays++;
+                int level = stat.Tokens <= 0 ? 1 :
+                    stat.Tokens <= q1 ? 1 :
+                    stat.Tokens <= q2 ? 2 :
+                    stat.Tokens <= q3 ? 3 : 4;
+                cells.Add(new DailyHeatmapCell
+                {
+                    Date = d.ToString("yyyy-MM-dd"),
+                    Requests = stat.Requests,
+                    TotalTokens = stat.Tokens,
+                    CostUsd = stat.Cost,
+                    Level = level
+                });
+            }
+            else
+            {
+                cells.Add(new DailyHeatmapCell
+                {
+                    Date = d.ToString("yyyy-MM-dd"),
+                    Requests = 0,
+                    TotalTokens = 0,
+                    CostUsd = 0,
+                    Level = 0
+                });
+            }
+        }
+
+        return (cells, activeDays);
     }
 
     private static List<AppUsageAndProxySummary> MergeAppAndProxySummaries(
