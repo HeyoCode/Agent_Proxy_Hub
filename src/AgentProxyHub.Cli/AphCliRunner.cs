@@ -281,7 +281,7 @@ public static class AphCliRunner
 
     public static string GetHelpText() =>
         """
-        Agent Proxy Hub CLI (aph) v0.7.0 — 本地网关自动化与脚本控制工具
+        Agent Proxy Hub CLI (aph) v0.7.1 — 本地网关自动化与脚本控制工具
         用法:
           aph status [--json] [--port 17880]
           aph seats [--json]

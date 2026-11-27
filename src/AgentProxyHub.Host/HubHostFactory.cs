@@ -292,6 +292,8 @@ public static class HubHostFactory
         {
             try { proxyServer.Dispose(); } catch { }
             try { sidecar.Dispose(); } catch { }
+            try { dnsResolver.Dispose(); } catch { }
+            try { nicManager.Dispose(); } catch { }
         });
         _ = Task.Run(async () =>
         {
@@ -660,6 +662,7 @@ public static class HubHostFactory
                                 var priorityIds = doc.Seats
                                     .Where(s => s.Enabled)
                                     .SelectMany(s => new[] { s.BoundNodeId, s.FallbackNodeId, s.RelayNodeId })
+                                    .Concat(doc.Instances.Where(i => i.Enabled).Select(i => i.BoundNodeId))
                                     .Where(id => !string.IsNullOrWhiteSpace(id))
                                     .ToHashSet(StringComparer.Ordinal);
 
@@ -829,10 +832,7 @@ public static class HubHostFactory
                 int removedSub = (doc.Subscriptions ?? []).RemoveAll(s => s.Id == id);
                 if (removedSub == 0) return Results.NotFound();
 
-                var boundIds = doc.Seats
-                    .SelectMany(s => new[] { s.BoundNodeId, s.RelayNodeId })
-                    .Where(x => !string.IsNullOrWhiteSpace(x))
-                    .ToHashSet(StringComparer.Ordinal);
+                var boundIds = doc.GetReferencedNodeIds();
 
                 if (removeNodes == true)
                 {
@@ -905,6 +905,11 @@ public static class HubHostFactory
                         seat.RelayNodeId = null;
                     if (seat.FallbackNodeId == id)
                         seat.FallbackNodeId = null;
+                }
+                foreach (var inst in doc.Instances)
+                {
+                    if (inst.BoundNodeId == id)
+                        inst.BoundNodeId = doc.Nodes.FirstOrDefault()?.Id ?? "direct-phy";
                 }
                 store.Save(doc);
                 Interlocked.Increment(ref stateRevision);
@@ -1160,6 +1165,7 @@ public static class HubHostFactory
 
             AppSeat? seat;
             ProxyNode? boundNode;
+            ProxyNode? relayNode;
             IsolationSettings iso;
             lock (stateLock)
             {
@@ -1173,13 +1179,16 @@ public static class HubHostFactory
                     proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 }
                 boundNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
+                relayNode = string.IsNullOrWhiteSpace(seat.RelayNodeId)
+                    ? null
+                    : doc.Nodes.FirstOrDefault(n => n.Id == seat.RelayNodeId && n.Enabled);
                 iso = doc.Isolation;
             }
 
             // 若配置了「出口国家硬门禁」，启动客户端前强制先走独立端口验明出口国家
             if (!string.IsNullOrWhiteSpace(seat.ExpectedCountryCode))
             {
-                var check = await healthChecker.CheckSeatCountryGuardAsync(seat, boundNode, iso, ct);
+                var check = await healthChecker.CheckSeatCountryGuardAsync(seat, boundNode, iso, ct, relayNode);
                 if (!check.Passed)
                 {
                     return Results.Ok(new
@@ -1207,22 +1216,20 @@ public static class HubHostFactory
         {
             AppSeat? seat;
             ProxyNode? boundNode;
+            ProxyNode? relayNode;
             IsolationSettings iso;
             lock (stateLock)
             {
                 seat = doc.Seats.FirstOrDefault(s => s.Id == id);
                 if (seat == null) return Results.NotFound();
-                if (!seat.Enabled && !isVerifyOnly)
-                {
-                    seat.Enabled = true;
-                    store.Save(doc);
-                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
-                }
                 boundNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
+                relayNode = string.IsNullOrWhiteSpace(seat.RelayNodeId)
+                    ? null
+                    : doc.Nodes.FirstOrDefault(n => n.Id == seat.RelayNodeId && n.Enabled);
                 iso = doc.Isolation;
             }
 
-            var res = await healthChecker.CheckSeatCountryGuardAsync(seat, boundNode, iso, ct);
+            var res = await healthChecker.CheckSeatCountryGuardAsync(seat, boundNode, iso, ct, relayNode);
             return Results.Ok(new
             {
                 check = res,
@@ -1241,31 +1248,38 @@ public static class HubHostFactory
         {
             AppSeat? seat;
             ProxyNode? boundNode;
+            ProxyNode? relayNode;
             IsolationSettings iso;
             lock (stateLock)
             {
                 seat = doc.Seats.FirstOrDefault(s => s.Id == id);
                 if (seat == null) return Results.NotFound();
-                if (!seat.Enabled && !isVerifyOnly)
-                {
-                    seat.Enabled = true;
-                    store.Save(doc);
-                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
-                }
                 boundNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
+                relayNode = string.IsNullOrWhiteSpace(seat.RelayNodeId)
+                    ? null
+                    : doc.Nodes.FirstOrDefault(n => n.Id == seat.RelayNodeId && n.Enabled);
                 iso = doc.Isolation;
             }
 
-            if (isVerifyOnly)
+            if (isVerifyOnly || !seat.Enabled)
             {
                 if (boundNode != null && boundNode.Protocol != ProxyProtocol.DIRECT_PHYSICAL)
                 {
                     using var verifyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     verifyCts.CancelAfter(TimeSpan.FromSeconds(8));
                     await healthChecker.VerifyNodeAsync(boundNode, iso, verifyCts.Token);
+                    lock (stateLock) store.Save(doc);
+                }
+                else if (boundNode is { Protocol: ProxyProtocol.DIRECT_PHYSICAL })
+                {
+                    boundNode.Status = "online";
+                    boundNode.LatencyMs = 1;
+                    boundNode.ExitIp = nicManager.GetLockedAdapter()?.IPv4Address ?? "物理网卡直出";
+                    boundNode.LastCheckedAt = DateTimeOffset.UtcNow;
                 }
                 Interlocked.Increment(ref stateRevision);
-                HubEventLogger.Default.Info("VERIFY", $"席位「{seat.Name}」预览直连验真完成：{boundNode?.ExitIp ?? "—"}");
+                string modeTag = isVerifyOnly ? "预览模式" : "席位未启用";
+                HubEventLogger.Default.Info("VERIFY", $"席位「{seat.Name}」({modeTag}) 直连验真完成：{boundNode?.ExitIp ?? "—"}");
                 return Results.Ok(new TunnelVerificationResult
                 {
                     Ok = boundNode?.Status == "online",
@@ -1273,14 +1287,14 @@ public static class HubHostFactory
                     LocalPort = seat.LocalPort,
                     ExitIp = boundNode?.ExitIp ?? "—",
                     LatencyMs = boundNode?.LatencyMs,
-                    Node = boundNode,
-                    Message = "预览模式完成节点直连检测"
+                    Node = boundNode?.ToRedactedCopy(),
+                    Message = $"{modeTag}已完成绑定线路直连验真（未修改席位启停状态）"
                 });
             }
 
             using var tunnelCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            tunnelCts.CancelAfter(TimeSpan.FromSeconds(9));
-            var res = await healthChecker.VerifyViaLocalSeatAsync(seat.Id, seat.LocalPort, boundNode, iso, null, tunnelCts.Token);
+            tunnelCts.CancelAfter(TimeSpan.FromSeconds(relayNode != null ? 12 : 9));
+            var res = await healthChecker.VerifyViaLocalSeatAsync(seat.Id, seat.LocalPort, boundNode, iso, null, tunnelCts.Token, relayNode);
             var snap = proxyServer.GetTrafficSnapshots().FirstOrDefault(s => s.SeatId == seat.Id);
             res.BytesTx = snap?.BytesTx ?? 0;
             res.BytesRx = snap?.BytesRx ?? 0;

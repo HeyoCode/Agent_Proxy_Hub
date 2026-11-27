@@ -1,11 +1,14 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using AgentProxyHub.Core.Diagnostics;
 using AgentProxyHub.Core.Models;
 
 namespace AgentProxyHub.Core.Networking;
@@ -19,7 +22,7 @@ namespace AgentProxyHub.Core.Networking;
 /// </summary>
 public sealed class SingBoxSidecarManager : IDisposable
 {
-    private const int BridgePortBase = 17920;
+    public const int BridgePortBase = 18020;
 
     private readonly string _binDir;
     private readonly string _runtimeDir;
@@ -236,23 +239,52 @@ public sealed class SingBoxSidecarManager : IDisposable
         }
 
         var distinctNodes = merged.Values.OrderBy(n => n.Id, StringComparer.Ordinal).ToList();
+        bool processAlive = _process != null && !_process.HasExited;
+        IReadOnlyDictionary<string, int>? reusablePorts = null;
+        if (_nodeBridgePorts.Count > 0)
+        {
+            if (processAlive)
+            {
+                reusablePorts = _nodeBridgePorts;
+            }
+            else
+            {
+                reusablePorts = _nodeBridgePorts
+                    .Where(kv => IsLoopbackPortAvailable(kv.Value))
+                    .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal);
+            }
+        }
+
+        _cachedVersion ??= ReadSingBoxVersion(bin);
+        bool modernSchema = IsModernSingBoxVersion(_cachedVersion);
+
         (string configJson, Dictionary<string, int> portMap) = BuildBridgeConfigJson(
             distinctNodes,
             _boundInterfaceName,
             _lastIsolation,
             BridgePortBase,
-            _nodeBridgePorts);
+            reusablePorts,
+            probeSystemPort: true,
+            modernSchema: modernSchema);
         string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(configJson)));
 
-        if (_process != null && !_process.HasExited && hash == _lastConfigHash)
+        if (processAlive && hash == _lastConfigHash)
         {
             return true;
         }
 
         Directory.CreateDirectory(_runtimeDir);
         File.WriteAllText(_configPath, configJson, new UTF8Encoding(false));
+        if (!OperatingSystem.IsWindows())
+        {
+            try
+            {
+                File.SetUnixFileMode(_configPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+            catch { }
+        }
 
-        StopProcessLocked();
+        StopProcessLocked(deleteConfig: false);
         _nodeBridgePorts.Clear();
         foreach (var kv in portMap) _nodeBridgePorts[kv.Key] = kv.Value;
         _recentLogs.Clear();
@@ -353,6 +385,10 @@ public sealed class SingBoxSidecarManager : IDisposable
             {
                 handler.Proxy = new WebProxy(optionalProxyUrl);
                 handler.UseProxy = true;
+            }
+            else
+            {
+                handler.UseProxy = false;
             }
             using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMinutes(3) };
             http.DefaultRequestHeaders.UserAgent.ParseAdd($"AgentProxyHub/{ProjectMetadata.Version}");
@@ -470,11 +506,14 @@ public sealed class SingBoxSidecarManager : IDisposable
                 File.Copy(cleanPath, targetBin, overwrite: true);
                 if (!OperatingSystem.IsWindows())
                 {
-                    Process.Start(new ProcessStartInfo("chmod", $"+x \"{targetBin}\"")
+                    var chmodPsi = new ProcessStartInfo("chmod")
                     {
                         UseShellExecute = false,
                         CreateNoWindow = true
-                    })?.WaitForExit(2000);
+                    };
+                    chmodPsi.ArgumentList.Add("+x");
+                    chmodPsi.ArgumentList.Add(targetBin);
+                    Process.Start(chmodPsi)?.WaitForExit(2000);
                 }
             }
 
@@ -551,26 +590,67 @@ public sealed class SingBoxSidecarManager : IDisposable
 
         string extractDir = Path.Combine(Path.GetTempPath(), $"aph-sb-ext-{Guid.NewGuid():N}");
         Directory.CreateDirectory(extractDir);
+        string extractRootFull = Path.GetFullPath(extractDir) + Path.DirectorySeparatorChar;
         try
         {
-            var tar = Process.Start(new ProcessStartInfo("tar", $"-xzf \"{archivePath}\" -C \"{extractDir}\"")
+            // 先列出归档条目校验是否存在目录穿越，再执行解压
+            var listPsi = new ProcessStartInfo("tar")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true
+            };
+            listPsi.ArgumentList.Add("-tzf");
+            listPsi.ArgumentList.Add(archivePath);
+            using (var listProc = Process.Start(listPsi))
+            {
+                if (listProc != null)
+                {
+                    string listing = await listProc.StandardOutput.ReadToEndAsync(ct);
+                    await listProc.WaitForExitAsync(ct);
+                    foreach (string entry in listing.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        string trimmedEntry = entry.TrimStart('.');
+                        if (Path.IsPathRooted(entry) || entry.Contains("..", StringComparison.Ordinal))
+                            return (false, $"检测到 tar.gz 压缩包存在非法路径条目: {entry}");
+                        string combinedFull = Path.GetFullPath(Path.Combine(extractDir, entry));
+                        if (!combinedFull.StartsWith(extractRootFull, StringComparison.OrdinalIgnoreCase) && !trimmedEntry.Equals("/", StringComparison.Ordinal))
+                            return (false, $"检测到 tar.gz 压缩包存在目录穿越条目: {entry}");
+                    }
+                }
+            }
+
+            var tarPsi = new ProcessStartInfo("tar")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true
-            });
+            };
+            tarPsi.ArgumentList.Add("-xzf");
+            tarPsi.ArgumentList.Add(archivePath);
+            tarPsi.ArgumentList.Add("-C");
+            tarPsi.ArgumentList.Add(extractDir);
+            using var tar = Process.Start(tarPsi);
             if (tar != null) await tar.WaitForExitAsync(ct);
+
             string? found = Directory.EnumerateFiles(extractDir, "sing-box*", SearchOption.AllDirectories)
-                .FirstOrDefault(f => Path.GetFileName(f) is "sing-box" or "sing-box.exe");
+                .FirstOrDefault(f =>
+                {
+                    var fi = new FileInfo(f);
+                    return (fi.Name is "sing-box" or "sing-box.exe") && fi.LinkTarget == null;
+                });
             if (string.IsNullOrEmpty(found))
-                return (false, "tar.gz 解压后未找到 sing-box 二进制文件");
+                return (false, "tar.gz 解压后未找到合法的 sing-box 二进制文件");
             File.Copy(found, targetBin, overwrite: true);
             if (!OperatingSystem.IsWindows())
             {
-                Process.Start(new ProcessStartInfo("chmod", $"+x \"{targetBin}\"")
+                var chmodPsi = new ProcessStartInfo("chmod")
                 {
                     UseShellExecute = false,
                     CreateNoWindow = true
-                })?.WaitForExit(2000);
+                };
+                chmodPsi.ArgumentList.Add("+x");
+                chmodPsi.ArgumentList.Add(targetBin);
+                Process.Start(chmodPsi)?.WaitForExit(2000);
             }
             return (true, "OK");
         }
@@ -581,6 +661,48 @@ public sealed class SingBoxSidecarManager : IDisposable
     }
 
     /// <summary>
+    /// 探测指定本地环回端口当前是否可被独占绑定监听
+    /// </summary>
+    public static bool IsLoopbackPortAvailable(int port)
+    {
+        if (port is < 1024 or > 65535) return false;
+        try
+        {
+            var probe = new TcpListener(IPAddress.Loopback, port);
+            if (OperatingSystem.IsWindows())
+            {
+                probe.ExclusiveAddressUse = true;
+            }
+            probe.Start();
+            probe.Stop();
+            return true;
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 判断当前 sing-box 内核是否为 1.12+ 现代配置规范（1.14.0 已彻底移除旧版 dns.servers address 与内置 wireguard outbound）
+    /// </summary>
+    public static bool IsModernSingBoxVersion(string? versionText)
+    {
+        if (string.IsNullOrWhiteSpace(versionText)) return true;
+        string token = versionText.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries)[0].TrimStart('v', 'V');
+        string[] parts = token.Split(['.', '-'], StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length >= 2 && int.TryParse(parts[0], out int major) && int.TryParse(parts[1], out int minor))
+        {
+            return major > 1 || (major == 1 && minor >= 12);
+        }
+        return true;
+    }
+
+    /// <summary>
     /// 生成 sing-box 隔离桥接配置（每个 L2 节点映射唯一本地环回端口，并绑定物理硬件网卡绕过 Clash）
     /// </summary>
     public static (string Json, Dictionary<string, int> PortMap) BuildBridgeConfigJson(
@@ -588,13 +710,18 @@ public sealed class SingBoxSidecarManager : IDisposable
         string? boundInterfaceName,
         IsolationSettings iso,
         int basePort = BridgePortBase,
-        IReadOnlyDictionary<string, int>? previousPorts = null)
+        IReadOnlyDictionary<string, int>? previousPorts = null,
+        bool probeSystemPort = false,
+        bool modernSchema = true)
     {
         var portMap = new Dictionary<string, int>(StringComparer.Ordinal);
         var usedPorts = new HashSet<int>();
         var inbounds = new JsonArray();
         var outbounds = new JsonArray();
+        var endpoints = new JsonArray();
         var rules = new JsonArray();
+        string cleanDnsIp = string.IsNullOrWhiteSpace(iso.DohServerIp) ? "223.5.5.5" : iso.DohServerIp.Trim();
+        string domainStrategy = iso.EnableIpv6 ? "prefer_ipv4" : "ipv4_only";
 
         // 先保留已分配节点的原端口，确保扩容新验真节点时已有活跃节点端口不漂移
         foreach (var node in l2Nodes)
@@ -611,7 +738,12 @@ public sealed class SingBoxSidecarManager : IDisposable
             var node = l2Nodes[i];
             if (!portMap.TryGetValue(node.Id, out int port))
             {
-                while (usedPorts.Contains(nextCandidate)) nextCandidate++;
+                while (usedPorts.Contains(nextCandidate) || (probeSystemPort && !IsLoopbackPortAvailable(nextCandidate)))
+                {
+                    nextCandidate++;
+                    if (nextCandidate > 65535)
+                        throw new InvalidOperationException("本地无可用回环桥接端口");
+                }
                 port = nextCandidate++;
                 usedPorts.Add(port);
                 portMap[node.Id] = port;
@@ -627,7 +759,14 @@ public sealed class SingBoxSidecarManager : IDisposable
                 ["listen_port"] = port
             });
 
-            outbounds.Add(BuildSingBoxOutbound(node, outTag, boundInterfaceName, iso));
+            if (modernSchema && node.Protocol == ProxyProtocol.WIREGUARD)
+            {
+                endpoints.Add(BuildSingBoxWireGuardEndpoint(node, outTag, boundInterfaceName, domainStrategy));
+            }
+            else
+            {
+                outbounds.Add(BuildSingBoxOutbound(node, outTag, boundInterfaceName, domainStrategy, modernSchema));
+            }
 
             rules.Add(new JsonObject
             {
@@ -638,34 +777,117 @@ public sealed class SingBoxSidecarManager : IDisposable
 
         outbounds.Add(new JsonObject { ["type"] = "direct", ["tag"] = "direct" });
 
+        JsonObject dnsServerObj;
+        if (modernSchema)
+        {
+            dnsServerObj = new JsonObject
+            {
+                ["type"] = "udp",
+                ["tag"] = "clean-dns",
+                ["server"] = cleanDnsIp,
+                ["server_port"] = 53
+            };
+            if (!string.IsNullOrWhiteSpace(boundInterfaceName))
+                dnsServerObj["bind_interface"] = boundInterfaceName;
+        }
+        else
+        {
+            dnsServerObj = new JsonObject
+            {
+                ["tag"] = "clean-dns",
+                ["address"] = cleanDnsIp,
+                ["detour"] = "direct"
+            };
+        }
+
+        var routeObj = new JsonObject
+        {
+            ["rules"] = rules,
+            ["final"] = "direct",
+            ["auto_detect_interface"] = string.IsNullOrWhiteSpace(boundInterfaceName)
+        };
+        if (modernSchema)
+        {
+            routeObj["default_domain_resolver"] = new JsonObject
+            {
+                ["server"] = "clean-dns",
+                ["strategy"] = domainStrategy
+            };
+        }
+
         var root = new JsonObject
         {
             ["log"] = new JsonObject { ["level"] = "warn" },
             ["dns"] = new JsonObject
             {
-                ["servers"] = new JsonArray(new JsonObject
-                {
-                    ["tag"] = "clean-dns",
-                    ["address"] = string.IsNullOrWhiteSpace(iso.DohServerIp) ? "223.5.5.5" : iso.DohServerIp,
-                    ["detour"] = "direct"
-                }),
-                ["strategy"] = iso.EnableIpv6 ? "prefer_ipv4" : "ipv4_only"
+                ["servers"] = new JsonArray(dnsServerObj),
+                ["strategy"] = domainStrategy
             },
             ["inbounds"] = inbounds,
             ["outbounds"] = outbounds,
-            ["route"] = new JsonObject
-            {
-                ["rules"] = rules,
-                ["final"] = "direct",
-                ["auto_detect_interface"] = string.IsNullOrWhiteSpace(boundInterfaceName)
-            }
+            ["route"] = routeObj
         };
+
+        if (endpoints.Count > 0)
+        {
+            root["endpoints"] = endpoints;
+        }
 
         string json = root.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         return (json, portMap);
     }
 
-    private static JsonObject BuildSingBoxOutbound(ProxyNode node, string tag, string? boundInterfaceName, IsolationSettings iso)
+    private static JsonObject BuildSingBoxWireGuardEndpoint(
+        ProxyNode node,
+        string tag,
+        string? boundInterfaceName,
+        string domainStrategy)
+    {
+        var extra = node.Extra ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var localAddr = new JsonArray();
+        string addrRaw = extra.TryGetValue("address", out string? aStr) && !string.IsNullOrWhiteSpace(aStr)
+            ? aStr
+            : "10.0.0.2/32";
+        foreach (string a in addrRaw.Split(',', StringSplitOptions.RemoveEmptyEntries))
+            localAddr.Add(a.Trim());
+
+        var peer = new JsonObject
+        {
+            ["address"] = node.Host,
+            ["port"] = node.Port,
+            ["allowed_ips"] = new JsonArray("0.0.0.0/0", "::/0")
+        };
+        if (extra.TryGetValue("publickey", out string? pub) || extra.TryGetValue("public_key", out pub))
+            peer["public_key"] = pub;
+
+        var ep = new JsonObject
+        {
+            ["type"] = "wireguard",
+            ["tag"] = tag,
+            ["address"] = localAddr,
+            ["private_key"] = node.Password ?? string.Empty,
+            ["peers"] = new JsonArray(peer),
+            ["domain_resolver"] = new JsonObject
+            {
+                ["server"] = "clean-dns",
+                ["strategy"] = domainStrategy
+            }
+        };
+
+        if (!string.IsNullOrWhiteSpace(boundInterfaceName))
+            ep["bind_interface"] = boundInterfaceName;
+        if (extra.TryGetValue("mtu", out string? mtuStr) && int.TryParse(mtuStr, out int mtu) && mtu >= 1200)
+            ep["mtu"] = mtu;
+
+        return ep;
+    }
+
+    private static JsonObject BuildSingBoxOutbound(
+        ProxyNode node,
+        string tag,
+        string? boundInterfaceName,
+        string domainStrategy,
+        bool modernSchema)
     {
         var extra = node.Extra ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var obj = new JsonObject
@@ -679,7 +901,18 @@ public sealed class SingBoxSidecarManager : IDisposable
         {
             obj["bind_interface"] = boundInterfaceName;
         }
-        obj["domain_strategy"] = iso.EnableIpv6 ? "prefer_ipv4" : "ipv4_only";
+        if (modernSchema)
+        {
+            obj["domain_resolver"] = new JsonObject
+            {
+                ["server"] = "clean-dns",
+                ["strategy"] = domainStrategy
+            };
+        }
+        else
+        {
+            obj["domain_strategy"] = domainStrategy;
+        }
 
         switch (node.Protocol)
         {
@@ -688,9 +921,12 @@ public sealed class SingBoxSidecarManager : IDisposable
                 obj["uuid"] = node.Username ?? string.Empty;
                 if (extra.TryGetValue("flow", out string? flow) && !string.IsNullOrWhiteSpace(flow))
                     obj["flow"] = flow;
+                if (TryGetFirstExtra(extra, out string? pktEnc, "packetEncoding", "packet-encoding", "packet_encoding"))
+                    obj["packet_encoding"] = pktEnc;
 
                 string sec = extra.TryGetValue("security", out string? s) ? s.ToLowerInvariant() : "none";
-                if (sec is "tls" or "reality")
+                bool tlsFlag = extra.TryGetValue("tls", out string? tf) && (tf == "1" || tf.Equals("true", StringComparison.OrdinalIgnoreCase));
+                if (sec is "tls" or "reality" || tlsFlag)
                 {
                     var tls = new JsonObject
                     {
@@ -700,6 +936,8 @@ public sealed class SingBoxSidecarManager : IDisposable
                     };
                     if (extra.TryGetValue("fp", out string? fp) && !string.IsNullOrWhiteSpace(fp))
                         tls["utls"] = new JsonObject { ["enabled"] = true, ["fingerprint"] = fp };
+                    if (TryBuildAlpnArray(extra, out var vlessAlpn))
+                        tls["alpn"] = vlessAlpn;
                     if (sec == "reality")
                     {
                         var reality = new JsonObject { ["enabled"] = true };
@@ -714,15 +952,57 @@ public sealed class SingBoxSidecarManager : IDisposable
                 if (net == "ws")
                 {
                     var ws = new JsonObject { ["type"] = "ws" };
-                    if (extra.TryGetValue("path", out string? path)) ws["path"] = path;
-                    if (extra.TryGetValue("host", out string? h)) ws["headers"] = new JsonObject { ["Host"] = h };
+                    int? earlyData = null;
+                    if (extra.TryGetValue("path", out string? rawWsPath) && !string.IsNullOrWhiteSpace(rawWsPath))
+                    {
+                        (string cleanPath, int? parsedEd) = SplitWsPathAndEarlyData(rawWsPath);
+                        ws["path"] = cleanPath;
+                        earlyData = parsedEd;
+                    }
+                    if (!earlyData.HasValue && TryGetFirstExtra(extra, out string? edStr, "max-early-data", "max_early_data") && int.TryParse(edStr, out int edNum) && edNum > 0)
+                    {
+                        earlyData = edNum;
+                    }
+                    if (earlyData is > 0)
+                    {
+                        ws["max_early_data"] = earlyData.Value;
+                        ws["early_data_header_name"] = TryGetFirstExtra(extra, out string? edHdr, "early-data-header-name", "early_data_header_name")
+                            ? edHdr
+                            : "Sec-WebSocket-Protocol";
+                    }
+                    if (extra.TryGetValue("host", out string? h) && !string.IsNullOrWhiteSpace(h))
+                        ws["headers"] = new JsonObject { ["Host"] = h };
                     obj["transport"] = ws;
                 }
                 else if (net == "grpc")
                 {
                     var grpc = new JsonObject { ["type"] = "grpc" };
-                    if (extra.TryGetValue("serviceName", out string? sn)) grpc["service_name"] = sn;
+                    if (extra.TryGetValue("serviceName", out string? sn) && !string.IsNullOrWhiteSpace(sn))
+                        grpc["service_name"] = sn;
                     obj["transport"] = grpc;
+                }
+                else if (net == "httpupgrade")
+                {
+                    var hu = new JsonObject { ["type"] = "httpupgrade" };
+                    if (extra.TryGetValue("path", out string? huPath) && !string.IsNullOrWhiteSpace(huPath))
+                        hu["path"] = huPath;
+                    if (extra.TryGetValue("host", out string? huHost) && !string.IsNullOrWhiteSpace(huHost))
+                        hu["host"] = huHost;
+                    obj["transport"] = hu;
+                }
+                else if (net is "http" or "h2")
+                {
+                    var httpTr = new JsonObject { ["type"] = "http" };
+                    if (extra.TryGetValue("path", out string? h2Path) && !string.IsNullOrWhiteSpace(h2Path))
+                        httpTr["path"] = h2Path;
+                    if (extra.TryGetValue("host", out string? h2Host) && !string.IsNullOrWhiteSpace(h2Host))
+                    {
+                        var hosts = new JsonArray();
+                        foreach (string item in h2Host.Split(',', StringSplitOptions.RemoveEmptyEntries))
+                            hosts.Add(item.Trim());
+                        httpTr["host"] = hosts;
+                    }
+                    obj["transport"] = httpTr;
                 }
                 break;
 
@@ -735,12 +1015,15 @@ public sealed class SingBoxSidecarManager : IDisposable
                     if (extra.TryGetValue("obfs-password", out string? obfsPass)) obfsObj["password"] = obfsPass;
                     obj["obfs"] = obfsObj;
                 }
-                obj["tls"] = new JsonObject
+                var hy2Tls = new JsonObject
                 {
                     ["enabled"] = true,
                     ["server_name"] = node.Sni ?? node.Host,
                     ["insecure"] = node.AllowInsecure
                 };
+                if (TryBuildAlpnArray(extra, out var hy2Alpn))
+                    hy2Tls["alpn"] = hy2Alpn;
+                obj["tls"] = hy2Tls;
                 break;
 
             case ProxyProtocol.TUIC:
@@ -754,12 +1037,8 @@ public sealed class SingBoxSidecarManager : IDisposable
                     ["server_name"] = node.Sni ?? node.Host,
                     ["insecure"] = node.AllowInsecure
                 };
-                if (extra.TryGetValue("alpn", out string? alpn) && !string.IsNullOrWhiteSpace(alpn))
-                {
-                    var alpnArr = new JsonArray();
-                    foreach (string a in alpn.Split(',', StringSplitOptions.RemoveEmptyEntries)) alpnArr.Add(a.Trim());
-                    tuicTls["alpn"] = alpnArr;
-                }
+                if (TryBuildAlpnArray(extra, out var tuicAlpn))
+                    tuicTls["alpn"] = tuicAlpn;
                 obj["tls"] = tuicTls;
                 break;
 
@@ -782,7 +1061,62 @@ public sealed class SingBoxSidecarManager : IDisposable
         return obj;
     }
 
-    private void StopProcessLocked()
+    private static bool TryGetFirstExtra(Dictionary<string, string> extra, out string val, params string[] keys)
+    {
+        foreach (string k in keys)
+        {
+            if (extra.TryGetValue(k, out string? found) && !string.IsNullOrWhiteSpace(found))
+            {
+                val = found.Trim();
+                return true;
+            }
+        }
+        val = string.Empty;
+        return false;
+    }
+
+    private static bool TryBuildAlpnArray(Dictionary<string, string> extra, out JsonArray arr)
+    {
+        arr = new JsonArray();
+        if (!extra.TryGetValue("alpn", out string? raw) || string.IsNullOrWhiteSpace(raw))
+            return false;
+        foreach (string a in raw.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            string clean = a.Trim();
+            if (!string.IsNullOrEmpty(clean)) arr.Add(clean);
+        }
+        return arr.Count > 0;
+    }
+
+    private static (string CleanPath, int? EarlyData) SplitWsPathAndEarlyData(string rawPath)
+    {
+        int qIdx = rawPath.IndexOf('?');
+        if (qIdx < 0) return (rawPath, null);
+
+        string basePath = rawPath[..qIdx];
+        string query = rawPath[(qIdx + 1)..];
+        var keptParams = new List<string>();
+        int? earlyData = null;
+
+        foreach (string part in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var m = Regex.Match(part, @"^ed=(\d+)$", RegexOptions.IgnoreCase);
+            if (m.Success && int.TryParse(m.Groups[1].Value, out int ed) && ed > 0)
+            {
+                earlyData = ed;
+                continue;
+            }
+            keptParams.Add(part);
+        }
+
+        string normalizedPath = string.IsNullOrEmpty(basePath) ? "/" : basePath;
+        if (keptParams.Count > 0)
+            normalizedPath += "?" + string.Join("&", keptParams);
+
+        return (normalizedPath, earlyData);
+    }
+
+    private void StopProcessLocked(bool deleteConfig = true)
     {
         if (_process != null)
         {
@@ -794,6 +1128,15 @@ public sealed class SingBoxSidecarManager : IDisposable
             catch { }
             try { _process.Dispose(); } catch { }
             _process = null;
+        }
+
+        if (deleteConfig)
+        {
+            try
+            {
+                if (File.Exists(_configPath)) File.Delete(_configPath);
+            }
+            catch { }
         }
     }
 

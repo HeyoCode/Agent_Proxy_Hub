@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
@@ -187,11 +188,13 @@ public sealed class ShadowsocksAeadStream : Stream
 
     private bool _writeSaltSent;
     private byte[]? _writeSubkey;
+    private IDisposable? _writeCipher;
     private readonly byte[] _writeNonce = new byte[NonceSize];
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
     private bool _readSaltReceived;
     private byte[]? _readSubkey;
+    private IDisposable? _readCipher;
     private readonly byte[] _readNonce = new byte[NonceSize];
     private readonly SemaphoreSlim _readLock = new(1, 1);
     private byte[] _readPlainBuffer = [];
@@ -236,6 +239,7 @@ public sealed class ShadowsocksAeadStream : Stream
             {
                 byte[] salt = RandomNumberGenerator.GetBytes(_saltSize);
                 _writeSubkey = HKDF.DeriveKey(HashAlgorithmName.SHA1, _masterKey, _keySize, salt, HkdfInfo);
+                _writeCipher = CreateAeadInstance(_writeSubkey);
                 await _inner.WriteAsync(salt, cancellationToken);
                 _writeSaltSent = true;
             }
@@ -244,8 +248,17 @@ public sealed class ShadowsocksAeadStream : Stream
             while (offset < buffer.Length)
             {
                 int chunkLen = Math.Min(MaxPayloadChunk, buffer.Length - offset);
-                byte[] chunkOut = EncryptChunk(_writeSubkey!, buffer.Span.Slice(offset, chunkLen));
-                await _inner.WriteAsync(chunkOut, cancellationToken);
+                int outLen = 2 + TagSize + chunkLen + TagSize;
+                byte[] rented = ArrayPool<byte>.Shared.Rent(outLen);
+                try
+                {
+                    EncryptChunkInto(_writeCipher!, buffer.Span.Slice(offset, chunkLen), rented.AsSpan(0, outLen));
+                    await _inner.WriteAsync(rented.AsMemory(0, outLen), cancellationToken);
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rented);
+                }
                 offset += chunkLen;
             }
         }
@@ -283,37 +296,65 @@ public sealed class ShadowsocksAeadStream : Stream
                 if (!await TryReadExactAsync(_inner, salt, cancellationToken))
                     return 0;
                 _readSubkey = HKDF.DeriveKey(HashAlgorithmName.SHA1, _masterKey, _keySize, salt, HkdfInfo);
+                _readCipher = CreateAeadInstance(_readSubkey);
                 _readSaltReceived = true;
             }
 
-            byte[] encLenBlock = new byte[2 + TagSize];
-            if (!await TryReadExactAsync(_inner, encLenBlock, cancellationToken))
-                return 0;
-
-            byte[] plainLenBytes = new byte[2];
-            DecryptBlock(_readSubkey!, _readNonce, encLenBlock.AsSpan(0, 2), encLenBlock.AsSpan(2, TagSize), plainLenBytes);
-            IncrementNonce(_readNonce);
-
-            int payloadLen = BinaryPrimitives.ReadUInt16BigEndian(plainLenBytes) & 0x3FFF;
-            if (payloadLen == 0) return 0;
-
-            byte[] encPayload = new byte[payloadLen + TagSize];
-            if (!await TryReadExactAsync(_inner, encPayload, cancellationToken))
-                return 0;
-
-            byte[] plainPayload = new byte[payloadLen];
-            DecryptBlock(_readSubkey!, _readNonce, encPayload.AsSpan(0, payloadLen), encPayload.AsSpan(payloadLen, TagSize), plainPayload);
-            IncrementNonce(_readNonce);
-
-            int copy = Math.Min(buffer.Length, payloadLen);
-            plainPayload.AsSpan(0, copy).CopyTo(buffer.Span);
-            if (copy < payloadLen)
+            byte[] lenScratch = ArrayPool<byte>.Shared.Rent(2 + TagSize + 2);
+            int payloadLen;
+            try
             {
-                _readPlainBuffer = plainPayload;
-                _readPlainOffset = copy;
-                _readPlainCount = payloadLen - copy;
+                if (!await TryReadExactAsync(_inner, lenScratch.AsMemory(0, 2 + TagSize), cancellationToken))
+                    return 0;
+
+                Span<byte> plainLenSpan = lenScratch.AsSpan(2 + TagSize, 2);
+                DecryptWithInstance(
+                    _readCipher!,
+                    _readNonce,
+                    lenScratch.AsSpan(0, 2),
+                    lenScratch.AsSpan(2, TagSize),
+                    plainLenSpan);
+                IncrementNonce(_readNonce);
+
+                payloadLen = BinaryPrimitives.ReadUInt16BigEndian(plainLenSpan) & 0x3FFF;
+                if (payloadLen == 0) return 0;
             }
-            return copy;
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(lenScratch);
+            }
+
+            byte[] encPayload = ArrayPool<byte>.Shared.Rent(payloadLen + TagSize);
+            byte[] plainPayload = ArrayPool<byte>.Shared.Rent(payloadLen);
+            try
+            {
+                if (!await TryReadExactAsync(_inner, encPayload.AsMemory(0, payloadLen + TagSize), cancellationToken))
+                    return 0;
+
+                DecryptWithInstance(
+                    _readCipher!,
+                    _readNonce,
+                    encPayload.AsSpan(0, payloadLen),
+                    encPayload.AsSpan(payloadLen, TagSize),
+                    plainPayload.AsSpan(0, payloadLen));
+                IncrementNonce(_readNonce);
+
+                int copy = Math.Min(buffer.Length, payloadLen);
+                plainPayload.AsSpan(0, copy).CopyTo(buffer.Span);
+                int leftover = payloadLen - copy;
+                if (leftover > 0)
+                {
+                    _readPlainBuffer = plainPayload.AsSpan(copy, leftover).ToArray();
+                    _readPlainOffset = 0;
+                    _readPlainCount = leftover;
+                }
+                return copy;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(encPayload);
+                ArrayPool<byte>.Shared.Return(plainPayload);
+            }
         }
         finally
         {
@@ -327,48 +368,36 @@ public sealed class ShadowsocksAeadStream : Stream
     public override int Read(byte[] buffer, int offset, int count) =>
         ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
 
-    private byte[] EncryptChunk(byte[] subkey, ReadOnlySpan<byte> plaintext)
-    {
-        byte[] output = new byte[2 + TagSize + plaintext.Length + TagSize];
+    private IDisposable CreateAeadInstance(byte[] subkey) => _cipherKind == CipherKind.ChaCha20Poly1305
+        ? new ChaCha20Poly1305(subkey)
+        : new AesGcm(subkey, TagSize);
 
+    private void EncryptChunkInto(IDisposable aead, ReadOnlySpan<byte> plaintext, Span<byte> output)
+    {
         Span<byte> lenPlain = stackalloc byte[2];
         BinaryPrimitives.WriteUInt16BigEndian(lenPlain, (ushort)plaintext.Length);
 
-        EncryptBlock(subkey, _writeNonce, lenPlain, output.AsSpan(0, 2), output.AsSpan(2, TagSize));
+        EncryptWithInstance(aead, _writeNonce, lenPlain, output.Slice(0, 2), output.Slice(2, TagSize));
         IncrementNonce(_writeNonce);
 
-        EncryptBlock(subkey, _writeNonce, plaintext, output.AsSpan(2 + TagSize, plaintext.Length), output.AsSpan(2 + TagSize + plaintext.Length, TagSize));
+        EncryptWithInstance(aead, _writeNonce, plaintext, output.Slice(2 + TagSize, plaintext.Length), output.Slice(2 + TagSize + plaintext.Length, TagSize));
         IncrementNonce(_writeNonce);
-
-        return output;
     }
 
-    private void EncryptBlock(byte[] key, byte[] nonce, ReadOnlySpan<byte> plain, Span<byte> cipher, Span<byte> tag)
+    private static void EncryptWithInstance(IDisposable aead, byte[] nonce, ReadOnlySpan<byte> plain, Span<byte> cipher, Span<byte> tag)
     {
-        if (_cipherKind == CipherKind.ChaCha20Poly1305)
-        {
-            using var aead = new ChaCha20Poly1305(key);
-            aead.Encrypt(nonce, plain, cipher, tag);
-        }
+        if (aead is ChaCha20Poly1305 cc)
+            cc.Encrypt(nonce, plain, cipher, tag);
         else
-        {
-            using var aead = new AesGcm(key, TagSize);
-            aead.Encrypt(nonce, plain, cipher, tag);
-        }
+            ((AesGcm)aead).Encrypt(nonce, plain, cipher, tag);
     }
 
-    private void DecryptBlock(byte[] key, byte[] nonce, ReadOnlySpan<byte> cipher, ReadOnlySpan<byte> tag, Span<byte> plain)
+    private static void DecryptWithInstance(IDisposable aead, byte[] nonce, ReadOnlySpan<byte> cipher, ReadOnlySpan<byte> tag, Span<byte> plain)
     {
-        if (_cipherKind == CipherKind.ChaCha20Poly1305)
-        {
-            using var aead = new ChaCha20Poly1305(key);
-            aead.Decrypt(nonce, cipher, tag, plain);
-        }
+        if (aead is ChaCha20Poly1305 cc)
+            cc.Decrypt(nonce, cipher, tag, plain);
         else
-        {
-            using var aead = new AesGcm(key, TagSize);
-            aead.Decrypt(nonce, cipher, tag, plain);
-        }
+            ((AesGcm)aead).Decrypt(nonce, cipher, tag, plain);
     }
 
     private static void IncrementNonce(byte[] nonce)
@@ -379,12 +408,12 @@ public sealed class ShadowsocksAeadStream : Stream
         }
     }
 
-    private static async Task<bool> TryReadExactAsync(Stream s, byte[] buf, CancellationToken ct)
+    private static async Task<bool> TryReadExactAsync(Stream s, Memory<byte> buf, CancellationToken ct)
     {
         int offset = 0;
         while (offset < buf.Length)
         {
-            int n = await s.ReadAsync(buf.AsMemory(offset, buf.Length - offset), ct);
+            int n = await s.ReadAsync(buf.Slice(offset, buf.Length - offset), ct);
             if (n <= 0) return false;
             offset += n;
         }
@@ -398,6 +427,8 @@ public sealed class ShadowsocksAeadStream : Stream
     {
         if (disposing)
         {
+            _writeCipher?.Dispose();
+            _readCipher?.Dispose();
             _writeLock.Dispose();
             _readLock.Dispose();
             _inner.Dispose();

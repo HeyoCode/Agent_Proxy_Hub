@@ -2,6 +2,20 @@
 
 All notable changes to **Agent Proxy Hub** are documented in this file.
 
+## [v0.7.1] - 2026-11-28
+
+### 🔒 关键安全与稳定性修复
+- **彻底修复 `sing-box 1.14+` 新配置规范兼容与 VLESS / 前置中转异常**：`SingBoxSidecarManager` 自动识别内核版本号，针对 `sing-box 1.12+/1.14+` 切换至新版 `dns.servers` (`type: "udp"` + `server` + `bind_interface`)、`domain_resolver`、`route.default_domain_resolver` 及顶层 `endpoints` WireGuard 架构（同时向下兼容 `1.11` 及更早版本），彻底消除 `legacy DNS server formats ... removed in sing-box 1.14.0` 致命退出现象；VLESS 新增 `packet_encoding`、`alpn`、`ws ?ed=2048` Early Data 自动拆分、`httpupgrade` 与 `http/h2` 传输层映射；`MixedProxyServer` / `NodeHealthChecker` 对带前置中转的双跳连接放宽握手与验真超时（`10s~12s`）、在熔断日志打印具体拨号失败原因，且中转异常时不再将正常的落地节点误标为 `offline`。
+- **端口段物理隔离与单席位故障隔离**：将 `SingBoxSidecarManager.BridgePortBase` 迁移至 `:18020+` 并增加系统环回端口占用探测，与多开实例 `:17920+` 彻底错峰；`MixedProxyServer.StartListener` 新增 `SocketException` 隔离容错，单个席位端口冲突不再阻断其余席位监听与 L2 同步。
+- **修复跨站 WebSocket 劫持 (CSWSH)**：`LoopbackSecurityGuard` 对包含 `/ws/events` 与 `/api/*` 在内的所有受保护路由统一校验 `Origin` 头必须为环回来源，阻止外部网页静默读取本机网卡与节点元数据。
+- **主密钥 `.vault.key` 防覆盖与瞬态锁重试**：`CredentialVault` 拆分只读解密与轮换路径，`Unprotect` 绝不覆盖现有密钥；读取遭占用时自动退避重试 3 次，损坏或不可解封密钥轮换前自动备份为 `.vault.key.corrupt-*.bak`。
+- **补全备份清理与节点引用完整性**：`StorageMaintenanceService` 同步识别清理失效的 `*.backup.json` 与 `*.bak`；`HubStateDocument.GetReferencedNodeIds()` 与节点删除/订阅同步逻辑完整纳入 `FallbackNodeId` 与多开实例 `Instances[].BoundNodeId`。
+- **JSONC 保注释原位补丁与安全进程重启**：新增词法感知 `JsoncPatcher`，接管与还原 VS Code / Cursor / Windsurf / Kiro / Zed / Trae / CodeBuddy / Claude `settings.json` 时完整保留所有 `//` / `/* */` 注释与原有格式；`claude-desktop` 仅匹配桌面进程不误杀 `Claude Code CLI`，多工作区编辑器仅执行礼貌关闭不强杀树。
+
+### 🌐 跨端对齐与热路径优化
+- **macOS 宿主与双端动态端口对齐**：`MacTrayHost.swift` 与 Windows `Program.cs` 均从 `state.json` 读取 `hostApiPort`；macOS 托盘弹窗接入 `NSPopoverDelegate` 派发 `tray:shown`/`tray:hidden` 与 `/api/health` 探活，并打包 `aph` CLI；`MainForm.cs` 访问本地偏好强制 `UseProxy = false` 并保留仓库子路径跳转。
+- **协议解析、隐私脱敏与性能增强**：`ProxyNodeImporter` 升级 YAML 缩进栈支持多层嵌套（如 `ws-opts.headers.Host`）；`WebDavSyncService` 支持同主机安全重定向；`MixedProxyServer` 为入站 SOCKS/HTTP 全握手阶段施加 15s 超时、`ArrayPool` 块读请求头（完整透传粘包正文）并注入 `Connection: close`；`ShadowsocksAeadStream` 复用 AEAD 密码器实例并接入 `ArrayPool`；`PhysicalNicManager` 增加网卡变更自动感知，`CleanDnsResolver` 复用物理绑定的 DoH 客户端并设置缓存上限；补全 `RightInspector` Toast 隐私脱敏与检测接口零持久化写副作用。
+
 ## [v0.7.0] - 2026-11-28
 
 ### ⚡ 桌面启动秒开重构（彻底根治长时间黑屏）

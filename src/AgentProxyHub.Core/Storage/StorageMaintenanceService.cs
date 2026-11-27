@@ -107,16 +107,21 @@ public sealed class StorageMaintenanceService
             }
         }
 
-        // 清理当前未处于接管状态的残留历史备份（文件名形如 <seatId>.json.bak）
+        // 清理当前未处于接管状态的残留历史备份（文件名形如 <seatId>.backup.json / <seatId>.json.bak / agy-run-launch.ps1.bak）
         string backupDir = Path.Combine(_hubDir, "takeover-backups");
         if (Directory.Exists(backupDir))
         {
             var activeSet = activeTakenOverSeatIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (string bak in Directory.EnumerateFiles(backupDir, "*.bak"))
+            foreach (string bak in Directory.EnumerateFiles(backupDir, "*", SearchOption.TopDirectoryOnly))
             {
                 string fileName = Path.GetFileName(bak);
-                string seatKey = fileName.Split('.')[0];
-                if (seatKey == "agy-ide" || seatKey == "agy-run-launch") seatKey = "agy";
+                if (!fileName.EndsWith(".bak", StringComparison.OrdinalIgnoreCase)
+                    && !fileName.EndsWith(".backup.json", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                string seatKey = ResolveSeatKeyFromBackupFileName(fileName);
                 if (!activeSet.Contains(seatKey))
                 {
                     TryDelete(bak, ref removed, ref freed);
@@ -134,6 +139,26 @@ public sealed class StorageMaintenanceService
                 : "当前环境非常整洁，无可清理的失效备份或临时文件。",
             Stats = after
         };
+    }
+
+    private static string ResolveSeatKeyFromBackupFileName(string fileName)
+    {
+        string seatKey = fileName;
+        foreach (string suffix in new[] { ".backup.json", ".json.bak", ".ps1.bak", ".bak" })
+        {
+            if (seatKey.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+            {
+                seatKey = seatKey[..^suffix.Length];
+                break;
+            }
+        }
+
+        if (seatKey.Equals("agy-ide", StringComparison.OrdinalIgnoreCase)
+            || seatKey.Equals("agy-run-launch", StringComparison.OrdinalIgnoreCase))
+        {
+            return "agy";
+        }
+        return seatKey;
     }
 
     private static void TryDelete(string path, ref int removed, ref long freed)

@@ -511,7 +511,10 @@ public sealed class MainForm : Form
             if (uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
             {
                 e.Handled = true;
-                OpenUrlInBrowser(ProjectMetadata.RepoUrl);
+                string targetUrl = uri.AbsoluteUri.StartsWith(ProjectMetadata.RepoUrl, StringComparison.OrdinalIgnoreCase)
+                    ? uri.AbsoluteUri
+                    : ProjectMetadata.RepoUrl;
+                OpenUrlInBrowser(targetUrl);
             }
         }
     }
@@ -572,7 +575,8 @@ public sealed class MainForm : Form
     {
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            using var handler = new SocketsHttpHandler { UseProxy = false, ConnectTimeout = TimeSpan.FromSeconds(1) };
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(2) };
             string payload = JsonSerializer.Serialize(new { miniCardEnabled = enabled });
             using var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
             await http.PutAsync(_url.TrimEnd('/') + "/api/preferences", content);
@@ -584,7 +588,8 @@ public sealed class MainForm : Form
     {
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            using var handler = new SocketsHttpHandler { UseProxy = false, ConnectTimeout = TimeSpan.FromSeconds(1) };
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(2) };
             string json = await http.GetStringAsync(_url.TrimEnd('/') + "/api/preferences");
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;

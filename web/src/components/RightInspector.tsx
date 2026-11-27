@@ -285,13 +285,16 @@ export const RightInspector: React.FC<Props> = ({
         onToast(`正在经由 :${seat.localPort} 发起全链路实流验真...`);
         const res = await api.verifySeatTunnel(seat.id);
         await onReload();
-        onToast(res.message);
+        const safeMsg = privacyMode && res.exitIp && res.exitIp !== '—'
+          ? res.message.split(res.exitIp).join(maskIp(res.exitIp, true))
+          : res.message;
+        onToast(safeMsg);
       } else if (bound) {
         onToast(`正在直绑物理网卡验真 ${bound.name}...`);
         const res = await api.verifyNode(bound.id);
         await onReload();
         onToast(res.status === 'online'
-          ? `验真通过：${res.exitIp} (${res.latencyMs ?? 1} ms)`
+          ? `验真通过：${maskIp(res.exitIp, privacyMode)} (${res.latencyMs ?? 1} ms)`
           : `验真失败：${res.ispSummary}`);
       }
     } catch (err) {

@@ -11,10 +11,13 @@ namespace AgentProxyHub.Core.Networking;
 /// <summary>
 /// 绑定物理网卡的轻量独立 DNS 解析器（仅在代理节点地址为域名时绕过系统/Clash DNS，支持按 IPv6 开关解析 A / AAAA）
 /// </summary>
-public sealed class CleanDnsResolver
+public sealed class CleanDnsResolver : IDisposable
 {
+    private const int MaxCacheEntries = 1024;
     private readonly PhysicalNicManager _nicManager;
     private readonly ConcurrentDictionary<string, (IPAddress Ip, DateTimeOffset ExpiresAt)> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, HttpClient> _dohClients = new(StringComparer.Ordinal);
+    private bool _disposed;
 
     public CleanDnsResolver(PhysicalNicManager nicManager)
     {
@@ -49,7 +52,7 @@ public sealed class CleanDnsResolver
                                ?? (enableIpv6 ? await QueryDnsRecordDirectAsync(cleanHost, dnsIp, 28, ct) : null);
                 if (resolved != null && !IsFakeIpAddress(resolved))
                 {
-                    _cache[cacheKey] = (resolved, DateTimeOffset.UtcNow.AddMinutes(5));
+                    PutCache(cacheKey, resolved, TimeSpan.FromMinutes(5));
                     return resolved;
                 }
             }
@@ -65,7 +68,7 @@ public sealed class CleanDnsResolver
                                   ?? (enableIpv6 ? await QueryDnsOverHttpsDirectAsync(cleanHost, dnsIp, 28, ct) : null);
                 if (dohResolved != null && !IsFakeIpAddress(dohResolved))
                 {
-                    _cache[cacheKey] = (dohResolved, DateTimeOffset.UtcNow.AddMinutes(5));
+                    PutCache(cacheKey, dohResolved, TimeSpan.FromMinutes(5));
                     return dohResolved;
                 }
             }
@@ -91,22 +94,58 @@ public sealed class CleanDnsResolver
         if (fallback == null)
             throw new InvalidOperationException($"无法解析干净主机地址（或结果被 Fake-IP 污染）: {cleanHost}");
 
-        _cache[cacheKey] = (fallback, DateTimeOffset.UtcNow.AddMinutes(2));
+        PutCache(cacheKey, fallback, TimeSpan.FromMinutes(2));
         return fallback;
+    }
+
+    private void PutCache(string key, IPAddress ip, TimeSpan ttl)
+    {
+        if (_cache.Count >= MaxCacheEntries)
+        {
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            foreach (var kv in _cache)
+            {
+                if (kv.Value.ExpiresAt <= now)
+                {
+                    _cache.TryRemove(kv.Key, out _);
+                }
+            }
+            if (_cache.Count >= MaxCacheEntries)
+            {
+                foreach (var kv in _cache.Take(_cache.Count - MaxCacheEntries + 64))
+                {
+                    _cache.TryRemove(kv.Key, out _);
+                }
+            }
+        }
+        _cache[key] = (ip, DateTimeOffset.UtcNow.Add(ttl));
     }
 
     private static bool IsFakeIpAddress(IPAddress ip) =>
         ip.AddressFamily == AddressFamily.InterNetwork && TlsSniInspector.IsFakeIp(ip.ToString());
 
-    private async Task<IPAddress?> QueryDnsOverHttpsDirectAsync(string domain, IPAddress dohIp, ushort qType, CancellationToken ct)
+    private HttpClient GetOrCreateDohClient(IPAddress dohIp)
     {
-        byte[] wireQuery = BuildDnsQuery(domain, qType, out ushort txId);
-        using var handler = new SocketsHttpHandler
+        var nic = _nicManager.GetLockedAdapter();
+        string clientKey = $"{dohIp}|{nic?.Id ?? "none"}|{nic?.IPv4Address ?? ""}";
+        if (_dohClients.TryGetValue(clientKey, out var existing))
+            return existing;
+
+        // 网卡变更时清理旧连接池实例
+        foreach (var oldKey in _dohClients.Keys.Where(k => k.StartsWith($"{dohIp}|", StringComparison.Ordinal)).ToList())
+        {
+            if (_dohClients.TryRemove(oldKey, out var oldClient))
+            {
+                try { oldClient.Dispose(); } catch { }
+            }
+        }
+
+        var handler = new SocketsHttpHandler
         {
             UseProxy = false,
             ConnectTimeout = TimeSpan.FromSeconds(3),
-            PooledConnectionLifetime = TimeSpan.Zero,
-            ConnectCallback = async (ctx, token) =>
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+            ConnectCallback = async (_, token) =>
             {
                 var sock = _nicManager.CreateBoundTcpSocket(dohIp.AddressFamily, dohIp);
                 try
@@ -122,7 +161,18 @@ public sealed class CleanDnsResolver
             }
         };
 
-        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(4) };
+        var created = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(4) };
+        if (_dohClients.TryAdd(clientKey, created))
+            return created;
+
+        created.Dispose();
+        return _dohClients.TryGetValue(clientKey, out var raced) ? raced : GetOrCreateDohClient(dohIp);
+    }
+
+    private async Task<IPAddress?> QueryDnsOverHttpsDirectAsync(string domain, IPAddress dohIp, ushort qType, CancellationToken ct)
+    {
+        byte[] wireQuery = BuildDnsQuery(domain, qType, out ushort txId);
+        var http = GetOrCreateDohClient(dohIp);
         string uri = dohIp.AddressFamily == AddressFamily.InterNetworkV6
             ? $"https://[{dohIp}]/dns-query"
             : $"https://{dohIp}/dns-query";
@@ -137,6 +187,17 @@ public sealed class CleanDnsResolver
         if (!resp.IsSuccessStatusCode) return null;
         byte[] wireResp = await resp.Content.ReadAsByteArrayAsync(ct);
         return ParseDnsResponse(wireResp, txId, qType);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        foreach (var kv in _dohClients)
+        {
+            try { kv.Value.Dispose(); } catch { }
+        }
+        _dohClients.Clear();
     }
 
     private async Task<IPAddress?> QueryDnsRecordDirectAsync(string domain, IPAddress dnsIp, ushort qType, CancellationToken ct)
@@ -231,7 +292,7 @@ public sealed class CleanDnsResolver
 }
 
 /// <summary>
-/// 本地管理 API 环回安全守卫：拦截 DNS Rebinding 非法 Host 头与外部网页跨站写操作 (CSRF)
+/// 本地管理 API 环回安全守卫：拦截 DNS Rebinding 非法 Host 头及外部网页跨站读写与 WebSocket 劫持 (CSRF / CSWSH)
 /// </summary>
 public static class LoopbackSecurityGuard
 {
@@ -244,9 +305,8 @@ public static class LoopbackSecurityGuard
                 return false;
         }
 
-        string m = (method ?? "GET").Trim().ToUpperInvariant();
-        bool isWriteMethod = m is not ("GET" or "HEAD" or "OPTIONS");
-        if (isApiRoute && isWriteMethod && !string.IsNullOrWhiteSpace(originHeader))
+        // 所有携带 Origin 头的受保护接口（含 GET /ws/events 与 /api/*）一律校验必须为环回来源，彻底防御 CSWSH 与跨站读窃密
+        if (isApiRoute && !string.IsNullOrWhiteSpace(originHeader))
         {
             string trimmedOrigin = originHeader.Trim();
             if (trimmedOrigin.Equals("null", StringComparison.OrdinalIgnoreCase))

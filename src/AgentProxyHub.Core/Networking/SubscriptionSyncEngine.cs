@@ -22,10 +22,7 @@ public static class SubscriptionSyncEngine
         SubscriptionSource sub,
         IReadOnlyList<ProxyNode> incomingNodes)
     {
-        var boundNodeIds = doc.Seats
-            .SelectMany(s => new[] { s.BoundNodeId, s.RelayNodeId })
-            .Where(id => !string.IsNullOrWhiteSpace(id))
-            .ToHashSet(StringComparer.Ordinal);
+        var boundNodeIds = doc.GetReferencedNodeIds();
 
         var oldSubNodes = doc.Nodes
             .Where(n => string.Equals(n.SourceSubscriptionId, sub.Id, StringComparison.Ordinal))
@@ -136,7 +133,7 @@ public static class SubscriptionSyncEngine
 
         foreach (var seat in doc.Seats)
         {
-            if (seat.BoundNodeId == oldNode.Id || seat.RelayNodeId == oldNode.Id)
+            if (seat.BoundNodeId == oldNode.Id || seat.RelayNodeId == oldNode.Id || seat.FallbackNodeId == oldNode.Id)
             {
                 seat.HasNodeDrift = true;
             }

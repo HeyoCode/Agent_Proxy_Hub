@@ -35,7 +35,8 @@ public sealed class NodeHealthChecker
         AppSeat seat,
         ProxyNode? boundNode,
         IsolationSettings settings,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        ProxyNode? relayNode = null)
     {
         string? expected = string.IsNullOrWhiteSpace(seat.ExpectedCountryCode)
             ? null
@@ -53,6 +54,21 @@ public sealed class NodeHealthChecker
             };
             AppendCountryHistory(seat.Id, unapproved);
             return unapproved;
+        }
+
+        bool hasRelay = relayNode != null && boundNode != null && relayNode.Id != boundNode.Id;
+        if (hasRelay && relayNode!.AllowInsecure && !relayNode.InsecureApproved)
+        {
+            var unapprovedRelay = new CountryCheckRecord
+            {
+                Timestamp = DateTimeOffset.Now,
+                SeatId = seat.Id,
+                ExpectedCountry = expected,
+                Passed = false,
+                Reason = $"出口拦截：前置中转「{relayNode.Name}」声明跳过 TLS 证书校验且尚未获得批准，请先批准风险"
+            };
+            AppendCountryHistory(seat.Id, unapprovedRelay);
+            return unapprovedRelay;
         }
 
         if (boundNode != null && !settings.EnableIpv6 && UpstreamConnector.IsIpv6Literal(boundNode.Host))
@@ -82,13 +98,20 @@ public sealed class NodeHealthChecker
                 {
                     Proxy = new WebProxy($"http://127.0.0.1:{seat.LocalPort}"),
                     UseProxy = true,
-                    ConnectTimeout = TimeSpan.FromSeconds(5),
+                    ConnectTimeout = TimeSpan.FromSeconds(hasRelay ? 8 : 5),
                     PooledConnectionLifetime = TimeSpan.Zero,
                     AutomaticDecompression = DecompressionMethods.None
                 };
-                using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.7.0");
+                using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(hasRelay ? 9 : 5) };
+                http.DefaultRequestHeaders.UserAgent.ParseAdd($"AgentProxyHub/{ProjectMetadata.Version}");
                 (exitIp, observedLoc, latencyMs) = await ProbeExitIpViaLocalProxyAsync(http, ct);
+            }
+            else if (hasRelay)
+            {
+                var chainRes = await ProbeExitIpViaChainAsync(relayNode!, boundNode!, settings, ct);
+                exitIp = chainRes.Ip;
+                observedLoc = chainRes.Loc;
+                latencyMs = chainRes.ElapsedMs > 0 ? chainRes.ElapsedMs : null;
             }
             else if (boundNode != null)
             {
@@ -321,8 +344,10 @@ public sealed class NodeHealthChecker
         ProxyNode? boundNode,
         IsolationSettings settings,
         IReadOnlyList<(string Label, string Url)>? customProbeUrls = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default,
+        ProxyNode? relayNode = null)
     {
+        bool hasRelay = relayNode != null && boundNode != null && relayNode.Id != boundNode.Id;
         if (boundNode != null && !settings.EnableIpv6 && UpstreamConnector.IsIpv6Literal(boundNode.Host))
         {
             return new TunnelVerificationResult
@@ -338,19 +363,19 @@ public sealed class NodeHealthChecker
         {
             Proxy = new WebProxy($"http://127.0.0.1:{localPort}"),
             UseProxy = true,
-            ConnectTimeout = TimeSpan.FromSeconds(5),
+            ConnectTimeout = TimeSpan.FromSeconds(hasRelay ? 8 : 5),
             PooledConnectionLifetime = TimeSpan.Zero,
             AutomaticDecompression = DecompressionMethods.None
         };
 
         using var http = new HttpClient(handler)
         {
-            Timeout = TimeSpan.FromSeconds(8)
+            Timeout = TimeSpan.FromSeconds(hasRelay ? 11 : 8)
         };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.7.0");
+        http.DefaultRequestHeaders.UserAgent.ParseAdd($"AgentProxyHub/{ProjectMetadata.Version}");
 
         using var totalCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        totalCts.CancelAfter(TimeSpan.FromSeconds(7.5));
+        totalCts.CancelAfter(TimeSpan.FromSeconds(hasRelay ? 10.5 : 7.5));
         CancellationToken probeCt = totalCts.Token;
 
         string? exitIp = null;
@@ -434,20 +459,37 @@ public sealed class NodeHealthChecker
 
         if (boundNode != null)
         {
-            boundNode.Status = anyOk ? "online" : "offline";
-            boundNode.LatencyMs = bestMs;
-            if (boundNode.Protocol != ProxyProtocol.DIRECT_PHYSICAL)
+            if (!hasRelay || anyOk)
             {
-                boundNode.ExitIp = finalExitIp;
-                boundNode.IspSummary = BuildSummary(anyOk, loc, boundNode);
+                boundNode.Status = anyOk ? "online" : "offline";
+                boundNode.LatencyMs = bestMs;
+                if (boundNode.Protocol != ProxyProtocol.DIRECT_PHYSICAL)
+                {
+                    boundNode.ExitIp = finalExitIp;
+                    boundNode.IspSummary = BuildSummary(anyOk, loc, boundNode);
+                }
+                else if (!string.IsNullOrEmpty(exitIp))
+                {
+                    boundNode.ExitIp = exitIp;
+                    boundNode.IspSummary = !string.IsNullOrEmpty(loc) ? $"物理直出 · {loc}" : "本机物理出口直绑（未经代理节点）";
+                }
+                boundNode.AiReachability = anyOk ? aiChecks : new List<string> { "隧道拦截或超时" };
+                boundNode.LastCheckedAt = DateTimeOffset.UtcNow;
             }
-            else if (!string.IsNullOrEmpty(exitIp))
-            {
-                boundNode.ExitIp = exitIp;
-                boundNode.IspSummary = !string.IsNullOrEmpty(loc) ? $"物理直出 · {loc}" : "本机物理出口直绑（未经代理节点）";
-            }
-            boundNode.AiReachability = anyOk ? aiChecks : new List<string> { "隧道拦截或超时" };
-            boundNode.LastCheckedAt = DateTimeOffset.UtcNow;
+        }
+
+        string msg;
+        if (hasRelay)
+        {
+            msg = anyOk
+                ? $"双跳全链路验真通过（{relayNode!.Name} → {boundNode!.Name}）：{finalExitIp} ({bestMs ?? 1} ms · 流量已真实穿过 :{localPort})"
+                : $"端口 :{localPort} 双跳全链路验真失败（{relayNode!.Name} → {boundNode?.Name ?? "未绑定"}），请检查前置中转与落地节点连通性";
+        }
+        else
+        {
+            msg = anyOk
+                ? $"全链路验真通过：{finalExitIp} ({bestMs ?? 1} ms · 流量已真实穿过 :{localPort})"
+                : $"端口 :{localPort} 全链路验真失败，{BuildSummary(false, null, boundNode)}";
         }
 
         return new TunnelVerificationResult
@@ -458,11 +500,47 @@ public sealed class NodeHealthChecker
             ExitIp = finalExitIp,
             LatencyMs = bestMs,
             AiReachability = aiChecks,
-            Node = boundNode,
-            Message = anyOk
-                ? $"全链路验真通过：{finalExitIp} ({bestMs ?? 1} ms · 流量已真实穿过 :{localPort})"
-                : $"端口 :{localPort} 全链路验真失败，{BuildSummary(false, null, boundNode)}"
+            Node = boundNode?.ToRedactedCopy(),
+            Message = msg
         };
+    }
+
+    private async Task<(string? Ip, string? Loc, int ElapsedMs)> ProbeExitIpViaChainAsync(
+        ProxyNode relayNode,
+        ProxyNode landingNode,
+        IsolationSettings settings,
+        CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromMilliseconds(8500));
+        try
+        {
+            using var stream = await _connector.ConnectChainAsync(relayNode, landingNode, "1.1.1.1", 443, settings, cts.Token);
+            using var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
+            await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "cloudflare.com" }, cts.Token);
+
+            byte[] req = Encoding.ASCII.GetBytes($"GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\nUser-Agent: AgentProxyHub/{ProjectMetadata.Version}\r\n\r\n");
+            await ssl.WriteAsync(req, cts.Token);
+            await ssl.FlushAsync(cts.Token);
+
+            using var reader = new StreamReader(ssl, Encoding.UTF8);
+            string body = await reader.ReadToEndAsync(cts.Token);
+            sw.Stop();
+
+            string? ip = null;
+            string? loc = null;
+            foreach (string line in body.Split('\n'))
+            {
+                if (line.StartsWith("ip=", StringComparison.Ordinal)) ip = line[3..].Trim();
+                else if (line.StartsWith("loc=", StringComparison.Ordinal)) loc = line[4..].Trim();
+            }
+            return (ip, loc, Math.Max(1, (int)sw.ElapsedMilliseconds));
+        }
+        catch
+        {
+            return (null, null, 0);
+        }
     }
 
     private async Task<(bool Ok, string? Ip, string? Loc, int ElapsedMs)> ProbeExitIpViaNodeAsync(
@@ -497,7 +575,7 @@ public sealed class NodeHealthChecker
             using var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "cloudflare.com" }, cts.Token);
 
-            byte[] req = "GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.7.0\r\n\r\n"u8.ToArray();
+            byte[] req = Encoding.ASCII.GetBytes($"GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\nUser-Agent: AgentProxyHub/{ProjectMetadata.Version}\r\n\r\n");
             await ssl.WriteAsync(req, cts.Token);
             await ssl.FlushAsync(cts.Token);
 
@@ -534,7 +612,7 @@ public sealed class NodeHealthChecker
             using var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "api.ipify.org" }, cts.Token);
 
-            byte[] req = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.7.0\r\n\r\n"u8.ToArray();
+            byte[] req = Encoding.ASCII.GetBytes($"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\nUser-Agent: AgentProxyHub/{ProjectMetadata.Version}\r\n\r\n");
             await ssl.WriteAsync(req, cts.Token);
             await ssl.FlushAsync(cts.Token);
 

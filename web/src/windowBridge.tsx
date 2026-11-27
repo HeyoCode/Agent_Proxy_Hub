@@ -73,20 +73,11 @@ export function toggleWindowMaximizeOnDoubleClick(e: React.MouseEvent): void {
 }
 
 export function subscribeMaximizedState(onChange: (maximized: boolean) => void): () => void {
-  const webview = window.chrome?.webview;
-  if (!webview?.addEventListener) return () => {};
-  const handler = (ev: { data: unknown }) => {
-    try {
-      const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
-      if (data && typeof data === 'object' && (data as { type?: string }).type === 'window:maximizedState') {
-        onChange(Boolean((data as { maximized?: boolean }).maximized));
-      }
-    } catch {
-      // 忽略无关消息
+  return subscribeHostMessage(data => {
+    if ((data as { type?: string }).type === 'window:maximizedState') {
+      onChange(Boolean((data as { maximized?: boolean }).maximized));
     }
-  };
-  webview.addEventListener('message', handler);
-  return () => webview.removeEventListener?.('message', handler);
+  });
 }
 
 export function subscribeTrayShown(onShown: () => void): () => void {
@@ -96,37 +87,44 @@ export function subscribeTrayShown(onShown: () => void): () => void {
 }
 
 export function subscribeTrayVisibility(onChange: (visible: boolean) => void): () => void {
-  const webview = window.chrome?.webview;
-  if (!webview?.addEventListener) return () => {};
-  const handler = (ev: { data: unknown }) => {
-    try {
-      const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
-      const type = data && typeof data === 'object' ? (data as { type?: string }).type : undefined;
-      if (type === 'tray:shown') onChange(true);
-      else if (type === 'tray:hidden') onChange(false);
-    } catch {
-      // 忽略无关消息
-    }
-  };
-  webview.addEventListener('message', handler);
-  return () => webview.removeEventListener?.('message', handler);
+  return subscribeHostMessage(data => {
+    const type = (data as { type?: string }).type;
+    if (type === 'tray:shown') onChange(true);
+    else if (type === 'tray:hidden') onChange(false);
+  });
 }
 
 export function subscribeMiniVisibility(onChange: (visible: boolean) => void): () => void {
-  const webview = window.chrome?.webview;
-  if (!webview?.addEventListener) return () => {};
-  const handler = (ev: { data: unknown }) => {
+  return subscribeHostMessage(data => {
+    const type = (data as { type?: string }).type;
+    if (type === 'mini:shown') onChange(true);
+    else if (type === 'mini:hidden') onChange(false);
+  });
+}
+
+function subscribeHostMessage(onPayload: (data: Record<string, unknown>) => void): () => void {
+  const dispatch = (raw: unknown) => {
     try {
-      const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
-      const type = data && typeof data === 'object' ? (data as { type?: string }).type : undefined;
-      if (type === 'mini:shown') onChange(true);
-      else if (type === 'mini:hidden') onChange(false);
+      const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      if (data && typeof data === 'object') {
+        onPayload(data as Record<string, unknown>);
+      }
     } catch {
       // 忽略无关消息
     }
   };
-  webview.addEventListener('message', handler);
-  return () => webview.removeEventListener?.('message', handler);
+
+  const webview = window.chrome?.webview;
+  if (webview?.addEventListener) {
+    const handler = (ev: { data: unknown }) => dispatch(ev.data);
+    webview.addEventListener('message', handler);
+    return () => webview.removeEventListener?.('message', handler);
+  }
+
+  // macOS WKWebView 或浏览器上下文回退监听 window message 事件
+  const winHandler = (ev: MessageEvent) => dispatch(ev.data);
+  window.addEventListener('message', winHandler);
+  return () => window.removeEventListener('message', winHandler);
 }
 
 const EDGE_HANDLES: { edge: WindowEdge; className: string }[] = [

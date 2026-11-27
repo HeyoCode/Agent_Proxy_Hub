@@ -1,4 +1,5 @@
 using AgentProxyHub.Core.Models;
+using AgentProxyHub.Core.Networking;
 using AgentProxyHub.Core.Storage;
 
 namespace AgentProxyHub.Core.Apps;
@@ -53,8 +54,15 @@ public sealed class AppInstanceManager
             .Concat([doc.Isolation.DefaultMixedPort, doc.HostApiPort])
             .ToHashSet();
 
+        // 避开 sing-box L2 桥接预留端口段 (18020~18199) 与系统已占用端口
         int port = InstancePortBase;
-        while (usedPorts.Contains(port)) port++;
+        while (port < 65535 &&
+               (usedPorts.Contains(port)
+                || (port >= SingBoxSidecarManager.BridgePortBase && port < SingBoxSidecarManager.BridgePortBase + 180)
+                || !SingBoxSidecarManager.IsLoopbackPortAvailable(port)))
+        {
+            port++;
+        }
 
         string resolvedNodeId = !string.IsNullOrWhiteSpace(boundNodeId)
             ? boundNodeId

@@ -445,7 +445,14 @@ public class ProxyAndTelemetryTests
             Assert.Equal("sk-preserve-me", claudeNode["env"]!["ANTHROPIC_AUTH_TOKEN"]!.GetValue<string>());
             Assert.Equal("http://127.0.0.1:17891", claudeNode["env"]!["HTTPS_PROXY"]!.GetValue<string>());
 
-            var cursorNode = JsonNode.Parse(File.ReadAllText(cursorJson))!.AsObject();
+            var jsoncOpts = new System.Text.Json.JsonDocumentOptions
+            {
+                CommentHandling = System.Text.Json.JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            };
+            string cursorEnabledRaw = File.ReadAllText(cursorJson);
+            Assert.Contains("// 用户已有注释和字体配置", cursorEnabledRaw);
+            var cursorNode = JsonNode.Parse(cursorEnabledRaw, null, jsoncOpts)!.AsObject();
             Assert.Equal(14, cursorNode["editor.fontSize"]!.GetValue<int>());
             Assert.Equal("http://127.0.0.1:17894", cursorNode["http.proxy"]!.GetValue<string>());
 
@@ -467,7 +474,9 @@ public class ProxyAndTelemetryTests
             Assert.Equal("sk-preserve-me", restoredClaude["env"]!["ANTHROPIC_AUTH_TOKEN"]!.GetValue<string>());
             Assert.Null(restoredClaude["env"]!["HTTPS_PROXY"]);
 
-            var restoredCursor = JsonNode.Parse(File.ReadAllText(cursorJson))!.AsObject();
+            string cursorRestoredRaw = File.ReadAllText(cursorJson);
+            Assert.Contains("// 用户已有注释和字体配置", cursorRestoredRaw);
+            var restoredCursor = JsonNode.Parse(cursorRestoredRaw, null, jsoncOpts)!.AsObject();
             Assert.Equal(14, restoredCursor["editor.fontSize"]!.GetValue<int>());
             Assert.Equal("", restoredCursor["http.proxy"]!.GetValue<string>());
             Assert.Null(restoredCursor["http.proxySupport"]);
@@ -1774,7 +1783,7 @@ public class ProxyAndTelemetryTests
             string body = request.RequestUri?.AbsolutePath switch
             {
                 "/api/overview" => """
-                    {"project":{"version":"0.7.0"},"os":"win","memoryMb":42.5,"lockedNic":{"name":"以太网","iPv4Address":"192.168.5.16"},"nodes":[{"id":"n1"}],"seats":[{"id":"claude","localPort":17891,"enabled":true,"boundNodeId":"n1","fallbackNodeId":"n2"}]}
+                    {"project":{"version":"0.7.1"},"os":"win","memoryMb":42.5,"lockedNic":{"name":"以太网","iPv4Address":"192.168.5.16"},"nodes":[{"id":"n1"}],"seats":[{"id":"claude","localPort":17891,"enabled":true,"boundNodeId":"n1","fallbackNodeId":"n2"}]}
                     """,
                 _ => "{}"
             };
@@ -1795,7 +1804,7 @@ public class ProxyAndTelemetryTests
         int codeStatus = await AgentProxyHub.Cli.AphCliRunner.RunAsync(["status", "--json", "--port", "17899"], swOut, swErr, mockHttp);
         Assert.Equal(0, codeStatus);
         string statusOut = swOut.ToString();
-        Assert.Contains("\"version\": \"0.7.0\"", statusOut);
+        Assert.Contains("\"version\": \"0.7.1\"", statusOut);
         Assert.Contains("\"activeSeats\": 1", statusOut);
 
         using var swSeats = new StringWriter();
@@ -1832,7 +1841,7 @@ public class ProxyAndTelemetryTests
             var node = JsonNode.Parse(payload)?.AsObject();
             Assert.NotNull(node);
             Assert.Equal("overview", node!["type"]?.GetValue<string>());
-            Assert.Equal("0.7.0", node["data"]?["project"]?["version"]?.GetValue<string>());
+            Assert.Equal(ProjectMetadata.Version, node["data"]?["project"]?["version"]?.GetValue<string>());
             Assert.Equal(21, node["data"]?["seats"]?.AsArray().Count);
 
             await ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "done", cts.Token);
@@ -1950,5 +1959,583 @@ public class ProxyAndTelemetryTests
         Assert.Equal("offline", nodes[3].Status);
         Assert.Equal("unverified", nodes[0].Status);
         Assert.Equal("unverified", nodes[1].Status);
+    }
+
+    [Fact]
+    public void PortIsolation_SidecarBaseSeparateFromInstances_And_OccupiedSeatDoesNotBreakOthers()
+    {
+        Assert.True(SingBoxSidecarManager.BridgePortBase >= AppInstanceManager.InstancePortBase + 100);
+
+        using var occupied = new TcpListener(IPAddress.Loopback, 0);
+        occupied.Start();
+        int occupiedPort = ((IPEndPoint)occupied.LocalEndpoint).Port;
+        int freePort = GetFreeTcpPort();
+
+        var nic = new PhysicalNicManager();
+        var dns = new CleanDnsResolver(nic);
+        var connector = new UpstreamConnector(nic, dns);
+        using var server = new MixedProxyServer(connector);
+
+        var seatBlocked = new AppSeat { Id = "s-conflict", Name = "ConflictSeat", LocalPort = occupiedPort, BoundNodeId = "direct-phy", Enabled = true };
+        var seatOk = new AppSeat { Id = "s-ok", Name = "OkSeat", LocalPort = freePort, BoundNodeId = "direct-phy", Enabled = true };
+        var direct = new ProxyNode { Id = "direct-phy", Protocol = ProxyProtocol.DIRECT_PHYSICAL, Host = "physical-nic", Enabled = true };
+
+        // 冲突端口不应抛异常中断其余席位监听
+        server.UpdateTopology([seatBlocked, seatOk], [direct], new IsolationSettings { EnableIpv6 = false });
+        Assert.Null(server.GetBoundPort("s-conflict"));
+        Assert.Equal(freePort, server.GetBoundPort("s-ok"));
+    }
+
+    [Fact]
+    public async Task LoopbackSecurityGuard_BlocksCrossOriginGetAndWebSocket()
+    {
+        Assert.False(LoopbackSecurityGuard.IsAllowedRequest("127.0.0.1:17880", "GET", "https://evil.example", isApiRoute: true));
+        Assert.False(LoopbackSecurityGuard.IsAllowedRequest("127.0.0.1:17880", "GET", "null", isApiRoute: true));
+        Assert.True(LoopbackSecurityGuard.IsAllowedRequest("127.0.0.1:17880", "GET", "http://127.0.0.1:17880", isApiRoute: true));
+
+        int port = GetFreeTcpPort();
+        var app = AgentProxyHub.Host.HubHostFactory.BuildApp([$"--verify-port={port}"]);
+        await app.StartAsync();
+        try
+        {
+            using var handler = new SocketsHttpHandler { UseProxy = false };
+            using var http = new HttpClient(handler);
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"http://127.0.0.1:{port}/api/overview");
+            req.Headers.Add("Origin", "https://attacker.invalid");
+            using var resp = await http.SendAsync(req);
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+
+            using var ws = new System.Net.WebSockets.ClientWebSocket();
+            ws.Options.Proxy = new WebProxy();
+            ws.Options.SetRequestHeader("Origin", "https://attacker.invalid");
+            await Assert.ThrowsAsync<System.Net.WebSockets.WebSocketException>(async () =>
+                await ws.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/ws/events"), CancellationToken.None));
+        }
+        finally
+        {
+            using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+            try { await app.StopAsync(stopCts.Token); } catch { }
+            await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public void CredentialVault_UnprotectDoesNotOverwriteMissingKey_And_ProtectBacksUpCorruptKey()
+    {
+        string tmpDir = Path.Combine(Path.GetTempPath(), $"aph_vault_prot_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tmpDir);
+        try
+        {
+            var vault = new AgentProxyHub.Core.Storage.CredentialVault(tmpDir);
+            string keyPath = Path.Combine(tmpDir, ".vault.key");
+
+            // 1. 无密钥时 Unprotect 不得创建 .vault.key
+            Assert.Equal(string.Empty, vault.Unprotect("enc:v1:invalidciphertext"));
+            Assert.False(File.Exists(keyPath));
+
+            // 2. 损坏的密钥文件在 Protect 时必须先备份为 .corrupt-*.bak 再生成新密钥
+            File.WriteAllBytes(keyPath, [1, 2, 3, 4, 5]);
+            string? protectedVal = vault.Protect("my-secret-value");
+            Assert.NotNull(protectedVal);
+            Assert.StartsWith(AgentProxyHub.Core.Storage.CredentialVault.CipherPrefix, protectedVal!);
+            Assert.Equal("my-secret-value", vault.Unprotect(protectedVal));
+
+            string[] corruptBackups = Directory.GetFiles(tmpDir, ".vault.key.corrupt-*.bak");
+            Assert.Single(corruptBackups);
+        }
+        finally
+        {
+            if (Directory.Exists(tmpDir)) Directory.Delete(tmpDir, true);
+        }
+    }
+
+    [Fact]
+    public void StorageMaintenanceService_CleansBackupJsonAndBak_PreservingActiveBackups()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"aph_maint_json_{Guid.NewGuid():N}");
+        string hubDir = Path.Combine(tempRoot, ".agent-proxy-hub");
+        string bakDir = Path.Combine(hubDir, "takeover-backups");
+        Directory.CreateDirectory(bakDir);
+
+        try
+        {
+            File.WriteAllText(Path.Combine(hubDir, "state.json"), "{}");
+            string activeCursor = Path.Combine(bakDir, "cursor.backup.json");
+            File.WriteAllText(activeCursor, "{}");
+            string staleZed = Path.Combine(bakDir, "zed.backup.json");
+            File.WriteAllText(staleZed, "{}");
+            string staleAgy = Path.Combine(bakDir, "agy-run-launch.ps1.bak");
+            File.WriteAllText(staleAgy, "# bak");
+
+            var maint = new StorageMaintenanceService(tempRoot);
+            var res = maint.CleanupRedundantFiles(["cursor"]);
+            Assert.Equal(2, res.RemovedFiles);
+            Assert.True(File.Exists(activeCursor));
+            Assert.False(File.Exists(staleZed));
+            Assert.False(File.Exists(staleAgy));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
+
+    [Fact]
+    public void SubscriptionSyncEngine_LocksNodesReferencedByFallbackOrInstances()
+    {
+        var fallbackNode = new ProxyNode
+        {
+            Id = "n-fb",
+            Name = "Fallback-HK",
+            Protocol = ProxyProtocol.SOCKS5,
+            Host = "1.1.1.2",
+            Port = 1080,
+            SourceSubscriptionId = "sub-1"
+        };
+        var instNode = new ProxyNode
+        {
+            Id = "n-inst",
+            Name = "Instance-JP",
+            Protocol = ProxyProtocol.SOCKS5,
+            Host = "2.2.2.2",
+            Port = 1080,
+            SourceSubscriptionId = "sub-1"
+        };
+        var unusedNode = new ProxyNode
+        {
+            Id = "n-unused",
+            Name = "Unused-US",
+            Protocol = ProxyProtocol.SOCKS5,
+            Host = "3.3.3.3",
+            Port = 1080,
+            SourceSubscriptionId = "sub-1"
+        };
+
+        var sub = new SubscriptionSource { Id = "sub-1", Name = "TestSub", Group = "G1", Url = "https://example.com/sub" };
+        var doc = new HubStateDocument
+        {
+            Subscriptions = [sub],
+            Nodes = [fallbackNode, instNode, unusedNode],
+            Seats =
+            [
+                new AppSeat { Id = "claude", Name = "Claude", LocalPort = 17891, BoundNodeId = "other", FallbackNodeId = "n-fb" }
+            ],
+            Instances =
+            [
+                new ManagedAppInstance { Id = "inst-1", BaseSeatId = "cursor", Name = "Work", ProfileDir = "/tmp/p", LocalPort = 17920, BoundNodeId = "n-inst" }
+            ]
+        };
+
+        var diff = SubscriptionSyncEngine.MergeParsedNodes(doc, sub, []);
+        Assert.Equal(1, diff.RemovedCount);
+        Assert.Equal(2, diff.DriftCount);
+        Assert.DoesNotContain(doc.Nodes, n => n.Id == "n-unused");
+        Assert.Contains("[快照锁定]", fallbackNode.Name);
+        Assert.Contains("[快照锁定]", instNode.Name);
+        Assert.True(doc.Seats[0].HasNodeDrift);
+    }
+
+    [Fact]
+    public void JsoncPatcher_And_Takeover_PreserveCommentsAndRemoveCreatedEmptyFiles()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"aph_jsonc_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            string cursorUserDir = Path.Combine(tempRoot, "Cursor", "User");
+            Directory.CreateDirectory(cursorUserDir);
+            string cursorSettings = Path.Combine(cursorUserDir, "settings.json");
+
+            const string originalJsonc = """
+                {
+                  // 用户界面字体注释必须保留
+                  "editor.fontSize": 15, /* 行尾块注释 */
+                  "workbench.colorTheme": "Dark+"
+                }
+                """;
+            File.WriteAllText(cursorSettings, originalJsonc);
+
+            var svc = new AppProxyTakeoverService(tempRoot, tempRoot, tempRoot, _ => false, forceMacOs: false);
+            var cursorSeat = new AppSeat { Id = "cursor", Name = "Cursor", LocalPort = 17894 };
+
+            var (okOn, _, stOn) = svc.SetTakeover(cursorSeat, true);
+            Assert.True(okOn);
+            Assert.True(stOn.IsTakenOver);
+
+            string takenText = File.ReadAllText(cursorSettings);
+            Assert.Contains("// 用户界面字体注释必须保留", takenText);
+            Assert.Contains("/* 行尾块注释 */", takenText);
+            Assert.Contains("http://127.0.0.1:17894", takenText);
+
+            var (okOff, _, stOff) = svc.SetTakeover(cursorSeat, false);
+            Assert.True(okOff);
+            Assert.False(stOff.IsTakenOver);
+
+            string restoredText = File.ReadAllText(cursorSettings);
+            Assert.Contains("// 用户界面字体注释必须保留", restoredText);
+            Assert.Contains("/* 行尾块注释 */", restoredText);
+            Assert.DoesNotContain("http.proxy", restoredText);
+
+            // 验证原本不存在的 settings.json 在还原后会被自动清理，不留空文件
+            var zedSeat = new AppSeat { Id = "zed", Name = "Zed", LocalPort = 17909 };
+            string zedPath = Path.Combine(tempRoot, ".config", "zed", "settings.json");
+            Assert.False(File.Exists(zedPath));
+            Assert.True(svc.SetTakeover(zedSeat, true).Ok);
+            Assert.True(File.Exists(zedPath));
+            Assert.True(svc.SetTakeover(zedSeat, false).Ok);
+            Assert.False(File.Exists(zedPath));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
+
+    [Fact]
+    public void ProxyNodeImporter_ParsesMultiLevelNestedYamlHeaders()
+    {
+        const string clashYaml = """
+            proxies:
+              - name: "US-VLESS-WS-MultiIndent"
+                type: vless
+                server: ws.example.com
+                port: 443
+                uuid: 11111111-2222-3333-4444-555555555555
+                tls: true
+                network: ws
+                ws-opts:
+                  path: /api/v1 # inline comment
+                  headers:
+                    Host: cdn.custom.example.com
+            """;
+
+        var res = ProxyNodeImporter.Parse(clashYaml, ProxyProtocol.SOCKS5, "WS订阅");
+        Assert.Equal(1, res.ValidCount);
+        var node = res.Items[0].Node!;
+        Assert.Equal("ws", node.Extra?["type"]);
+        Assert.Equal("/api/v1", node.Extra?["path"]);
+        Assert.Equal("cdn.custom.example.com", node.Extra?["host"]);
+    }
+
+    [Fact]
+    public async Task MixedProxyServer_PlainHttpProxy_InjectsConnectionClose_And_ForwardsCoalescedBody()
+    {
+        using var targetListener = new TcpListener(IPAddress.Loopback, 0);
+        targetListener.Start();
+        int targetPort = ((IPEndPoint)targetListener.LocalEndpoint).Port;
+
+        var receivedTcs = new TaskCompletionSource<string>();
+        var acceptTask = Task.Run(async () =>
+        {
+            using var srv = await targetListener.AcceptTcpClientAsync();
+            using var ns = srv.GetStream();
+            var buf = new byte[4096];
+            using var ms = new MemoryStream();
+            srv.ReceiveTimeout = 2000;
+            while (true)
+            {
+                int n = await ns.ReadAsync(buf);
+                if (n <= 0) break;
+                ms.Write(buf, 0, n);
+                string cur = Encoding.UTF8.GetString(ms.ToArray());
+                if (cur.Contains("hello-body", StringComparison.Ordinal))
+                {
+                    receivedTcs.TrySetResult(cur);
+                    break;
+                }
+            }
+            await ns.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"u8.ToArray());
+        });
+
+        var nic = new PhysicalNicManager();
+        var dns = new CleanDnsResolver(nic);
+        var connector = new UpstreamConnector(nic, dns);
+        using var server = new MixedProxyServer(connector);
+        int proxyPort = GetFreeTcpPort();
+        var seat = new AppSeat { Id = "http-plain", Name = "HttpPlain", LocalPort = proxyPort, BoundNodeId = "direct-phy", Enabled = true };
+        var direct = new ProxyNode { Id = "direct-phy", Protocol = ProxyProtocol.DIRECT_PHYSICAL, Host = "physical-nic", Enabled = true };
+        server.UpdateTopology([seat], [direct], new IsolationSettings { EnableIpv6 = false });
+
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, proxyPort);
+        using var cs = client.GetStream();
+        string rawReq = $"POST http://127.0.0.1:{targetPort}/submit HTTP/1.1\r\nHost: 127.0.0.1:{targetPort}\r\nProxy-Connection: keep-alive\r\nContent-Length: 10\r\n\r\nhello-body";
+        await cs.WriteAsync(Encoding.ASCII.GetBytes(rawReq));
+        await cs.FlushAsync();
+
+        string upstreamReceived = await receivedTcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await acceptTask.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Contains("POST /submit HTTP/1.1", upstreamReceived);
+        Assert.Contains("Connection: close", upstreamReceived);
+        Assert.DoesNotContain("Proxy-Connection:", upstreamReceived);
+        Assert.EndsWith("hello-body", upstreamReceived);
+    }
+
+    [Fact]
+    public async Task ShadowsocksAeadStream_ReusedCipher_RoundTripsMultipleChunksCleanly()
+    {
+        using var pipe = new MemoryStream();
+        byte[] payloadA = Encoding.UTF8.GetBytes("First chunk of OpenAI/Claude stream payload.");
+        byte[] payloadB = new byte[20000];
+        Random.Shared.NextBytes(payloadB);
+
+        var innerA = new DuplexPipeStream();
+        var writer = new ShadowsocksAeadStream(innerA.WriterView, "chacha20-ietf-poly1305", "ss-pass-071");
+        var reader = new ShadowsocksAeadStream(innerA.ReaderView, "chacha20-ietf-poly1305", "ss-pass-071");
+
+        await writer.WriteAsync(payloadA);
+        await writer.WriteAsync(payloadB);
+        await writer.FlushAsync();
+
+        byte[] readBack = new byte[payloadA.Length + payloadB.Length];
+        await UpstreamConnector.ReadExactAsync(reader, readBack, CancellationToken.None);
+
+        Assert.Equal(payloadA, readBack[..payloadA.Length]);
+        Assert.Equal(payloadB, readBack[payloadA.Length..]);
+        await writer.DisposeAsync();
+        await reader.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SingBoxSidecarManager_Modern114AndLegacy111Schemas_ValidateCleanly()
+    {
+        Assert.True(SingBoxSidecarManager.IsModernSingBoxVersion("1.14.4"));
+        Assert.True(SingBoxSidecarManager.IsModernSingBoxVersion("v1.12.0"));
+        Assert.False(SingBoxSidecarManager.IsModernSingBoxVersion("1.11.10"));
+
+        string validKeyA = Convert.ToBase64String(Enumerable.Range(1, 32).Select(i => (byte)i).ToArray());
+        string validKeyB = Convert.ToBase64String(Enumerable.Range(33, 32).Select(i => (byte)i).ToArray());
+        string validRealityPbk = Convert.ToBase64String(Enumerable.Range(65, 32).Select(i => (byte)i).ToArray())
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+        var l2Nodes = new List<ProxyNode>
+        {
+            new()
+            {
+                Id = "n-vless-reality",
+                Name = "VLESS-Reality",
+                Protocol = ProxyProtocol.VLESS,
+                Host = "1.2.3.4",
+                Port = 8443,
+                Username = "11111111-2222-3333-4444-555555555555",
+                Sni = "www.apple.com",
+                Extra = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["security"] = "reality",
+                    ["pbk"] = validRealityPbk,
+                    ["sid"] = "abcd",
+                    ["flow"] = "xtls-rprx-vision",
+                    ["fp"] = "chrome",
+                    ["packetEncoding"] = "xudp"
+                }
+            },
+            new()
+            {
+                Id = "n-vless-ws",
+                Name = "VLESS-WS-EarlyData",
+                Protocol = ProxyProtocol.VLESS,
+                Host = "ws.example.com",
+                Port = 443,
+                Username = "11111111-2222-3333-4444-555555555555",
+                Sni = "ws.example.com",
+                Extra = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["security"] = "tls",
+                    ["type"] = "ws",
+                    ["path"] = "/ray?ed=2048",
+                    ["host"] = "cdn.example.com",
+                    ["alpn"] = "http/1.1"
+                }
+            },
+            new()
+            {
+                Id = "n-vless-hu",
+                Name = "VLESS-HttpUpgrade",
+                Protocol = ProxyProtocol.VLESS,
+                Host = "hu.example.com",
+                Port = 443,
+                Username = "11111111-2222-3333-4444-555555555555",
+                Sni = "hu.example.com",
+                Extra = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["security"] = "tls",
+                    ["type"] = "httpupgrade",
+                    ["path"] = "/hu",
+                    ["host"] = "hu.example.com"
+                }
+            },
+            new()
+            {
+                Id = "n-hy2",
+                Name = "Hy2",
+                Protocol = ProxyProtocol.HYSTERIA2,
+                Host = "hy2.example.com",
+                Port = 443,
+                Password = "hy2-password",
+                Sni = "hy2.example.com"
+            },
+            new()
+            {
+                Id = "n-tuic",
+                Name = "TUIC",
+                Protocol = ProxyProtocol.TUIC,
+                Host = "tuic.example.com",
+                Port = 443,
+                Username = "11111111-2222-3333-4444-555555555555",
+                Password = "tuic-password",
+                Sni = "tuic.example.com"
+            },
+            new()
+            {
+                Id = "n-wg",
+                Name = "WG-Endpoint",
+                Protocol = ProxyProtocol.WIREGUARD,
+                Host = "wg.example.com",
+                Port = 51820,
+                Password = validKeyA,
+                Extra = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["publickey"] = validKeyB,
+                    ["address"] = "10.0.0.2/32",
+                    ["mtu"] = "1280"
+                }
+            }
+        };
+
+        var (modernJson, _) = SingBoxSidecarManager.BuildBridgeConfigJson(
+            l2Nodes, "Ethernet", new IsolationSettings { EnableIpv6 = false, DohServerIp = "223.5.5.5" }, basePort: 18600, modernSchema: true);
+
+        Assert.Contains("\"type\": \"udp\"", modernJson);
+        Assert.Contains("\"default_domain_resolver\"", modernJson);
+        Assert.Contains("\"endpoints\"", modernJson);
+        Assert.DoesNotContain("\"domain_strategy\"", modernJson);
+        Assert.Contains("\"packet_encoding\": \"xudp\"", modernJson);
+        Assert.Contains("\"path\": \"/ray\"", modernJson);
+        Assert.Contains("\"max_early_data\": 2048", modernJson);
+        Assert.Contains("\"early_data_header_name\": \"Sec-WebSocket-Protocol\"", modernJson);
+        Assert.Contains("\"type\": \"httpupgrade\"", modernJson);
+
+        var (legacyJson, _) = SingBoxSidecarManager.BuildBridgeConfigJson(
+            l2Nodes, "Ethernet", new IsolationSettings { EnableIpv6 = false }, basePort: 18700, modernSchema: false);
+        Assert.Contains("\"detour\": \"direct\"", legacyJson);
+        Assert.DoesNotContain("\"endpoints\"", legacyJson);
+
+        string? installedBin = new SingBoxSidecarManager().ResolveBinaryPath();
+        if (!string.IsNullOrWhiteSpace(installedBin) && File.Exists(installedBin))
+        {
+            string tmpCfg = Path.Combine(Path.GetTempPath(), $"aph_sb_check_{Guid.NewGuid():N}.json");
+            try
+            {
+                await File.WriteAllTextAsync(tmpCfg, modernJson, new UTF8Encoding(false));
+                var psi = new System.Diagnostics.ProcessStartInfo(installedBin)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardError = true,
+                    RedirectStandardOutput = true
+                };
+                psi.ArgumentList.Add("check");
+                psi.ArgumentList.Add("-c");
+                psi.ArgumentList.Add(tmpCfg);
+                using var proc = System.Diagnostics.Process.Start(psi)!;
+                string stderr = await proc.StandardError.ReadToEndAsync();
+                string stdout = await proc.StandardOutput.ReadToEndAsync();
+                await proc.WaitForExitAsync();
+                Assert.True(proc.ExitCode == 0, $"sing-box check failed ({proc.ExitCode}): {stderr} {stdout}");
+            }
+            finally
+            {
+                if (File.Exists(tmpCfg)) File.Delete(tmpCfg);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task VerifyViaLocalSeatAsync_WithRelayChain_PreservesLandingNodeStatusOnRelayFailure()
+    {
+        int deadRelayPort = GetFreeTcpPort();
+        var relayNode = new ProxyNode
+        {
+            Id = "relay-dead",
+            Name = "DeadRelay",
+            Protocol = ProxyProtocol.SOCKS5,
+            Host = "127.0.0.1",
+            Port = deadRelayPort,
+            Enabled = true,
+            Status = "online"
+        };
+        var landingNode = new ProxyNode
+        {
+            Id = "land-res-80",
+            Name = "ResProxy80",
+            Protocol = ProxyProtocol.SOCKS5,
+            Host = "173.234.67.227",
+            Port = 80,
+            Enabled = true,
+            Status = "online",
+            ExitIp = "173.234.67.227",
+            IspSummary = "物理直出连通"
+        };
+
+        var nic = new PhysicalNicManager();
+        var dns = new CleanDnsResolver(nic);
+        var connector = new UpstreamConnector(nic, dns);
+        using var server = new MixedProxyServer(connector);
+        int seatPort = GetFreeTcpPort();
+        var seat = new AppSeat
+        {
+            Id = "chain-diag-seat",
+            Name = "ChainDiag",
+            LocalPort = seatPort,
+            BoundNodeId = landingNode.Id,
+            RelayNodeId = relayNode.Id,
+            Enabled = true,
+            KillSwitchEnabled = true,
+            AllowSameGroupFailover = false
+        };
+        server.UpdateTopology([seat], [relayNode, landingNode], new IsolationSettings { GlobalKillSwitch = true });
+
+        var checker = new NodeHealthChecker(connector);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var res = await checker.VerifyViaLocalSeatAsync(
+            seat.Id,
+            seatPort,
+            landingNode,
+            new IsolationSettings { GlobalKillSwitch = true },
+            [("Probe", "https://127.0.0.1:1/")],
+            cts.Token,
+            relayNode);
+
+        Assert.False(res.Ok);
+        Assert.Contains("双跳全链路验真失败", res.Message);
+        Assert.Contains("DeadRelay", res.Message);
+        Assert.DoesNotContain("若为 HTTP 代理请改选 HTTP 协议", res.Message);
+        Assert.Equal("online", landingNode.Status);
+        Assert.Equal("物理直出连通", landingNode.IspSummary);
+    }
+
+    private sealed class DuplexPipeStream : Stream
+    {
+        private readonly System.IO.Pipelines.Pipe _pipe = new();
+        public Stream WriterView { get; }
+        public Stream ReaderView { get; }
+
+        public DuplexPipeStream()
+        {
+            WriterView = _pipe.Writer.AsStream();
+            ReaderView = _pipe.Reader.AsStream();
+        }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => 0;
+        public override long Position { get => 0; set { } }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => 0;
+        public override long Seek(long offset, SeekOrigin origin) => 0;
+        public override void SetLength(long value) { }
+        public override void Write(byte[] buffer, int offset, int count) { }
     }
 }

@@ -691,8 +691,8 @@ public static partial class ProxyNodeImporter
         int proxiesIndent = -1;
 
         Dictionary<string, string>? current = null;
-        string? currentParentKey = null;
         int currentItemIndent = -1;
+        var parentStack = new Stack<(int Indent, string Key)>();
 
         void FlushCurrent()
         {
@@ -704,7 +704,7 @@ public static partial class ProxyNodeImporter
                 list.Add((summary, current));
             }
             current = null;
-            currentParentKey = null;
+            parentStack.Clear();
         }
 
         foreach (string rawLine in lines)
@@ -759,42 +759,47 @@ public static partial class ProxyNodeImporter
                 FlushCurrent();
                 current = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 currentItemIndent = indent;
-                currentParentKey = null;
+                parentStack.Clear();
                 string firstKv = trimmed[2..].Trim();
                 ParseYamlKeyValueInto(firstKv, null, current);
                 continue;
             }
 
-            // 3. 多行缩进块内部属性与嵌套子块（如 reality-opts / ws-opts / grpc-opts）
+            // 3. 多行缩进块内部属性与任意深度嵌套子块（如 reality-opts / ws-opts.headers.Host）
             if (current != null)
             {
-                if (indent > currentItemIndent + 2 && currentParentKey != null)
+                while (parentStack.Count > 0 && indent <= parentStack.Peek().Indent)
                 {
-                    ParseYamlKeyValueInto(trimmed, currentParentKey, current);
+                    parentStack.Pop();
                 }
-                else
+
+                string? prefix = parentStack.Count > 0
+                    ? string.Join(".", parentStack.Reverse().Select(x => x.Key))
+                    : null;
+
+                int colon = FindUnquotedColon(trimmed);
+                if (colon > 0)
                 {
-                    int colon = trimmed.IndexOf(':');
-                    if (colon > 0)
+                    string key = UnquoteYaml(trimmed[..colon].Trim());
+                    string val = StripYamlInlineComment(trimmed[(colon + 1)..]).Trim();
+                    string fullKey = string.IsNullOrEmpty(prefix) ? key : $"{prefix}.{key}";
+
+                    if (string.IsNullOrEmpty(val))
                     {
-                        string key = UnquoteYaml(trimmed[..colon].Trim());
-                        string val = trimmed[(colon + 1)..].Trim();
-                        if (string.IsNullOrEmpty(val))
+                        if (indent > currentItemIndent)
                         {
-                            currentParentKey = key;
+                            parentStack.Push((indent, key));
                         }
-                        else if (val.StartsWith('{') && val.EndsWith('}'))
-                        {
-                            currentParentKey = null;
-                            var nested = ParseYamlInlineMap(val[1..^1]);
-                            foreach (var (nk, nv) in nested)
-                                current[$"{key}.{nk}"] = nv;
-                        }
-                        else
-                        {
-                            currentParentKey = null;
-                            current[key] = UnquoteYaml(val);
-                        }
+                    }
+                    else if (val.StartsWith('{') && val.EndsWith('}'))
+                    {
+                        var nested = ParseYamlInlineMap(val[1..^1]);
+                        foreach (var (nk, nv) in nested)
+                            current[$"{fullKey}.{nk}"] = nv;
+                    }
+                    else
+                    {
+                        current[fullKey] = UnquoteYaml(val);
                     }
                 }
             }
@@ -909,6 +914,25 @@ public static partial class ProxyNodeImporter
         return -1;
     }
 
+    private static string StripYamlInlineComment(string raw)
+    {
+        char quote = '\0';
+        for (int i = 0; i < raw.Length; i++)
+        {
+            char c = raw[i];
+            if (quote != '\0')
+            {
+                if (c == '\\' && i + 1 < raw.Length) { i++; continue; }
+                if (c == quote) quote = '\0';
+                continue;
+            }
+            if (c is '"' or '\'') { quote = c; continue; }
+            if (c == '#' && (i == 0 || char.IsWhiteSpace(raw[i - 1])))
+                return raw[..i];
+        }
+        return raw;
+    }
+
     private static string UnquoteYaml(string s)
     {
         s = s.Trim();
@@ -982,10 +1006,18 @@ public static partial class ProxyNodeImporter
                     extra["security"] = "tls";
                 }
                 if (m.TryGetValue("flow", out string? flow) && !string.IsNullOrWhiteSpace(flow)) extra["flow"] = flow;
+                if (m.TryGetValue("packet-encoding", out string? pktEnc) && !string.IsNullOrWhiteSpace(pktEnc)) extra["packetEncoding"] = pktEnc;
                 if (m.TryGetValue("client-fingerprint", out string? fp) && !string.IsNullOrWhiteSpace(fp)) extra["fp"] = fp;
+                if (m.TryGetValue("alpn", out string? alpn) && !string.IsNullOrWhiteSpace(alpn)) extra["alpn"] = alpn;
                 if (m.TryGetValue("network", out string? net) && !string.IsNullOrWhiteSpace(net)) extra["type"] = net;
+                if (IsTruthy(m, "ws-opts.v2ray-http-upgrade") || IsTruthy(m, "v2ray-http-upgrade"))
+                    extra["type"] = "httpupgrade";
                 if (m.TryGetValue("ws-opts.path", out string? wsPath) && !string.IsNullOrWhiteSpace(wsPath)) extra["path"] = wsPath;
                 if (m.TryGetValue("ws-opts.headers.Host", out string? wsHost) && !string.IsNullOrWhiteSpace(wsHost)) extra["host"] = wsHost;
+                if (m.TryGetValue("ws-opts.max-early-data", out string? maxEd) && !string.IsNullOrWhiteSpace(maxEd)) extra["max-early-data"] = maxEd;
+                if (m.TryGetValue("ws-opts.early-data-header-name", out string? edHdr) && !string.IsNullOrWhiteSpace(edHdr)) extra["early-data-header-name"] = edHdr;
+                if (m.TryGetValue("h2-opts.path", out string? h2Path) && !string.IsNullOrWhiteSpace(h2Path)) extra["path"] = h2Path;
+                if (m.TryGetValue("h2-opts.host", out string? h2Host) && !string.IsNullOrWhiteSpace(h2Host)) extra["host"] = h2Host;
                 if (m.TryGetValue("grpc-opts.grpc-service-name", out string? grpcSvc) && !string.IsNullOrWhiteSpace(grpcSvc)) extra["serviceName"] = grpcSvc;
                 if (extra.Count > 0) node.Extra = extra;
                 node.IspSummary = $"VLESS ({extra.GetValueOrDefault("security", "tls")}) · sing-box";

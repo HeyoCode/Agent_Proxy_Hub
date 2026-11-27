@@ -411,6 +411,25 @@ public sealed class HubStateDocument
     public List<ModelPricingRule> CustomPricings { get; set; } = new();
     public HubUiPreferences Preferences { get; set; } = new();
     public int HostApiPort { get; set; } = 17880;
+
+    /// <summary>
+    /// 收集所有被席位（主线路 / 前置中转 / 备用容灾）与多开隔离实例引用的节点 ID
+    /// </summary>
+    public HashSet<string> GetReferencedNodeIds()
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var seat in Seats)
+        {
+            if (!string.IsNullOrWhiteSpace(seat.BoundNodeId)) ids.Add(seat.BoundNodeId);
+            if (!string.IsNullOrWhiteSpace(seat.RelayNodeId)) ids.Add(seat.RelayNodeId);
+            if (!string.IsNullOrWhiteSpace(seat.FallbackNodeId)) ids.Add(seat.FallbackNodeId);
+        }
+        foreach (var inst in Instances)
+        {
+            if (!string.IsNullOrWhiteSpace(inst.BoundNodeId)) ids.Add(inst.BoundNodeId);
+        }
+        return ids;
+    }
 }
 
 /// <summary>
@@ -491,7 +510,7 @@ public sealed class SidecarEngineStatus
 public static class ProjectMetadata
 {
     public const string Name = "Agent Proxy Hub";
-    public const string Version = "0.7.0";
+    public const string Version = "0.7.1";
     public const string RepoOwner = "HeyoCode";
     public const string RepoName = "Agent_Proxy_Hub";
     public const string RepoSlug = "HeyoCode/Agent_Proxy_Hub";

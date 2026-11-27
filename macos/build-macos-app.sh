@@ -11,8 +11,11 @@ echo "[1/4] 构建 React Cult UI 前端..."
 pnpm --dir "$ROOT_DIR/web" install
 pnpm --dir "$ROOT_DIR/web" build
 
-echo "[2/4] 发布 .NET 10 核心代理服务 ($ARCH)..."
+echo "[2/4] 发布 .NET 10 核心代理服务与 aph CLI ($ARCH)..."
 dotnet publish "$ROOT_DIR/src/AgentProxyHub.Host/AgentProxyHub.Host.csproj" \
+  -c Release -r "$ARCH" --self-contained false \
+  -o "$MACOS_DIR"
+dotnet publish "$ROOT_DIR/src/AgentProxyHub.Cli/AgentProxyHub.Cli.csproj" \
   -c Release -r "$ARCH" --self-contained false \
   -o "$MACOS_DIR"
 
@@ -30,11 +33,13 @@ cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
   <key>CFBundleExecutable</key>
   <string>AgentProxyHub</string>
   <key>CFBundleIdentifier</key>
-  <string>dev.agentproxyhub.desktop</string>
+  <string>dev.heyocode.agentproxyhub</string>
   <key>CFBundleName</key>
   <string>Agent Proxy Hub</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.7.1</string>
   <key>CFBundleVersion</key>
-  <string>0.2.0</string>
+  <string>0.7.1</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>

@@ -4,7 +4,7 @@ set -euo pipefail
 # 构建 macOS 原生 .app 与拖拽式 .dmg 安装镜像
 # 用法: ./installer/macos/build-dmg.sh [osx-arm64|osx-x64] [版本号]
 ARCH="${1:-osx-arm64}"
-VERSION="${2:-0.2.0}"
+VERSION="${2:-0.7.1}"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 STAGE_DIR="$DIST_DIR/dmg-stage-$ARCH"

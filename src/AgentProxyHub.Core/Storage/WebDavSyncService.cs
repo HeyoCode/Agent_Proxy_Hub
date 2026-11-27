@@ -128,12 +128,21 @@ public sealed class WebDavSyncService
         {
             string baseDir = NormalizeBaseUrl(webDavUrl);
             using var http = CreateClient(username, password);
-            using var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), baseDir);
-            req.Headers.TryAddWithoutValidation("Depth", "0");
-            using var resp = await http.SendAsync(req, ct);
+            using var resp = await SendWithSameHostRedirectAsync(
+                http,
+                () =>
+                {
+                    var req = new HttpRequestMessage(new HttpMethod("PROPFIND"), baseDir);
+                    req.Headers.TryAddWithoutValidation("Depth", "0");
+                    return req;
+                },
+                ct);
             if (resp.StatusCode == HttpStatusCode.MethodNotAllowed || resp.StatusCode == HttpStatusCode.NotImplemented)
             {
-                using var optResp = await http.SendAsync(new HttpRequestMessage(HttpMethod.Options, baseDir), ct);
+                using var optResp = await SendWithSameHostRedirectAsync(
+                    http,
+                    () => new HttpRequestMessage(HttpMethod.Options, baseDir),
+                    ct);
                 return optResp.IsSuccessStatusCode
                     ? (true, $"WebDAV 连通正常 ({(int)optResp.StatusCode})")
                     : (false, $"WebDAV 返回 HTTP {(int)optResp.StatusCode}");
@@ -165,13 +174,15 @@ public sealed class WebDavSyncService
 
             using var http = CreateClient(username, password);
             // 尝试 MKCOL 确保子目录存在（已存在则返回 405 属正常）
-            using (var mkcol = new HttpRequestMessage(new HttpMethod("MKCOL"), folderUrl))
-            {
-                await http.SendAsync(mkcol, ct);
-            }
+            using (await SendWithSameHostRedirectAsync(http, () => new HttpRequestMessage(new HttpMethod("MKCOL"), folderUrl), ct)) { }
 
-            using var content = new StringContent(encrypted, Encoding.UTF8, "application/json");
-            using var putResp = await http.PutAsync(fileUrl, content, ct);
+            using var putResp = await SendWithSameHostRedirectAsync(
+                http,
+                () => new HttpRequestMessage(HttpMethod.Put, fileUrl)
+                {
+                    Content = new StringContent(encrypted, Encoding.UTF8, "application/json")
+                },
+                ct);
             if (!putResp.IsSuccessStatusCode)
             {
                 return (false, $"上传 WebDAV 失败: HTTP {(int)putResp.StatusCode} {putResp.ReasonPhrase}", null);
@@ -197,7 +208,7 @@ public sealed class WebDavSyncService
         {
             string fileUrl = NormalizeBaseUrl(webDavUrl) + "agent-proxy-hub/backup-latest.enc.json";
             using var http = CreateClient(username, password);
-            using var resp = await http.GetAsync(fileUrl, ct);
+            using var resp = await SendWithSameHostRedirectAsync(http, () => new HttpRequestMessage(HttpMethod.Get, fileUrl), ct);
             if (resp.StatusCode == HttpStatusCode.NotFound)
                 return (false, "WebDAV 云端尚未找到 backup-latest.enc.json，请先在原设备点击「加密上传」。", null);
             if (!resp.IsSuccessStatusCode)
@@ -224,11 +235,61 @@ public sealed class WebDavSyncService
         return clean.EndsWith('/') ? clean : clean + "/";
     }
 
+    /// <summary>
+    /// 允许同主机路径或同主机 HTTP->HTTPS 跳转的重定向，拒绝跨域名重定向以防止 Basic 凭据泄露
+    /// </summary>
+    private static async Task<HttpResponseMessage> SendWithSameHostRedirectAsync(
+        HttpClient http,
+        Func<HttpRequestMessage> requestFactory,
+        CancellationToken ct)
+    {
+        HttpRequestMessage currentReq = requestFactory();
+        HttpResponseMessage resp = await http.SendAsync(currentReq, ct);
+
+        for (int hop = 0; hop < 3; hop++)
+        {
+            int code = (int)resp.StatusCode;
+            if (code is not (301 or 302 or 303 or 307 or 308))
+                return resp;
+
+            Uri? baseUri = currentReq.RequestUri;
+            Uri? location = resp.Headers.Location;
+            if (baseUri == null || location == null)
+                return resp;
+
+            Uri resolved = location.IsAbsoluteUri ? location : new Uri(baseUri, location);
+            bool sameHost = resolved.Host.Equals(baseUri.Host, StringComparison.OrdinalIgnoreCase);
+            bool safeScheme = resolved.Scheme == baseUri.Scheme ||
+                              (baseUri.Scheme == Uri.UriSchemeHttp && resolved.Scheme == Uri.UriSchemeHttps);
+            if (!sameHost || !safeScheme)
+                return resp;
+
+            var prevMethod = currentReq.Method;
+            resp.Dispose();
+            currentReq.Dispose();
+            currentReq = requestFactory();
+            if (code == 303)
+            {
+                currentReq.Method = HttpMethod.Get;
+                currentReq.Content = null;
+            }
+            else
+            {
+                currentReq.Method = prevMethod;
+            }
+            currentReq.RequestUri = resolved;
+            resp = await http.SendAsync(currentReq, ct);
+        }
+
+        return resp;
+    }
+
     private static HttpClient CreateClient(string? username, string? password)
     {
-        var handler = new HttpClientHandler
+        var handler = new SocketsHttpHandler
         {
-            AllowAutoRedirect = false
+            AllowAutoRedirect = false,
+            ConnectTimeout = TimeSpan.FromSeconds(10)
         };
         var http = new HttpClient(handler)
         {

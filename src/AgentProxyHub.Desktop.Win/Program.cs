@@ -65,7 +65,8 @@ internal static class Program
             }
         });
 
-        var mainForm = new MainForm("http://127.0.0.1:17880/", startMinimized);
+        int apiPort = ResolveConfiguredApiPort(hostArgs);
+        var mainForm = new MainForm($"http://127.0.0.1:{apiPort}/", startMinimized);
         _activateWaitHandle = ThreadPool.RegisterWaitForSingleObject(
             _activateSignal,
             (_, _) =>
@@ -119,6 +120,47 @@ internal static class Program
             _singleInstanceMutex.ReleaseMutex();
             _singleInstanceMutex.Dispose();
         }
+    }
+
+    private static int ResolveConfiguredApiPort(string[] hostArgs)
+    {
+        for (int i = 0; i < hostArgs.Length; i++)
+        {
+            string a = hostArgs[i];
+            if (a.StartsWith("--verify-port=", StringComparison.OrdinalIgnoreCase) &&
+                int.TryParse(a["--verify-port=".Length..], out int eqPort) &&
+                eqPort is >= 1024 and <= 65535)
+            {
+                return eqPort;
+            }
+            if (a.Equals("--verify-port", StringComparison.OrdinalIgnoreCase) &&
+                i + 1 < hostArgs.Length &&
+                int.TryParse(hostArgs[i + 1], out int nextPort) &&
+                nextPort is >= 1024 and <= 65535)
+            {
+                return nextPort;
+            }
+        }
+
+        try
+        {
+            string statePath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".agent-proxy-hub",
+                "state.json");
+            if (File.Exists(statePath))
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(statePath));
+                if (doc.RootElement.TryGetProperty("hostApiPort", out var prop) &&
+                    prop.TryGetInt32(out int port) &&
+                    port is >= 1024 and <= 65535)
+                {
+                    return port;
+                }
+            }
+        }
+        catch { }
+        return 17880;
     }
 
     private static void TrySignalExistingShutdownAndWait()

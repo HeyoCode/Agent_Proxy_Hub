@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using AgentProxyHub.Core.Diagnostics;
 
 namespace AgentProxyHub.Core.Storage;
 
@@ -63,7 +64,10 @@ public sealed class CredentialVault
             byte[] combined = Convert.FromBase64String(value[CipherPrefix.Length..]);
             if (combined.Length < NonceSize + TagSize) return string.Empty;
 
-            byte[] key = GetOrCreateMasterKey();
+            // 只读解密绝不创建或覆盖已有 .vault.key，避免瞬态异常破坏历史凭据
+            byte[]? key = TryGetExistingMasterKey();
+            if (key == null) return string.Empty;
+
             var nonce = combined.AsSpan(0, NonceSize);
             var tag = combined.AsSpan(NonceSize, TagSize);
             var cipher = combined.AsSpan(NonceSize + TagSize);
@@ -80,6 +84,26 @@ public sealed class CredentialVault
         }
     }
 
+    private byte[]? TryGetExistingMasterKey()
+    {
+        lock (_keyLock)
+        {
+            if (_cachedKey != null) return _cachedKey;
+            if (!File.Exists(_keyPath)) return null;
+
+            if (TryReadKeyWithRetry(out byte[]? raw, out _) && raw is { Length: > 0 })
+            {
+                byte[]? unwrapped = UnwrapKeyBytes(raw);
+                if (unwrapped is { Length: KeySize })
+                {
+                    _cachedKey = unwrapped;
+                    return _cachedKey;
+                }
+            }
+            return null;
+        }
+    }
+
     private byte[] GetOrCreateMasterKey()
     {
         lock (_keyLock)
@@ -88,19 +112,29 @@ public sealed class CredentialVault
 
             if (File.Exists(_keyPath))
             {
-                try
+                if (!TryReadKeyWithRetry(out byte[]? raw, out Exception? ioEx))
                 {
-                    byte[] raw = File.ReadAllBytes(_keyPath);
+                    // 文件被临时占用或无权限时禁止生成新密钥覆盖，直接抛错保护现有密钥
+                    throw new IOException($"无法读取已有凭据主密钥 {_keyPath}，已中止覆盖以保护历史密文。", ioEx);
+                }
+
+                if (raw is { Length: > 0 })
+                {
                     byte[]? unwrapped = UnwrapKeyBytes(raw);
                     if (unwrapped is { Length: KeySize })
                     {
                         _cachedKey = unwrapped;
                         return _cachedKey;
                     }
-                }
-                catch
-                {
-                    // 读取失败则按容错重生成
+
+                    // 已有密钥文件损坏或跨机 DPAPI 无法解封：先留存损坏备份再轮换，严禁静默丢失
+                    string backupPath = $"{_keyPath}.corrupt-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}.bak";
+                    try
+                    {
+                        File.Copy(_keyPath, backupPath, overwrite: true);
+                        HubEventLogger.Default.Warn("GUARD", $"检测到凭据主密钥无法解封，已安全备份至 {Path.GetFileName(backupPath)} 后重新生成新密钥。");
+                    }
+                    catch { }
                 }
             }
 
@@ -126,6 +160,30 @@ public sealed class CredentialVault
             _cachedKey = key;
             return _cachedKey;
         }
+    }
+
+    private bool TryReadKeyWithRetry(out byte[]? raw, out Exception? lastError)
+    {
+        raw = null;
+        lastError = null;
+        int[] delaysMs = [30, 80, 150];
+        for (int attempt = 0; attempt <= delaysMs.Length; attempt++)
+        {
+            try
+            {
+                raw = File.ReadAllBytes(_keyPath);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                lastError = ex;
+                if (attempt < delaysMs.Length)
+                {
+                    Thread.Sleep(delaysMs[attempt]);
+                }
+            }
+        }
+        return false;
     }
 
     private static byte[] WrapKeyBytes(byte[] key)

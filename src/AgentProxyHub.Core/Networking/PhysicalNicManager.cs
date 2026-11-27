@@ -10,7 +10,7 @@ namespace AgentProxyHub.Core.Networking;
 /// 物理网卡管理与内核 Socket 硬件接口直绑引擎（Windows / macOS 双端适配）
 /// 通过绑定真实物理接口绕过 Clash/Mihomo/Surge/Tailscale 的 TUN 虚拟路由表
 /// </summary>
-public sealed class PhysicalNicManager
+public sealed class PhysicalNicManager : IDisposable
 {
     private static readonly string[] KernelShimKeywords =
     [
@@ -43,10 +43,38 @@ public sealed class PhysicalNicManager
     private readonly object _lock = new();
     private List<NetworkAdapterInfo> _cachedAdapters = new();
     private NetworkAdapterInfo? _lockedAdapter;
+    private string? _preferredNicId;
+    private long _lastAutoRefreshTicks;
+    private bool _disposed;
 
     public PhysicalNicManager(string? preferredNicId = null)
     {
+        _preferredNicId = preferredNicId;
         Refresh(preferredNicId);
+        try
+        {
+            NetworkChange.NetworkAddressChanged += OnNetworkAddressChanged;
+        }
+        catch { }
+    }
+
+    private void OnNetworkAddressChanged(object? sender, EventArgs e)
+    {
+        if (_disposed) return;
+        long nowTicks = Environment.TickCount64;
+        long prev = Interlocked.Read(ref _lastAutoRefreshTicks);
+        if (nowTicks - prev < 1000) return;
+        if (Interlocked.CompareExchange(ref _lastAutoRefreshTicks, nowTicks, prev) != prev) return;
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                Thread.Sleep(350);
+                if (!_disposed) Refresh(_preferredNicId);
+            }
+            catch { }
+        });
     }
 
     public IReadOnlyList<NetworkAdapterInfo> GetAdapters()
@@ -164,6 +192,7 @@ public sealed class PhysicalNicManager
 
         lock (_lock)
         {
+            _preferredNicId = preferredNicId ?? _preferredNicId;
             _cachedAdapters = list;
             _lockedAdapter = selected;
         }
@@ -203,7 +232,7 @@ public sealed class PhysicalNicManager
         return socket;
     }
 
-    private void BindSocketToPhysicalNic(Socket socket, AddressFamily family)
+    private void BindSocketToPhysicalNic(Socket socket, AddressFamily family, bool allowRefreshRetry = true)
     {
         var nic = GetLockedAdapter();
         if (nic == null) return;
@@ -249,10 +278,31 @@ public sealed class PhysicalNicManager
                 }
             }
         }
+        catch (SocketException ex) when (allowRefreshRetry && ex.SocketErrorCode == SocketError.AddressNotAvailable)
+        {
+            // 网络切换导致旧源 IP 失效：自动重扫当前物理网卡并重试绑定一次
+            try
+            {
+                Refresh(_preferredNicId);
+                BindSocketToPhysicalNic(socket, family, allowRefreshRetry: false);
+            }
+            catch { }
+        }
         catch
         {
             // 在受限沙盒或接口瞬态变化时优雅降级，由调用方连接与熔断逻辑兜底
         }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        try
+        {
+            NetworkChange.NetworkAddressChanged -= OnNetworkAddressChanged;
+        }
+        catch { }
     }
 
     private static void ConfigureKeepAlive(Socket socket)

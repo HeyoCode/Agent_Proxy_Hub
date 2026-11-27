@@ -195,6 +195,9 @@ public sealed class AppProxyTakeoverService
         if (procNames.Length == 0 && VsCodeIdeSpecs.TryGetValue(seat.Id, out var spec))
             procNames = spec.ProcessNames;
 
+        bool isMultiWindowIde = VsCodeIdeSpecs.ContainsKey(seat.Id) || seat.Id.Equals("zed", StringComparison.OrdinalIgnoreCase);
+        bool isClaudeDesktop = seat.Id.Equals("claude-desktop", StringComparison.OrdinalIgnoreCase);
+        int currentPid = Environment.ProcessId;
         int killed = 0;
         foreach (string procName in procNames)
         {
@@ -213,9 +216,35 @@ public sealed class AppProxyTakeoverService
                     {
                         try
                         {
-                            if (!p.HasExited)
+                            if (p.Id == currentPid || p.HasExited)
+                                continue;
+
+                            // 防误杀同名 CLI 进程（如 claude-desktop 不误杀终端里运行的 Claude Code CLI）
+                            if (isClaudeDesktop)
                             {
-                                p.CloseMainWindow();
+                                string? procPath = null;
+                                try { procPath = p.MainModule?.FileName; } catch { }
+                                if (!string.IsNullOrWhiteSpace(procPath) &&
+                                    (procPath.Contains("npm", StringComparison.OrdinalIgnoreCase)
+                                     || procPath.Contains("nodejs", StringComparison.OrdinalIgnoreCase)
+                                     || procPath.Contains(".claude", StringComparison.OrdinalIgnoreCase)
+                                     || procPath.Contains("bun", StringComparison.OrdinalIgnoreCase)
+                                     || procPath.Contains("pnpm", StringComparison.OrdinalIgnoreCase)))
+                                {
+                                    continue;
+                                }
+                                if (p.MainWindowHandle == IntPtr.Zero && string.IsNullOrWhiteSpace(procPath))
+                                    continue;
+                            }
+
+                            p.CloseMainWindow();
+                            if (isMultiWindowIde)
+                            {
+                                // 多工作区 IDE 仅请求礼貌关闭，严禁 Kill(entireProcessTree: true) 强杀未保存窗口
+                                if (p.WaitForExit(2000)) killed++;
+                            }
+                            else
+                            {
                                 if (!p.WaitForExit(900))
                                     p.Kill(entireProcessTree: true);
                                 killed++;
@@ -421,19 +450,20 @@ public sealed class AppProxyTakeoverService
                 return (true, $"已打开预注入 :{seat.LocalPort} 独立专线的 Terminal 终端");
             }
 
+            string safeProfileDir = EscapePwshSingleQuoted(profileDir ?? string.Empty);
             string profileEnvCmd = string.IsNullOrWhiteSpace(profileDir)
                 ? string.Empty
-                : $"$env:CLAUDE_CONFIG_DIR='{profileDir}'; $env:CODEX_HOME='{profileDir}'; $env:GEMINI_CLI_HOME='{profileDir}'; $env:XDG_CONFIG_HOME='{profileDir}'; ";
+                : $"$env:CLAUDE_CONFIG_DIR='{safeProfileDir}'; $env:CODEX_HOME='{safeProfileDir}'; $env:GEMINI_CLI_HOME='{safeProfileDir}'; $env:XDG_CONFIG_HOME='{safeProfileDir}'; ";
             string cdCmd = !string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory)
-                ? $"Set-Location '{workingDirectory.Replace("'", "''")}'; "
+                ? $"Set-Location '{EscapePwshSingleQuoted(workingDirectory)}'; "
                 : string.Empty;
 
             string initCmd =
                 cdCmd +
-                $"$env:HTTP_PROXY='{proxyHttp}'; $env:HTTPS_PROXY='{proxyHttp}'; $env:ALL_PROXY='{proxySocks}'; $env:NO_PROXY='{noProxy}'; " +
+                $"$env:HTTP_PROXY='{EscapePwshSingleQuoted(proxyHttp)}'; $env:HTTPS_PROXY='{EscapePwshSingleQuoted(proxyHttp)}'; $env:ALL_PROXY='{EscapePwshSingleQuoted(proxySocks)}'; $env:NO_PROXY='{EscapePwshSingleQuoted(noProxy)}'; " +
                 profileEnvCmd +
-                $"Write-Host '[Agent Proxy Hub] {bannerTitle} 独立专线已挂载 -> {proxyHttp}' -ForegroundColor Cyan; " +
-                $"Write-Host '直接输入 {cliHint} 即可从专属出口通道通信，不影响系统或 Clash。' -ForegroundColor DarkGray";
+                $"Write-Host '[Agent Proxy Hub] {EscapePwshSingleQuoted(bannerTitle)} 独立专线已挂载 -> {EscapePwshSingleQuoted(proxyHttp)}' -ForegroundColor Cyan; " +
+                $"Write-Host '直接输入 {EscapePwshSingleQuoted(cliHint)} 即可从专属出口通道通信，不影响系统或 Clash。' -ForegroundColor DarkGray";
 
             StartWindowsInteractiveShell(initCmd);
             return (true, $"已打开已注入 :{seat.LocalPort} 独立专线的交互式终端" + (!string.IsNullOrWhiteSpace(profileDir) ? $"（目录隔离: {profileDir}）" : ""));
@@ -491,15 +521,15 @@ public sealed class AppProxyTakeoverService
         if (_isMacOs)
         {
             string body = seat.Id == "claude-desktop"
-                ? $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{http}\"\nexport HTTP_PROXY=\"{http}\"\nexport ALL_PROXY=\"{socks}\"\nexport NO_PROXY=\"{noProxy}\"\nopen -a Claude --args --proxy-server=\"{http}\"\n"
-                : $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{http}\"\nexport HTTP_PROXY=\"{http}\"\nexport ALL_PROXY=\"{socks}\"\nexport NO_PROXY=\"{noProxy}\"\necho \"[Agent Proxy Hub] {seat.Name} 独立出口已就绪 ({http})\"\nexec {cli} \"$@\"\n";
+                ? $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{EscapeBashDoubleQuoted(http)}\"\nexport HTTP_PROXY=\"{EscapeBashDoubleQuoted(http)}\"\nexport ALL_PROXY=\"{EscapeBashDoubleQuoted(socks)}\"\nexport NO_PROXY=\"{EscapeBashDoubleQuoted(noProxy)}\"\nopen -a Claude --args --proxy-server=\"{EscapeBashDoubleQuoted(http)}\"\n"
+                : $"#!/usr/bin/env bash\nexport HTTPS_PROXY=\"{EscapeBashDoubleQuoted(http)}\"\nexport HTTP_PROXY=\"{EscapeBashDoubleQuoted(http)}\"\nexport ALL_PROXY=\"{EscapeBashDoubleQuoted(socks)}\"\nexport NO_PROXY=\"{EscapeBashDoubleQuoted(noProxy)}\"\necho \"[Agent Proxy Hub] {EscapeBashDoubleQuoted(seat.Name)} 独立出口已就绪 ({EscapeBashDoubleQuoted(http)})\"\nexec \"{EscapeBashDoubleQuoted(cli)}\" \"$@\"\n";
             File.WriteAllText(path, body, new UTF8Encoding(false));
         }
         else
         {
             string body = seat.Id == "claude-desktop"
-                ? $"$env:HTTPS_PROXY=\"{http}\"\r\n$env:HTTP_PROXY=\"{http}\"\r\n$env:ALL_PROXY=\"{socks}\"\r\n$env:NO_PROXY=\"{noProxy}\"\r\n$exe = \"$env:LOCALAPPDATA\\AnthropicClaude\\Claude.exe\"\r\nif (Test-Path $exe) {{ Start-Process -FilePath $exe -ArgumentList \"--proxy-server={http}\" }} else {{ Write-Host \"未在默认目录找到 Claude.exe，请手动启动并附带 --proxy-server={http}\" }}\r\n"
-                : $"$env:HTTPS_PROXY=\"{http}\"\r\n$env:HTTP_PROXY=\"{http}\"\r\n$env:ALL_PROXY=\"{socks}\"\r\n$env:NO_PROXY=\"{noProxy}\"\r\nWrite-Host \"[Agent Proxy Hub] {seat.Name} 独立出口已就绪 ({http})\" -ForegroundColor Cyan\r\nWrite-Host \"直接运行: {cli}\" -ForegroundColor Green\r\n";
+                ? $"$env:HTTPS_PROXY='{EscapePwshSingleQuoted(http)}'\r\n$env:HTTP_PROXY='{EscapePwshSingleQuoted(http)}'\r\n$env:ALL_PROXY='{EscapePwshSingleQuoted(socks)}'\r\n$env:NO_PROXY='{EscapePwshSingleQuoted(noProxy)}'\r\n$exe = \"$env:LOCALAPPDATA\\AnthropicClaude\\Claude.exe\"\r\nif (Test-Path $exe) {{ Start-Process -FilePath $exe -ArgumentList '--proxy-server={EscapePwshSingleQuoted(http)}' }} else {{ Write-Host '未在默认目录找到 Claude.exe，请手动启动并附带 --proxy-server={EscapePwshSingleQuoted(http)}' }}\r\n"
+                : $"$env:HTTPS_PROXY='{EscapePwshSingleQuoted(http)}'\r\n$env:HTTP_PROXY='{EscapePwshSingleQuoted(http)}'\r\n$env:ALL_PROXY='{EscapePwshSingleQuoted(socks)}'\r\n$env:NO_PROXY='{EscapePwshSingleQuoted(noProxy)}'\r\nWrite-Host '[Agent Proxy Hub] {EscapePwshSingleQuoted(seat.Name)} 独立出口已就绪 ({EscapePwshSingleQuoted(http)})' -ForegroundColor Cyan\r\nWrite-Host '直接运行: {EscapePwshSingleQuoted(cli)}' -ForegroundColor Green\r\n";
             File.WriteAllText(path, body, new UTF8Encoding(true));
         }
 
@@ -557,7 +587,7 @@ public sealed class AppProxyTakeoverService
     private static string[] ResolveProcessNames(AppSeat seat) => seat.Id switch
     {
         "claude" => ["claude"],
-        "claude-desktop" => ["Claude", "claude"],
+        "claude-desktop" => ["Claude"],
         "cursor" => ["Cursor"],
         "chatgpt" => ["codex", "ChatGPT"],
         "gemini-cli" => ["gemini"],
@@ -1034,13 +1064,13 @@ public sealed class AppProxyTakeoverService
         }
 
         bool fileExisted = File.Exists(targetFilePath);
+        string rawBefore = fileExisted ? File.ReadAllText(targetFilePath) : "{}\n";
         JsonObject rootObj;
         if (fileExisted)
         {
-            string raw = File.ReadAllText(targetFilePath);
-            var parsed = string.IsNullOrWhiteSpace(raw)
+            var parsed = string.IsNullOrWhiteSpace(rawBefore)
                 ? new JsonObject()
-                : JsonNode.Parse(raw, null, JsonDocOpts) as JsonObject;
+                : JsonNode.Parse(rawBefore, null, JsonDocOpts) as JsonObject;
             rootObj = parsed ?? throw new InvalidOperationException($"目标文件不是合法 JSON 对象: {targetFilePath}");
         }
         else
@@ -1087,6 +1117,12 @@ public sealed class AppProxyTakeoverService
             File.WriteAllText(backupFile, JsonSerializer.Serialize(bak, WriteJsonOpts), new UTF8Encoding(false));
         }
 
+        if (JsoncPatcher.TryPatchObjectInPlace(rawBefore, nestedObjectPath, updates, out string patchedJsonc))
+        {
+            File.WriteAllText(targetFilePath, patchedJsonc, new UTF8Encoding(false));
+            return;
+        }
+
         foreach (var kv in updates)
         {
             targetObj[kv.Key] = kv.Value?.DeepClone();
@@ -1105,32 +1141,54 @@ public sealed class AppProxyTakeoverService
 
         if (File.Exists(bak.TargetPath))
         {
-            var rootObj = JsonNode.Parse(File.ReadAllText(bak.TargetPath), null, JsonDocOpts) as JsonObject;
-            if (rootObj != null)
+            string rawCurrent = File.ReadAllText(bak.TargetPath);
+            if (JsoncPatcher.TryRestorePropertiesInPlace(rawCurrent, nestedObjectPath, bak.Keys, out string restoredJsonc))
             {
-                JsonObject? targetObj = rootObj;
-                foreach (string seg in nestedObjectPath)
+                if (!bak.FileExistedBefore && JsoncPatcher.IsEmptyJsonObject(restoredJsonc))
                 {
-                    targetObj = targetObj?[seg] as JsonObject;
+                    File.Delete(bak.TargetPath);
                 }
-
-                if (targetObj != null)
+                else
                 {
-                    foreach (var kv in bak.Keys)
+                    File.WriteAllText(bak.TargetPath, restoredJsonc, new UTF8Encoding(false));
+                }
+            }
+            else
+            {
+                var rootObj = JsonNode.Parse(rawCurrent, null, JsonDocOpts) as JsonObject;
+                if (rootObj != null)
+                {
+                    JsonObject? targetObj = rootObj;
+                    foreach (string seg in nestedObjectPath)
                     {
-                        if (!kv.Value.Existed)
+                        targetObj = targetObj?[seg] as JsonObject;
+                    }
+
+                    if (targetObj != null)
+                    {
+                        foreach (var kv in bak.Keys)
                         {
-                            targetObj.Remove(kv.Key);
+                            if (!kv.Value.Existed)
+                            {
+                                targetObj.Remove(kv.Key);
+                            }
+                            else
+                            {
+                                targetObj[kv.Key] = kv.Value.RawJson == null
+                                    ? null
+                                    : JsonNode.Parse(kv.Value.RawJson, null, JsonDocOpts);
+                            }
+                        }
+
+                        if (!bak.FileExistedBefore && rootObj.Count == 0)
+                        {
+                            File.Delete(bak.TargetPath);
                         }
                         else
                         {
-                            targetObj[kv.Key] = kv.Value.RawJson == null
-                                ? null
-                                : JsonNode.Parse(kv.Value.RawJson, null, JsonDocOpts);
+                            File.WriteAllText(bak.TargetPath, rootObj.ToJsonString(WriteJsonOpts), new UTF8Encoding(false));
                         }
                     }
-
-                    File.WriteAllText(bak.TargetPath, rootObj.ToJsonString(WriteJsonOpts), new UTF8Encoding(false));
                 }
             }
         }
@@ -1148,10 +1206,10 @@ public sealed class AppProxyTakeoverService
             "  $aphTcp = New-Object System.Net.Sockets.TcpClient",
             $"  $aphWait = $aphTcp.BeginConnect('127.0.0.1', {port}, $null, $null)",
             "  if ($aphWait.AsyncWaitHandle.WaitOne(150) -and $aphTcp.Connected) {",
-            $"    $env:HTTP_PROXY = '{proxyHttp}'",
-            $"    $env:HTTPS_PROXY = '{proxyHttp}'",
-            $"    $env:ALL_PROXY = '{proxySocks}'",
-            $"    $env:NO_PROXY = '{noProxy}'",
+            $"    $env:HTTP_PROXY = '{EscapePwshSingleQuoted(proxyHttp)}'",
+            $"    $env:HTTPS_PROXY = '{EscapePwshSingleQuoted(proxyHttp)}'",
+            $"    $env:ALL_PROXY = '{EscapePwshSingleQuoted(proxySocks)}'",
+            $"    $env:NO_PROXY = '{EscapePwshSingleQuoted(noProxy)}'",
             "  }",
             "  $aphTcp.Close()",
             "} catch {}",
@@ -1183,30 +1241,76 @@ public sealed class AppProxyTakeoverService
         string path = Path.Combine(_launchersDir, $"open-{seat.Id.Replace(":", "_")}.command");
         string proxyHttp = $"http://127.0.0.1:{seat.LocalPort}";
         string proxySocks = $"socks5h://127.0.0.1:{seat.LocalPort}";
+        string escapedProfileDir = EscapeBashDoubleQuoted(profileDir ?? string.Empty);
         string profileExports = string.IsNullOrWhiteSpace(profileDir)
             ? string.Empty
-            : $"export CLAUDE_CONFIG_DIR=\"{profileDir}\"\nexport CODEX_HOME=\"{profileDir}\"\nexport GEMINI_CLI_HOME=\"{profileDir}\"\nexport XDG_CONFIG_HOME=\"{profileDir}\"\n";
+            : $"export CLAUDE_CONFIG_DIR=\"{escapedProfileDir}\"\nexport CODEX_HOME=\"{escapedProfileDir}\"\nexport GEMINI_CLI_HOME=\"{escapedProfileDir}\"\nexport XDG_CONFIG_HOME=\"{escapedProfileDir}\"\n";
         string script =
             "#!/bin/bash\n" +
-            $"export HTTP_PROXY=\"{proxyHttp}\"\n" +
-            $"export HTTPS_PROXY=\"{proxyHttp}\"\n" +
-            $"export ALL_PROXY=\"{proxySocks}\"\n" +
-            "export NO_PROXY=\"" + BuildEffectiveNoProxy(seat, true) + "\"\n" +
+            $"export HTTP_PROXY=\"{EscapeBashDoubleQuoted(proxyHttp)}\"\n" +
+            $"export HTTPS_PROXY=\"{EscapeBashDoubleQuoted(proxyHttp)}\"\n" +
+            $"export ALL_PROXY=\"{EscapeBashDoubleQuoted(proxySocks)}\"\n" +
+            "export NO_PROXY=\"" + EscapeBashDoubleQuoted(BuildEffectiveNoProxy(seat, true)) + "\"\n" +
             profileExports +
-            $"echo \"[Agent Proxy Hub] {title} 独立专线已挂载 -> {proxyHttp}\"\n" +
-            $"echo \"输入 {cliHint} 即可走专属出口通道。\"\n" +
+            $"echo \"[Agent Proxy Hub] {EscapeBashDoubleQuoted(title)} 独立专线已挂载 -> {EscapeBashDoubleQuoted(proxyHttp)}\"\n" +
+            $"echo \"输入 {EscapeBashDoubleQuoted(cliHint)} 即可走专属出口通道。\"\n" +
             "exec $SHELL -l\n";
         File.WriteAllText(path, script, new UTF8Encoding(false));
         return path;
     }
 
+    private static string EscapePwshSingleQuoted(string input) =>
+        (input ?? string.Empty).Replace("'", "''", StringComparison.Ordinal);
+
+    private static string EscapeBashDoubleQuoted(string input) =>
+        (input ?? string.Empty)
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("\"", "\\\"", StringComparison.Ordinal)
+            .Replace("$", "\\$", StringComparison.Ordinal)
+            .Replace("`", "\\`", StringComparison.Ordinal);
+
     private static void AppendSplitArgs(ProcessStartInfo psi, string? extraArgs)
     {
         if (string.IsNullOrWhiteSpace(extraArgs)) return;
-        foreach (string part in extraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        var current = new StringBuilder();
+        char quote = '\0';
+        for (int i = 0; i < extraArgs.Length; i++)
         {
-            psi.ArgumentList.Add(part.Trim());
+            char c = extraArgs[i];
+            if (quote != '\0')
+            {
+                if (c == quote)
+                {
+                    quote = '\0';
+                }
+                else
+                {
+                    current.Append(c);
+                }
+                continue;
+            }
+
+            if (c is '"' or '\'')
+            {
+                quote = c;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(c))
+            {
+                if (current.Length > 0)
+                {
+                    psi.ArgumentList.Add(current.ToString());
+                    current.Clear();
+                }
+                continue;
+            }
+
+            current.Append(c);
         }
+
+        if (current.Length > 0)
+            psi.ArgumentList.Add(current.ToString());
     }
 
     public static string BuildEffectiveNoProxy(AppSeat seat, bool isMacOs)

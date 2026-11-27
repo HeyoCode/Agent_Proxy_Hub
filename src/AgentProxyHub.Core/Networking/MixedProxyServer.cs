@@ -103,11 +103,14 @@ public sealed class MixedProxyServer : IDisposable
                 var neededL2Nodes = _nodes
                     .Where(n => n.Enabled && n.RequiresSidecarEngine && neededL2Ids.Contains(n.Id))
                     .ToList();
-                _ = _connector.Sidecar.EnsureNodesReady(
+                if (!_connector.Sidecar.EnsureNodesReady(
                     neededL2Nodes,
                     _connector.NicManager.GetLockedAdapter()?.Name,
                     isolation,
-                    out _);
+                    out string? sidecarErr) && !string.IsNullOrWhiteSpace(sidecarErr))
+                {
+                    HubEventLogger.Default.Error("ENGINE", sidecarErr);
+                }
             }
         }
     }
@@ -258,8 +261,23 @@ public sealed class MixedProxyServer : IDisposable
     {
         if (_disposed) return;
         var listener = new TcpListener(IPAddress.Loopback, st.Seat.LocalPort == 0 ? 0 : st.Seat.LocalPort);
-        listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-        listener.Start();
+        if (OperatingSystem.IsWindows())
+        {
+            listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        }
+        try
+        {
+            listener.Start();
+        }
+        catch (SocketException ex)
+        {
+            try { listener.Stop(); } catch { }
+            st.Listener = null;
+            st.ListenerV6 = null;
+            st.BoundConfigPort = -1;
+            HubEventLogger.Default.Error("PROXY", $"席位「{st.Seat.Name}」(:{st.Seat.LocalPort}) 监听失败（端口可能已被占用），已隔离跳过：{ex.Message}");
+            return;
+        }
 
         var cts = new CancellationTokenSource();
         st.Listener = listener;
@@ -331,24 +349,24 @@ public sealed class MixedProxyServer : IDisposable
                 using var clientStream = client.GetStream();
                 byte[] firstByte = new byte[1];
                 int n;
-                using (var firstByteCts = CancellationTokenSource.CreateLinkedTokenSource(ct))
-                {
-                    firstByteCts.CancelAfter(TimeSpan.FromSeconds(15));
-                    n = await clientStream.ReadAsync(firstByte, firstByteCts.Token);
-                }
+                using var handshakeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                handshakeCts.CancelAfter(TimeSpan.FromSeconds(15));
+                CancellationToken hsCt = handshakeCts.Token;
+
+                n = await clientStream.ReadAsync(firstByte, hsCt);
                 if (n <= 0) return;
 
                 if (firstByte[0] == 0x05)
                 {
-                    await HandleSocks5ClientAsync(st, clientStream, ct);
+                    await HandleSocks5ClientAsync(st, clientStream, hsCt, ct);
                 }
                 else if (firstByte[0] == 0x04)
                 {
-                    await HandleSocks4ClientAsync(st, clientStream, ct);
+                    await HandleSocks4ClientAsync(st, clientStream, hsCt, ct);
                 }
                 else
                 {
-                    await HandleHttpClientAsync(st, clientStream, firstByte[0], ct);
+                    await HandleHttpClientAsync(st, clientStream, firstByte[0], hsCt, ct);
                 }
             }
             catch
@@ -362,22 +380,22 @@ public sealed class MixedProxyServer : IDisposable
         }
     }
 
-    private async Task HandleSocks5ClientAsync(SeatListenerState st, NetworkStream clientStream, CancellationToken ct)
+    private async Task HandleSocks5ClientAsync(SeatListenerState st, NetworkStream clientStream, CancellationToken hsCt, CancellationToken ct)
     {
         byte[] nMethodsBuf = new byte[1];
-        await UpstreamConnector.ReadExactAsync(clientStream, nMethodsBuf, ct);
+        await UpstreamConnector.ReadExactAsync(clientStream, nMethodsBuf, hsCt);
         byte[] methods = new byte[nMethodsBuf[0]];
-        await UpstreamConnector.ReadExactAsync(clientStream, methods, ct);
+        await UpstreamConnector.ReadExactAsync(clientStream, methods, hsCt);
 
         // 本地端口免认证返回 0x00
-        await clientStream.WriteAsync(new byte[] { 0x05, 0x00 }, ct);
-        await clientStream.FlushAsync(ct);
+        await clientStream.WriteAsync(new byte[] { 0x05, 0x00 }, hsCt);
+        await clientStream.FlushAsync(hsCt);
 
         byte[] reqHdr = new byte[4];
-        await UpstreamConnector.ReadExactAsync(clientStream, reqHdr, ct);
+        await UpstreamConnector.ReadExactAsync(clientStream, reqHdr, hsCt);
         if (reqHdr[0] != 0x05 || reqHdr[1] != 0x01)
         {
-            await clientStream.WriteAsync(new byte[] { 0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, ct);
+            await clientStream.WriteAsync(new byte[] { 0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, hsCt);
             return;
         }
 
@@ -386,28 +404,28 @@ public sealed class MixedProxyServer : IDisposable
         {
             case 0x01:
                 byte[] ipv4 = new byte[4];
-                await UpstreamConnector.ReadExactAsync(clientStream, ipv4, ct);
+                await UpstreamConnector.ReadExactAsync(clientStream, ipv4, hsCt);
                 targetHost = new IPAddress(ipv4).ToString();
                 break;
             case 0x03:
                 byte[] lenB = new byte[1];
-                await UpstreamConnector.ReadExactAsync(clientStream, lenB, ct);
+                await UpstreamConnector.ReadExactAsync(clientStream, lenB, hsCt);
                 byte[] dom = new byte[lenB[0]];
-                await UpstreamConnector.ReadExactAsync(clientStream, dom, ct);
+                await UpstreamConnector.ReadExactAsync(clientStream, dom, hsCt);
                 targetHost = Encoding.ASCII.GetString(dom);
                 break;
             case 0x04:
                 byte[] ipv6 = new byte[16];
-                await UpstreamConnector.ReadExactAsync(clientStream, ipv6, ct);
+                await UpstreamConnector.ReadExactAsync(clientStream, ipv6, hsCt);
                 targetHost = new IPAddress(ipv6).ToString();
                 break;
             default:
-                await clientStream.WriteAsync(new byte[] { 0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, ct);
+                await clientStream.WriteAsync(new byte[] { 0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }, hsCt);
                 return;
         }
 
         byte[] portBuf = new byte[2];
-        await UpstreamConnector.ReadExactAsync(clientStream, portBuf, ct);
+        await UpstreamConnector.ReadExactAsync(clientStream, portBuf, hsCt);
         int targetPort = BinaryPrimitives.ReadUInt16BigEndian(portBuf);
 
         // IPv6 关闭时快速拒绝 IPv6 目标，避免 Happy Eyeballs 长时间等待或回退泄漏
@@ -472,22 +490,22 @@ public sealed class MixedProxyServer : IDisposable
         RecordConnection(st, targetHost, targetPort, false, directRes.RouteSummary, dTx, dRx, sw.ElapsedMilliseconds, "OK");
     }
 
-    private async Task HandleSocks4ClientAsync(SeatListenerState st, NetworkStream clientStream, CancellationToken ct)
+    private async Task HandleSocks4ClientAsync(SeatListenerState st, NetworkStream clientStream, CancellationToken hsCt, CancellationToken ct)
     {
         byte[] hdr = new byte[7]; // cmd(1) + port(2) + ip(4)
-        await UpstreamConnector.ReadExactAsync(clientStream, hdr, ct);
+        await UpstreamConnector.ReadExactAsync(clientStream, hdr, hsCt);
         if (hdr[0] != 0x01)
         {
-            await clientStream.WriteAsync(new byte[] { 0x00, 0x5B, 0, 0, 0, 0, 0, 0 }, ct);
+            await clientStream.WriteAsync(new byte[] { 0x00, 0x5B, 0, 0, 0, 0, 0, 0 }, hsCt);
             return;
         }
 
         int port = BinaryPrimitives.ReadUInt16BigEndian(hdr.AsSpan(1, 2));
         bool isSocks4a = hdr[3] == 0 && hdr[4] == 0 && hdr[5] == 0 && hdr[6] != 0;
-        _ = await ReadNullTerminatedAsciiAsync(clientStream, ct); // userid
+        _ = await ReadNullTerminatedAsciiAsync(clientStream, hsCt); // userid
 
         string targetHost = isSocks4a
-            ? await ReadNullTerminatedAsciiAsync(clientStream, ct)
+            ? await ReadNullTerminatedAsciiAsync(clientStream, hsCt)
             : new IPAddress(hdr.AsSpan(3, 4)).ToString();
 
         var sw = Stopwatch.StartNew();
@@ -508,24 +526,50 @@ public sealed class MixedProxyServer : IDisposable
         RecordConnection(st, targetHost, port, false, dialRes.RouteSummary, tx, rx, sw.ElapsedMilliseconds, "OK");
     }
 
-    private async Task HandleHttpClientAsync(SeatListenerState st, NetworkStream clientStream, byte firstByte, CancellationToken ct)
+    private async Task HandleHttpClientAsync(SeatListenerState st, NetworkStream clientStream, byte firstByte, CancellationToken hsCt, CancellationToken ct)
     {
-        var ms = new MemoryStream(512);
-        ms.WriteByte(firstByte);
-        var b = new byte[1];
-        int match = 0;
-        while (ms.Length < 32768)
-        {
-            int n = await clientStream.ReadAsync(b, ct);
-            if (n <= 0) return;
-            ms.WriteByte(b[0]);
-            if ((match == 0 || match == 2) && b[0] == '\r') match++;
-            else if ((match == 1 || match == 3) && b[0] == '\n') match++;
-            else match = b[0] == '\r' ? 1 : 0;
-            if (match == 4) break;
-        }
+        byte[] readBuf = ArrayPool<byte>.Shared.Rent(4096);
+        string rawHeaders;
+        ReadOnlyMemory<byte> extraBody = ReadOnlyMemory<byte>.Empty;
+        byte[]? extraCopy = null;
 
-        string rawHeaders = Encoding.ASCII.GetString(ms.ToArray());
+        try
+        {
+            readBuf[0] = firstByte;
+            int total = 1;
+            int headerEnd = -1;
+
+            while (total < 32768)
+            {
+                headerEnd = FindHttpHeaderEnd(readBuf.AsSpan(0, total));
+                if (headerEnd >= 0) break;
+
+                if (total >= readBuf.Length)
+                {
+                    byte[] grown = ArrayPool<byte>.Shared.Rent(Math.Min(32768, readBuf.Length * 2));
+                    readBuf.AsSpan(0, total).CopyTo(grown);
+                    ArrayPool<byte>.Shared.Return(readBuf);
+                    readBuf = grown;
+                }
+
+                int n = await clientStream.ReadAsync(readBuf.AsMemory(total, readBuf.Length - total), hsCt);
+                if (n <= 0) return;
+                total += n;
+            }
+
+            if (headerEnd < 0) return;
+            rawHeaders = Encoding.ASCII.GetString(readBuf.AsSpan(0, headerEnd));
+            int remain = total - headerEnd;
+            if (remain > 0)
+            {
+                extraCopy = readBuf.AsSpan(headerEnd, remain).ToArray();
+                extraBody = extraCopy;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(readBuf);
+        }
         int firstCrLf = rawHeaders.IndexOf("\r\n", StringComparison.Ordinal);
         if (firstCrLf <= 0) return;
 
@@ -630,11 +674,17 @@ public sealed class MixedProxyServer : IDisposable
             string rewritten = RewriteHttpProxyHeader(rawHeaders, uri);
             byte[] headerBytes = Encoding.ASCII.GetBytes(rewritten);
             await upstream.WriteAsync(headerBytes, ct);
+            long preTx = headerBytes.Length;
+            if (!extraBody.IsEmpty)
+            {
+                await upstream.WriteAsync(extraBody, ct);
+                preTx += extraBody.Length;
+            }
             await upstream.FlushAsync(ct);
-            Interlocked.Add(ref st.BytesTx, headerBytes.Length);
+            Interlocked.Add(ref st.BytesTx, preTx);
             var (pTx, pRx) = await PumpBidirectionalAsync(st, clientStream, upstream, ct);
             sw.Stop();
-            RecordConnection(st, host, port, false, dialResPlain.RouteSummary, headerBytes.Length + pTx, pRx, sw.ElapsedMilliseconds, "OK");
+            RecordConnection(st, host, port, false, dialResPlain.RouteSummary, preTx + pTx, pRx, sw.ElapsedMilliseconds, "OK");
         }
     }
 
@@ -719,6 +769,7 @@ public sealed class MixedProxyServer : IDisposable
         }
 
         bool sawUnapprovedTls = false;
+        string? lastDialError = null;
         var boundedCandidates = candidateNodes.Take(3).ToList();
         bool hasBackup = boundedCandidates.Count > 1;
         foreach (var node in boundedCandidates)
@@ -728,26 +779,36 @@ public sealed class MixedProxyServer : IDisposable
                 sawUnapprovedTls = true;
                 continue;
             }
+
+            bool useRelay = relayNode != null && relayNode.Id != node.Id;
+            if (useRelay && relayNode!.AllowInsecure && !relayNode.InsecureApproved)
+            {
+                sawUnapprovedTls = true;
+                lastDialError = $"前置中转「{relayNode.Name}」跳过 TLS 证书校验尚未批准";
+                continue;
+            }
+
             try
             {
                 using var candidateCts = hasBackup
                     ? CancellationTokenSource.CreateLinkedTokenSource(ct)
                     : null;
-                candidateCts?.CancelAfter(TimeSpan.FromSeconds(6));
+                candidateCts?.CancelAfter(TimeSpan.FromSeconds(useRelay ? 10 : 6));
                 CancellationToken dialCt = candidateCts?.Token ?? ct;
 
-                if (relayNode != null && relayNode.Id != node.Id)
+                if (useRelay)
                 {
                     var chainStream = await _connector.ConnectChainAsync(relayNode, node, targetHost, targetPort, iso, dialCt);
-                    st.LastEffectiveNodeName = $"{relayNode.Name} → {node.Name}";
+                    st.LastEffectiveNodeName = $"{relayNode!.Name} → {node.Name}";
                     return new DialResult(chainStream, st.LastEffectiveNodeName, "OK");
                 }
                 var stream = await _connector.ConnectViaNodeAsync(node, targetHost, targetPort, iso, dialCt);
                 st.LastEffectiveNodeName = node.Name;
                 return new DialResult(stream, node.Name, "OK");
             }
-            catch
+            catch (Exception ex)
             {
+                lastDialError = ex.Message;
                 if (ct.IsCancellationRequested) break;
                 // 尝试显式备用或同组下一备用节点
             }
@@ -764,7 +825,8 @@ public sealed class MixedProxyServer : IDisposable
         if (killSwitch)
         {
             Interlocked.Increment(ref st.KillSwitchBlockedCount);
-            HubEventLogger.Default.Warn("PROXY", $"{seat.Name} 上游拨号失败，已执行 Fail-Close 熔断：{targetHost}:{targetPort}");
+            string errNote = string.IsNullOrWhiteSpace(lastDialError) ? string.Empty : $"（{lastDialError}）";
+            HubEventLogger.Default.Warn("PROXY", $"{seat.Name} 上游拨号失败，已执行 Fail-Close 熔断：{targetHost}:{targetPort}{errNote}");
             return new DialResult(null, "Fail-Close 熔断拦截", "KILLSWITCH");
         }
 
@@ -841,17 +903,41 @@ public sealed class MixedProxyServer : IDisposable
         }
     }
 
-    private static string RewriteHttpProxyHeader(string rawHeaders, Uri uri)
+    private static int FindHttpHeaderEnd(ReadOnlySpan<byte> buf)
     {
-        var lines = rawHeaders.Split("\r\n", StringSplitOptions.None).ToList();
-        if (lines.Count == 0) return rawHeaders;
+        int idx = buf.IndexOf("\r\n\r\n"u8);
+        return idx >= 0 ? idx + 4 : -1;
+    }
+
+    public static string RewriteHttpProxyHeader(string rawHeaders, Uri uri)
+    {
+        var lines = rawHeaders.Split("\r\n", StringSplitOptions.None);
+        if (lines.Length == 0) return rawHeaders;
+
+        var filtered = new List<string>(lines.Length + 1);
         var firstParts = lines[0].Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (firstParts.Length >= 3)
+        filtered.Add(firstParts.Length >= 3
+            ? $"{firstParts[0]} {uri.PathAndQuery} {firstParts[2]}"
+            : lines[0]);
+
+        for (int i = 1; i < lines.Length; i++)
         {
-            lines[0] = $"{firstParts[0]} {uri.PathAndQuery} {firstParts[2]}";
+            string line = lines[i];
+            if (string.IsNullOrEmpty(line))
+                continue;
+            if (line.StartsWith("Proxy-Connection:", StringComparison.OrdinalIgnoreCase)
+                || line.StartsWith("Connection:", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            filtered.Add(line);
         }
-        lines = lines.Where(l => !l.StartsWith("Proxy-Connection:", StringComparison.OrdinalIgnoreCase)).ToList();
-        return string.Join("\r\n", lines);
+
+        // 明文 HTTP 代理首包后即进入双向透传，强制注入 Connection: close 防止复用连接后第二请求绝对 URI 被原样透传
+        filtered.Add("Connection: close");
+        filtered.Add(string.Empty);
+        filtered.Add(string.Empty);
+        return string.Join("\r\n", filtered);
     }
 
     private static (string Host, int Port) ParseHostPort(string target, int defaultPort)
