@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AppSeat, OverviewResponse, api, formatBytes, formatRate } from '../api';
-import { sendWindowCommand, subscribeTrayShown } from '../windowBridge';
+import { isDesktopShell, sendWindowCommand, subscribeTrayVisibility } from '../windowBridge';
 import { CheckTinyIcon, GitHubIcon, RefreshSpinIcon } from './Icons';
 
 const TRAY_SEAT_TITLES: Record<string, string> = {
@@ -13,6 +13,8 @@ const TRAY_SEAT_TITLES: Record<string, string> = {
 
 export const TrayQuickPanel: React.FC = () => {
   const rootRef = useRef<HTMLDivElement>(null);
+  const inFlightRef = useRef(false);
+  const [visible, setVisible] = useState<boolean>(() => !isDesktopShell());
   const [overview, setOverview] = useState<OverviewResponse | null>(null);
   const [busySeatId, setBusySeatId] = useState<string | null>(null);
   const [copiedEnv, setCopiedEnv] = useState(false);
@@ -21,21 +23,23 @@ export const TrayQuickPanel: React.FC = () => {
   const [inlineNote, setInlineNote] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       const res = await api.getOverview();
       setOverview(res);
     } catch {
       // 等待本地网关就绪
+    } finally {
+      inFlightRef.current = false;
     }
   }, []);
 
   useEffect(() => {
     void reload();
-    const timer = window.setInterval(() => {
-      void reload();
-    }, 3500);
-    const unsub = subscribeTrayShown(() => {
-      void reload();
+    const unsub = subscribeTrayVisibility(nextVisible => {
+      setVisible(nextVisible);
+      if (nextVisible) void reload();
     });
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -44,11 +48,20 @@ export const TrayQuickPanel: React.FC = () => {
     };
     window.addEventListener('keydown', onKey);
     return () => {
-      window.clearInterval(timer);
       unsub();
       window.removeEventListener('keydown', onKey);
     };
   }, [reload]);
+
+  useEffect(() => {
+    if (!visible) return;
+    const timer = window.setInterval(() => {
+      if (!document.hidden) {
+        void reload();
+      }
+    }, 3500);
+    return () => window.clearInterval(timer);
+  }, [visible, reload]);
 
   useEffect(() => {
     const el = rootRef.current;
@@ -276,7 +289,7 @@ export const TrayQuickPanel: React.FC = () => {
             }}
           >
             <GitHubIcon size={11} />
-            <span>v{project?.version ?? '0.6.0'}</span>
+            <span>v{project?.version ?? '0.7.0'}</span>
           </button>
           <span className="tray-footer-sep">·</span>
           <button

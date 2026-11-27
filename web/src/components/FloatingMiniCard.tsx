@@ -1,31 +1,59 @@
-import React, { useEffect, useState } from 'react';
-import { api, OverviewResponse, formatBytes, formatRate } from '../api';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { api, OverviewResponse, connectOverviewStream, formatBytes, formatRate } from '../api';
+import { isDesktopShell, subscribeMiniVisibility } from '../windowBridge';
 import { BrandLogoIcon, SeatBrandIcon, WinCloseIcon } from './Icons';
 
 export const FloatingMiniCard: React.FC = () => {
+  const inFlightRef = useRef(false);
+  const [visible, setVisible] = useState<boolean>(
+    () => !isDesktopShell() || new URLSearchParams(window.location.search).get('shown') === '1'
+  );
   const [data, setData] = useState<OverviewResponse | null>(null);
   const [privacyMode, setPrivacyMode] = useState<boolean>(() => localStorage.getItem('aph_privacy_mode') === '1');
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     try {
       const ov = await api.getOverview();
       setData(ov);
-    } catch { }
-  };
+    } catch {
+      // 等待网关响应
+    } finally {
+      inFlightRef.current = false;
+    }
+  }, []);
 
   useEffect(() => {
-    void load();
-    const t = window.setInterval(load, 2000);
+    const unsubVis = subscribeMiniVisibility(nextVisible => {
+      setVisible(nextVisible);
+      if (nextVisible) void load();
+    });
     const onStorage = (ev: StorageEvent) => {
       if (ev.key === 'aph_privacy_mode') setPrivacyMode(ev.newValue === '1');
     };
     window.addEventListener('storage', onStorage);
     return () => {
-      window.clearInterval(t);
+      unsubVis();
       window.removeEventListener('storage', onStorage);
     };
-  }, []);
+  }, [load]);
+
+  useEffect(() => {
+    if (!visible) return;
+    void load();
+    const unsubWs = connectOverviewStream(ov => setData(ov));
+    const t = window.setInterval(() => {
+      if (!document.hidden) {
+        void load();
+      }
+    }, 20000);
+    return () => {
+      unsubWs();
+      window.clearInterval(t);
+    };
+  }, [visible, load]);
 
   const seats = data?.seats ?? [];
   const activeSeats = seats.filter(s => s.enabled && !s.isHidden).slice(0, 3);

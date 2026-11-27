@@ -74,17 +74,20 @@ public sealed class UsageStatsService
         IReadOnlyList<SeatTrafficSnapshot> proxySnapshots,
         DateTimeOffset? nowOverride = null)
     {
+        bool needsInitialSync;
+        lock (_lock)
+        {
+            needsInitialSync = _lastSync == null;
+        }
+        if (needsInitialSync)
+        {
+            SyncNow();
+        }
+
         List<UsageLogEntry> snapshot;
         SyncStatsResult? syncInfo;
         lock (_lock)
         {
-            if (_lastSync == null)
-            {
-                var (parsed, info) = _scanner.ScanIncremental();
-                ApplyPricing(parsed);
-                _entries = parsed;
-                _lastSync = info;
-            }
             snapshot = _entries.ToList();
             syncInfo = _lastSync;
         }

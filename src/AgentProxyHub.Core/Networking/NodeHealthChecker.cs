@@ -87,7 +87,7 @@ public sealed class NodeHealthChecker
                     AutomaticDecompression = DecompressionMethods.None
                 };
                 using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.6.0");
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.7.0");
                 (exitIp, observedLoc, latencyMs) = await ProbeExitIpViaLocalProxyAsync(http, ct);
             }
             else if (boundNode != null)
@@ -201,10 +201,15 @@ public sealed class NodeHealthChecker
 
         try
         {
-            var exitTask = ProbeExitIpViaNodeAsync(node, settings, ct);
-            var claudeTask = ProbeTlsEndpointAsync(node, "api.anthropic.com", 443, settings, ct);
-            var gptTask = ProbeTlsEndpointAsync(node, "chatgpt.com", 443, settings, ct);
-            var agyTask = ProbeTlsEndpointAsync(node, "generativelanguage.googleapis.com", 443, settings, ct);
+            // 硬超时上限 6s，防止死节点/黑洞连接导致界面无限转圈
+            using var totalCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            totalCts.CancelAfter(TimeSpan.FromSeconds(6));
+            CancellationToken probeCt = totalCts.Token;
+
+            var exitTask = ProbeExitIpViaNodeAsync(node, settings, probeCt);
+            var claudeTask = ProbeTlsEndpointAsync(node, "api.anthropic.com", 443, settings, probeCt);
+            var gptTask = ProbeTlsEndpointAsync(node, "chatgpt.com", 443, settings, probeCt);
+            var agyTask = ProbeTlsEndpointAsync(node, "generativelanguage.googleapis.com", 443, settings, probeCt);
 
             await Task.WhenAll(exitTask, claudeTask, gptTask, agyTask);
 
@@ -248,6 +253,65 @@ public sealed class NodeHealthChecker
     }
 
     /// <summary>
+    /// 后台静默低并发巡检（每次限并发 3），自动刷新活跃与长期未测节点健康度且不干扰前端与代理转发体验
+    /// </summary>
+    public async Task<(int CheckedCount, int OnlineCount, int OfflineCount)> RunSilentPatrolAsync(
+        IReadOnlyList<ProxyNode> targetNodes,
+        IsolationSettings settings,
+        string? lockedNicName,
+        CancellationToken ct = default)
+    {
+        var candidates = targetNodes
+            .Where(n => n.Protocol != ProxyProtocol.DIRECT_PHYSICAL && n.Enabled && (!n.AllowInsecure || n.InsecureApproved))
+            .ToList();
+        if (candidates.Count == 0) return (0, 0, 0);
+
+        var l2Targets = candidates.Where(n => n.RequiresSidecarEngine).ToList();
+        bool sidecarPrepared = false;
+        if (l2Targets.Count > 0 && _connector.Sidecar != null && _connector.Sidecar.GetStatus().Installed)
+        {
+            sidecarPrepared = _connector.Sidecar.EnsureEphemeralNodesReady(l2Targets, lockedNicName, settings, out _);
+        }
+
+        int checkedCount = 0;
+        int onlineCount = 0;
+        int offlineCount = 0;
+        try
+        {
+            using var gate = new SemaphoreSlim(3, 3);
+            await Task.WhenAll(candidates.Select(async node =>
+            {
+                await gate.WaitAsync(ct);
+                try
+                {
+                    if (ct.IsCancellationRequested) return;
+                    await VerifyNodeAsync(node, settings, ct);
+                    Interlocked.Increment(ref checkedCount);
+                    if (node.Status == "online") Interlocked.Increment(ref onlineCount);
+                    else Interlocked.Increment(ref offlineCount);
+                }
+                catch
+                {
+                    // 单节点异常不影响其余节点巡检
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }));
+        }
+        finally
+        {
+            if (sidecarPrepared && l2Targets.Count > 0)
+            {
+                _connector.Sidecar?.ReleaseEphemeralNodes(l2Targets.Select(n => n.Id));
+            }
+        }
+
+        return (checkedCount, onlineCount, offlineCount);
+    }
+
+    /// <summary>
     /// 通过本机席位监听端口 (127.0.0.1:localPort) 发起真实 HTTP/HTTPS 代理链路探测，
     /// 真实验证「应用 -> 本地席位端口 -> MixedProxyServer -> 上游节点/物理网卡 -> AI 目标」完整通道并刷新吞吐字节。
     /// </summary>
@@ -281,9 +345,13 @@ public sealed class NodeHealthChecker
 
         using var http = new HttpClient(handler)
         {
-            Timeout = TimeSpan.FromSeconds(6)
+            Timeout = TimeSpan.FromSeconds(8)
         };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.6.0");
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.7.0");
+
+        using var totalCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        totalCts.CancelAfter(TimeSpan.FromSeconds(7.5));
+        CancellationToken probeCt = totalCts.Token;
 
         string? exitIp = null;
         string? loc = null;
@@ -291,65 +359,72 @@ public sealed class NodeHealthChecker
         var aiChecks = new List<string>();
         var latencies = new List<int>();
 
-        if (customProbeUrls is { Count: > 0 })
+        try
         {
-            foreach (var item in customProbeUrls)
+            if (customProbeUrls is { Count: > 0 })
             {
-                var sw = Stopwatch.StartNew();
-                try
+                foreach (var item in customProbeUrls)
                 {
-                    using var resp = await http.GetAsync(item.Url, ct);
-                    string body = await resp.Content.ReadAsStringAsync(ct);
-                    sw.Stop();
-                    int ms = Math.Max(1, (int)sw.ElapsedMilliseconds);
-                    if (resp.IsSuccessStatusCode)
+                    var sw = Stopwatch.StartNew();
+                    try
                     {
-                        latencies.Add(ms);
-                        aiChecks.Add($"{item.Label} {ms}ms");
-                        if (string.IsNullOrEmpty(exitIp) && body.Contains("ip=", StringComparison.Ordinal))
+                        using var resp = await http.GetAsync(item.Url, probeCt);
+                        string body = await resp.Content.ReadAsStringAsync(probeCt);
+                        sw.Stop();
+                        int ms = Math.Max(1, (int)sw.ElapsedMilliseconds);
+                        if (resp.IsSuccessStatusCode)
                         {
-                            foreach (string line in body.Split('\n'))
+                            latencies.Add(ms);
+                            aiChecks.Add($"{item.Label} {ms}ms");
+                            if (string.IsNullOrEmpty(exitIp) && body.Contains("ip=", StringComparison.Ordinal))
                             {
-                                if (line.StartsWith("ip=", StringComparison.Ordinal)) exitIp = line[3..].Trim();
-                                else if (line.StartsWith("loc=", StringComparison.Ordinal)) loc = line[4..].Trim();
+                                foreach (string line in body.Split('\n'))
+                                {
+                                    if (line.StartsWith("ip=", StringComparison.Ordinal)) exitIp = line[3..].Trim();
+                                    else if (line.StartsWith("loc=", StringComparison.Ordinal)) loc = line[4..].Trim();
+                                }
                             }
                         }
+                        else
+                        {
+                            aiChecks.Add($"{item.Label} HTTP {(int)resp.StatusCode}");
+                        }
+                    }
+                    catch
+                    {
+                        aiChecks.Add($"{item.Label} ✕");
+                    }
+                }
+            }
+            else
+            {
+                var exitTask = ProbeExitIpViaLocalProxyAsync(http, probeCt);
+                var claudeTask = ProbeHttpHeadViaLocalProxyAsync(http, "Claude", "https://api.anthropic.com/", probeCt);
+                var gptTask = ProbeHttpHeadViaLocalProxyAsync(http, "ChatGPT", "https://chatgpt.com/", probeCt);
+                var agyTask = ProbeHttpHeadViaLocalProxyAsync(http, "AGY", "https://generativelanguage.googleapis.com/", probeCt);
+
+                await Task.WhenAll(exitTask, claudeTask, gptTask, agyTask);
+
+                (exitIp, loc, exitLatency) = exitTask.Result;
+                if (exitLatency.HasValue) latencies.Add(exitLatency.Value);
+
+                foreach (var res in new[] { claudeTask.Result, gptTask.Result, agyTask.Result })
+                {
+                    if (res.Ok)
+                    {
+                        latencies.Add(res.ElapsedMs);
+                        aiChecks.Add($"{res.Label} {res.ElapsedMs}ms");
                     }
                     else
                     {
-                        aiChecks.Add($"{item.Label} HTTP {(int)resp.StatusCode}");
+                        aiChecks.Add($"{res.Label} ✕");
                     }
-                }
-                catch
-                {
-                    aiChecks.Add($"{item.Label} ✕");
                 }
             }
         }
-        else
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            var exitTask = ProbeExitIpViaLocalProxyAsync(http, ct);
-            var claudeTask = ProbeHttpHeadViaLocalProxyAsync(http, "Claude", "https://api.anthropic.com/", ct);
-            var gptTask = ProbeHttpHeadViaLocalProxyAsync(http, "ChatGPT", "https://chatgpt.com/", ct);
-            var agyTask = ProbeHttpHeadViaLocalProxyAsync(http, "AGY", "https://generativelanguage.googleapis.com/", ct);
-
-            await Task.WhenAll(exitTask, claudeTask, gptTask, agyTask);
-
-            (exitIp, loc, exitLatency) = exitTask.Result;
-            if (exitLatency.HasValue) latencies.Add(exitLatency.Value);
-
-            foreach (var res in new[] { claudeTask.Result, gptTask.Result, agyTask.Result })
-            {
-                if (res.Ok)
-                {
-                    latencies.Add(res.ElapsedMs);
-                    aiChecks.Add($"{res.Label} {res.ElapsedMs}ms");
-                }
-                else
-                {
-                    aiChecks.Add($"{res.Label} ✕");
-                }
-            }
+            // 内置 7.5s 硬超时触发时，归结为连接超时失败而非向上抛出异常
         }
 
         bool anyOk = latencies.Count > 0 || !string.IsNullOrEmpty(exitIp);
@@ -415,14 +490,14 @@ public sealed class NodeHealthChecker
     {
         var sw = Stopwatch.StartNew();
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromMilliseconds(3500));
+        cts.CancelAfter(TimeSpan.FromMilliseconds(3000));
         try
         {
             using var stream = await _connector.ConnectViaNodeAsync(node, "1.1.1.1", 443, settings, cts.Token);
             using var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "cloudflare.com" }, cts.Token);
 
-            byte[] req = "GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.6.0\r\n\r\n"u8.ToArray();
+            byte[] req = "GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.7.0\r\n\r\n"u8.ToArray();
             await ssl.WriteAsync(req, cts.Token);
             await ssl.FlushAsync(cts.Token);
 
@@ -452,14 +527,14 @@ public sealed class NodeHealthChecker
     {
         var sw = Stopwatch.StartNew();
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromMilliseconds(3500));
+        cts.CancelAfter(TimeSpan.FromMilliseconds(2400));
         try
         {
             using var stream = await _connector.ConnectViaNodeAsync(node, "api.ipify.org", 443, settings, cts.Token);
             using var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "api.ipify.org" }, cts.Token);
 
-            byte[] req = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.6.0\r\n\r\n"u8.ToArray();
+            byte[] req = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.7.0\r\n\r\n"u8.ToArray();
             await ssl.WriteAsync(req, cts.Token);
             await ssl.FlushAsync(cts.Token);
 
@@ -487,7 +562,7 @@ public sealed class NodeHealthChecker
     {
         var sw = Stopwatch.StartNew();
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromMilliseconds(4500));
+        cts.CancelAfter(TimeSpan.FromMilliseconds(4200));
         try
         {
             using var stream = await _connector.ConnectViaNodeAsync(node, host, port, settings, cts.Token);
@@ -508,7 +583,7 @@ public sealed class NodeHealthChecker
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromMilliseconds(4000));
+            cts.CancelAfter(TimeSpan.FromMilliseconds(3200));
             using var resp = await http.GetAsync("https://cloudflare.com/cdn-cgi/trace", cts.Token);
             string body = await resp.Content.ReadAsStringAsync(cts.Token);
             sw.Stop();
@@ -529,7 +604,7 @@ public sealed class NodeHealthChecker
         try
         {
             using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts2.CancelAfter(TimeSpan.FromMilliseconds(4000));
+            cts2.CancelAfter(TimeSpan.FromMilliseconds(2800));
             string raw = (await http.GetStringAsync("https://api.ipify.org", cts2.Token)).Trim();
             sw2.Stop();
             if (IPAddress.TryParse(raw, out _))
@@ -548,7 +623,7 @@ public sealed class NodeHealthChecker
     {
         var sw = Stopwatch.StartNew();
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromMilliseconds(4500));
+        cts.CancelAfter(TimeSpan.FromMilliseconds(4000));
         try
         {
             using var req = new HttpRequestMessage(HttpMethod.Head, url);

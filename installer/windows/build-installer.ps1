@@ -1,5 +1,5 @@
 ﻿param(
-  [string]$Version = "0.2.0",
+  [string]$Version = "0.7.0",
   [switch]$SelfContained
 )
 
@@ -8,6 +8,7 @@ $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $WebDir = Join-Path $RepoRoot "web"
 $HostWwwRoot = Join-Path $RepoRoot "src\AgentProxyHub.Host\wwwroot"
 $WinProj = Join-Path $RepoRoot "src\AgentProxyHub.Desktop.Win\AgentProxyHub.Desktop.Win.csproj"
+$CliProj = Join-Path $RepoRoot "src\AgentProxyHub.Cli\AgentProxyHub.Cli.csproj"
 $DistDir = Join-Path $RepoRoot "dist"
 $PublishDir = Join-Path $DistDir "publish-win-x64"
 $IssPath = Join-Path $PSScriptRoot "AgentProxyHub.iss"
@@ -22,8 +23,14 @@ if (-not $Iscc) {
 }
 
 Write-Host "[1/5] 编译 Cult UI React 前端..." -ForegroundColor Cyan
-pnpm --dir $WebDir install --frozen-lockfile --network-concurrency=2
+pnpm --dir $WebDir install --frozen-lockfile --config.node-linker=hoisted --config.package-import-method=copy --network-concurrency=2
+if ($LASTEXITCODE -ne 0) {
+  throw "pnpm install 失败，退出码: $LASTEXITCODE"
+}
 pnpm --dir $WebDir build
+if ($LASTEXITCODE -ne 0) {
+  throw "前端编译 (pnpm build) 失败，退出码: $LASTEXITCODE"
+}
 
 Write-Host "[2/5] 发布 .NET 10 Windows 桌面宿主 (SelfContained=$($SelfContained.IsPresent))..." -ForegroundColor Cyan
 if (Test-Path $PublishDir) { Remove-Item $PublishDir -Recurse -Force }
@@ -31,6 +38,13 @@ New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
 $scFlag = if ($SelfContained) { "true" } else { "false" }
 dotnet publish $WinProj -c Release -r win-x64 --self-contained $scFlag -o $PublishDir
+if ($LASTEXITCODE -ne 0) {
+  throw "dotnet publish 桌面宿主失败，退出码: $LASTEXITCODE"
+}
+dotnet publish $CliProj -c Release -r win-x64 --self-contained false -o $PublishDir
+if ($LASTEXITCODE -ne 0) {
+  throw "dotnet publish aph CLI 失败，退出码: $LASTEXITCODE"
+}
 
 Write-Host "[3/5] 嵌入前端静态资源至发布目录 wwwroot..." -ForegroundColor Cyan
 $TargetWwwRoot = Join-Path $PublishDir "wwwroot"
@@ -39,20 +53,28 @@ Copy-Item -Path $HostWwwRoot -Destination $TargetWwwRoot -Recurse -Force
 
 Write-Host "[4/5] 使用 Inno Setup 6 编译安装程序..." -ForegroundColor Cyan
 $scMode = if ($SelfContained) { "1" } else { "0" }
-& $Iscc `
-  "/DAppVersion=$Version" `
-  "/DPublishDir=$PublishDir" `
-  "/DOutputDir=$DistDir" `
-  "/DSelfContainedMode=$scMode" `
-  $IssPath
+$SetupExeName = if ($SelfContained) { "AgentProxyHub-Setup-v$Version-win-x64-standalone.exe" } else { "AgentProxyHub-Setup-v$Version-win-x64.exe" }
+$SetupExePath = Join-Path $DistDir $SetupExeName
+$IsccTempOut = Join-Path ([System.IO.Path]::GetTempPath()) ("aph_iscc_" + [System.Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $IsccTempOut | Out-Null
+try {
+  & $Iscc `
+    "/DAppVersion=$Version" `
+    "/DPublishDir=$PublishDir" `
+    "/DOutputDir=$IsccTempOut" `
+    "/DSelfContainedMode=$scMode" `
+    $IssPath
 
-if ($LASTEXITCODE -ne 0) {
-  throw "ISCC 编译安装程序失败，退出码: $LASTEXITCODE"
+  if ($LASTEXITCODE -ne 0) {
+    throw "ISCC 编译安装程序失败，退出码: $LASTEXITCODE"
+  }
+  $BuiltSetup = Join-Path $IsccTempOut $SetupExeName
+  Move-Item -Path $BuiltSetup -Destination $SetupExePath -Force
+} finally {
+  if (Test-Path $IsccTempOut) { Remove-Item $IsccTempOut -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 Write-Host "[5/5] 生成 SHA256SUMS 校验文件..." -ForegroundColor Cyan
-$SetupExeName = if ($SelfContained) { "AgentProxyHub-Setup-v$Version-win-x64-standalone.exe" } else { "AgentProxyHub-Setup-v$Version-win-x64.exe" }
-$SetupExePath = Join-Path $DistDir $SetupExeName
 $Hash = (Get-FileHash $SetupExePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $SumFile = Join-Path $DistDir "SHA256SUMS.txt"
 "$Hash  $SetupExeName" | Set-Content -Path $SumFile -Encoding utf8

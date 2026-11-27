@@ -147,6 +147,44 @@ export const RightInspector: React.FC<Props> = ({
     }
   }
 
+  const fallbackOptions: SelectOption[] = useMemo(() => {
+    const base: SelectOption[] = [
+      {
+        value: '',
+        label: '无显式备用',
+        sublabel: '主线路失败时仅依同分组策略容灾或直接熔断',
+        dotColor: '#64748B'
+      }
+    ];
+    for (const n of nodes) {
+      if (n.id === seat?.boundNodeId) continue;
+      base.push({
+        value: n.id,
+        label: n.name,
+        sublabel: `${n.protocol} · ${n.host}:${n.port}`,
+        tag: n.requiresSidecarEngine ? 'L2' : 'L1',
+        dotColor: n.status === 'offline' ? '#F27973' : (n.status === 'online' ? '#34D399' : '#94A3B8')
+      });
+    }
+    return base;
+  }, [nodes, seat?.boundNodeId]);
+
+  async function handleBindFallback(fallbackNodeId: string) {
+    if (!seat) return;
+    try {
+      await api.updateSeat(seat.id, { fallbackNodeId });
+      await onReload();
+      if (!fallbackNodeId) {
+        onToast(`${seat.name} 已清除显式备用容灾线路`);
+      } else {
+        const target = nodes.find(n => n.id === fallbackNodeId);
+        onToast(`${seat.name} 显式备用线路已设为：${target?.name ?? fallbackNodeId}`);
+      }
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '设置备用线路失败');
+    }
+  }
+
   async function handleToggleSeat(enabled: boolean) {
     if (!seat) return;
     await api.updateSeat(seat.id, { enabled });
@@ -256,6 +294,9 @@ export const RightInspector: React.FC<Props> = ({
           ? `验真通过：${res.exitIp} (${res.latencyMs ?? 1} ms)`
           : `验真失败：${res.ispSummary}`);
       }
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '验真超时或失败，已自动停止');
+      void onReload();
     } finally {
       setVerifying(false);
     }
@@ -431,6 +472,25 @@ export const RightInspector: React.FC<Props> = ({
                   ariaLabel="为当前席位选择可选前置高速中转节点"
                 />
               </div>
+
+              <div className="spec-row">
+                <span className="spec-key">备用容灾</span>
+                <CustomSelect
+                  variant="light"
+                  size="sm"
+                  minMenuWidth={252}
+                  value={seat.fallbackNodeId ?? ''}
+                  options={fallbackOptions}
+                  onChange={handleBindFallback}
+                  ariaLabel="为主线路宕机时指定显式备用容灾线路"
+                />
+              </div>
+
+              {snap?.effectiveNodeName && bound && snap.effectiveNodeName !== bound.name && (
+                <div className="insp-drift-banner" style={{ padding: '5px 9px' }}>
+                  <span>当前实际容灾路由：<strong className="mono">{snap.effectiveNodeName}</strong></span>
+                </div>
+              )}
 
               <div className="spec-row">
                 <span className="spec-key">应用接管</span>

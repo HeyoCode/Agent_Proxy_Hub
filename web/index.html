@@ -4,6 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Agent Proxy Hub — AI 独立专线与双源用量统计网关</title>
+  <script>
+    (function(){
+      try {
+        var q = new URLSearchParams(location.search).get('theme');
+        var s = localStorage.getItem('aph_theme_mode');
+        var m = (q==='light'||q==='dark') ? q : ((s==='light'||s==='dark') ? s : (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+        document.documentElement.setAttribute('data-theme', m);
+        document.documentElement.style.backgroundColor = m === 'dark' ? '#0D1021' : '#F2F4F9';
+      } catch(e){}
+    })();
+  </script>
 </head>
 <body>
   <div id="root"></div>

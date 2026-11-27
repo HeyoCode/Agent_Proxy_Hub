@@ -22,10 +22,14 @@ public sealed partial class HubEventLogger
 
     private const int MaxMemoryEntries = 500;
     private const int MaxDailyLogFiles = 5;
+    private const int PreloadMaxEntries = 200;
 
     private readonly object _lock = new();
     private readonly LinkedList<HubLogEntry> _entries = new();
     private readonly string _logDir;
+
+    [GeneratedRegex(@"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:\s+[+-]\d{2}:?\d{2})?)\s+\[([A-Za-z]+)\]\s+\[([A-Za-z0-9_-]+)\]\s+(.*)$", RegexOptions.Compiled)]
+    private static partial Regex LogLinePattern();
 
     [GeneratedRegex(@"enc:v1:[A-Za-z0-9+/=_-]+", RegexOptions.Compiled)]
     private static partial Regex EncBlobPattern();
@@ -48,11 +52,91 @@ public sealed partial class HubEventLogger
         try
         {
             Directory.CreateDirectory(_logDir);
+            PreloadRecentFromDisk();
         }
         catch
         {
             // 忽略日志目录创建异常，保证内存日志可用
         }
+    }
+
+    private void PreloadRecentFromDisk()
+    {
+        try
+        {
+            if (!Directory.Exists(_logDir)) return;
+            var recentFiles = Directory.GetFiles(_logDir, "hub-*.log")
+                .OrderByDescending(f => f, StringComparer.OrdinalIgnoreCase)
+                .Take(2)
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (recentFiles.Count == 0) return;
+
+            var parsed = new List<HubLogEntry>();
+            foreach (string file in recentFiles)
+            {
+                try
+                {
+                    using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var sr = new StreamReader(fs);
+                    var lines = new List<string>();
+                    string? line;
+                    while ((line = sr.ReadLine()) != null)
+                    {
+                        if (!string.IsNullOrWhiteSpace(line))
+                            lines.Add(line);
+                    }
+
+                    int start = Math.Max(0, lines.Count - PreloadMaxEntries);
+                    for (int i = start; i < lines.Count; i++)
+                    {
+                        var entry = TryParseLogLine(lines[i]);
+                        if (entry != null) parsed.Add(entry);
+                    }
+                }
+                catch
+                {
+                    // 单文件读取冲突忽略
+                }
+            }
+
+            if (parsed.Count == 0) return;
+            var tail = parsed.Skip(Math.Max(0, parsed.Count - PreloadMaxEntries)).ToList();
+            lock (_lock)
+            {
+                foreach (var item in tail)
+                {
+                    _entries.AddLast(item);
+                    while (_entries.Count > MaxMemoryEntries)
+                        _entries.RemoveFirst();
+                }
+            }
+        }
+        catch
+        {
+            // 静默兜底
+        }
+    }
+
+    private static HubLogEntry? TryParseLogLine(string line)
+    {
+        var m = LogLinePattern().Match(line);
+        if (!m.Success) return null;
+
+        DateTimeOffset ts = DateTimeOffset.TryParse(m.Groups[1].Value, out var parsedTs)
+            ? parsedTs
+            : DateTimeOffset.Now;
+        string level = m.Groups[2].Value.Trim().ToUpperInvariant();
+        string category = m.Groups[3].Value.Trim().ToUpperInvariant();
+        string message = RedactSecrets(m.Groups[4].Value);
+        return new HubLogEntry
+        {
+            Timestamp = ts,
+            Level = string.IsNullOrWhiteSpace(level) ? "INFO" : level,
+            Category = string.IsNullOrWhiteSpace(category) ? "SYSTEM" : category,
+            Message = message
+        };
     }
 
     public static string RedactSecrets(string? text)

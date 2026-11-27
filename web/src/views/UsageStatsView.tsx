@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useEffect, useCallback } from 'react';
+import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import {
   ConversationAuditReport,
   ModelPricingRule,
@@ -46,9 +46,12 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
   const [activeMetric, setActiveMetric] = useState<MetricKey>('cacheRate');
   const [subTab, setSubTab] = useState<SubTab>('logs');
   const [data, setData] = useState<UsageDashboardResponse | null>(null);
+  const [loadingInitial, setLoadingInitial] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [pricings, setPricings] = useState<ModelPricingRule[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [autoSync, setAutoSync] = useState(true);
+  const inFlightRef = useRef(false);
 
   const [pricingDraft, setPricingDraft] = useState<Omit<ModelPricingRule, 'isCustom'> | null>(null);
   const [auditReport, setAuditReport] = useState<ConversationAuditReport | null>(null);
@@ -66,29 +69,37 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
     }
   }
 
-  const loadAll = useCallback(async (targetPage: number) => {
-    const [dash, rules] = await Promise.all([
-      api.getStatsDashboard({ range, appFilter, modelFilter, page: targetPage, pageSize }),
-      api.getPricings()
-    ]);
-    setData(dash);
-    setPricings(rules);
+  const loadAll = useCallback(async (targetPage: number, silent = false) => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    try {
+      const [dash, rules] = await Promise.all([
+        api.getStatsDashboard({ range, appFilter, modelFilter, page: targetPage, pageSize }),
+        api.getPricings()
+      ]);
+      setData(dash);
+      setPricings(rules);
+      setLoadError(null);
+    } catch (err) {
+      if (!silent) {
+        setLoadError(err instanceof Error ? err.message : '统计数据加载失败');
+      }
+    } finally {
+      inFlightRef.current = false;
+      setLoadingInitial(false);
+    }
   }, [range, appFilter, modelFilter, pageSize]);
 
   useEffect(() => {
-    void loadAll(1);
-  }, [range, appFilter, modelFilter, pageSize, loadAll]);
-
-  useEffect(() => {
     void loadAll(page);
-  }, [page, loadAll]);
+  }, [range, appFilter, modelFilter, pageSize, page, loadAll]);
 
-  // 用量统计每 5 秒自动无感同步，新增对话无需手动点击刷新即可实时呈现
+  // 用量统计每 5 秒自动无感同步，新增对话无需手动点击刷新即可实时呈现；页面隐藏或正在编辑定价时暂停
   useEffect(() => {
     if (!autoSync) return;
     const timer = window.setInterval(() => {
-      if (!pricingDraft && !syncing) {
-        void loadAll(page).catch(() => {});
+      if (!document.hidden && !pricingDraft && !syncing) {
+        void loadAll(page, true);
       }
     }, 5000);
     return () => window.clearInterval(timer);
@@ -214,28 +225,82 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
         </div>
       </div>
 
+      {/* 加载异常或当天无数据快捷引导条 */}
+      {loadError && (
+        <div
+          className="surface-card"
+          style={{
+            padding: '10px 16px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 12,
+            border: '1px solid rgba(242, 121, 115, 0.38)'
+          }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--accent-coral-text)' }}>
+            获取统计数据失败：{loadError}
+          </span>
+          <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => void loadAll(page)}>
+            重新加载
+          </button>
+        </div>
+      )}
+
+      {!loadingInitial && !loadError && range === 'today' && data && data.totalRequests === 0 && (data.activeDaysLastYear ?? 0) > 0 && (
+        <div
+          className="surface-card"
+          style={{
+            padding: '10px 16px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 10,
+            flexWrap: 'wrap'
+          }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            今日暂未记录到新 AI 会话（过去一年已统计 {data.activeDaysLastYear} 个活跃日）。
+          </span>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => { setPage(1); setRange('7d'); }}>
+              看近 7 天
+            </button>
+            <button type="button" className="btn-pill btn-indigo btn-sm" onClick={() => { setPage(1); setRange('all'); }}>
+              看全部历史
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 四大指标联动柱图 */}
       <div className="surface-card">
         <div className="kpi-strip">
           <button type="button" className={`kpi-strip-btn ${activeMetric === 'cost' ? 'active' : ''}`} onClick={() => setActiveMetric('cost')}>
             <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>总成本 (已定价请求)</div>
-            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em' }}>${(data?.totalCostUsd ?? 0).toFixed(2)}</div>
+            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em' }}>
+              {loadingInitial ? '—' : `$${(data?.totalCostUsd ?? 0).toFixed(2)}`}
+            </div>
             <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
-              {data && data.unpricedRequests > 0 ? `${data.unpricedRequests} 条未配单价` : '全部请求已按单价核算'}
+              {loadingInitial ? '正在扫描本地会话日志...' : (data && data.unpricedRequests > 0 ? `${data.unpricedRequests} 条未配单价` : '全部请求已按单价核算')}
             </div>
           </button>
 
           <button type="button" className={`kpi-strip-btn ${activeMetric === 'requests' ? 'active' : ''}`} onClick={() => setActiveMetric('requests')}>
             <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>总请求数</div>
-            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em' }}>{(data?.totalRequests ?? 0).toLocaleString('en-US')}</div>
+            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em' }}>
+              {loadingInitial ? '—' : (data?.totalRequests ?? 0).toLocaleString('en-US')}
+            </div>
             <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
-              代理 {data?.totalProxyConnections ?? 0} 次 · 已扫 {data?.scannedFilesCount ?? 0} 文件
+              {loadingInitial ? '等待同步...' : `代理 ${data?.totalProxyConnections ?? 0} 次 · 已扫 ${data?.scannedFilesCount ?? 0} 文件`}
             </div>
           </button>
 
           <button type="button" className={`kpi-strip-btn ${activeMetric === 'tokens' ? 'active' : ''}`} onClick={() => setActiveMetric('tokens')}>
             <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>真实消耗 Tokens</div>
-            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em' }}>{formatCompactTokens(data?.totalTokens ?? 0)}</div>
+            <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em' }}>
+              {loadingInitial ? '—' : formatCompactTokens(data?.totalTokens ?? 0)}
+            </div>
             <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
               入 {formatCompactTokens(data?.effectiveInputTokens ?? 0)} · 出 {formatCompactTokens(data?.outputTokens ?? 0)} · 缓 {formatCompactTokens(data?.cacheReadTokens ?? 0)}
             </div>
@@ -244,10 +309,12 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
           <button type="button" className={`kpi-strip-btn ${activeMetric === 'cacheRate' ? 'active' : ''}`} onClick={() => setActiveMetric('cacheRate')}>
             <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', marginBottom: 4 }}>缓存命中率 / 累计节省</div>
             <div className="num" style={{ fontSize: 23, fontWeight: 700, letterSpacing: '-0.02em', color: 'var(--accent-indigo)' }}>
-              {(data?.cacheHitRate ?? 0).toFixed(1)}%
-              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent-emerald-text)', marginLeft: 8 }}>
-                省 ${(data?.totalCacheSavedUsd ?? 0).toFixed(2)}
-              </span>
+              {loadingInitial ? '—' : `${(data?.cacheHitRate ?? 0).toFixed(1)}%`}
+              {!loadingInitial && (
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent-emerald-text)', marginLeft: 8 }}>
+                  省 ${(data?.totalCacheSavedUsd ?? 0).toFixed(2)}
+                </span>
+              )}
             </div>
             <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
               上次同步 {syncTimeStr} ({data?.syncElapsedMs ?? 0} ms)

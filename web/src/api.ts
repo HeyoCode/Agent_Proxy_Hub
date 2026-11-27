@@ -35,6 +35,7 @@ export interface ProxyNode {
   exitIp: string;
   ispSummary: string;
   aiReachability: string[];
+  lastCheckedAt?: string | null;
 }
 
 export interface AppSeat {
@@ -47,6 +48,7 @@ export interface AppSeat {
   localPort: number;
   boundNodeId?: string | null;
   relayNodeId?: string | null;
+  fallbackNodeId?: string | null;
   enabled: boolean;
   killSwitchEnabled: boolean;
   allowSameGroupFailover: boolean;
@@ -174,6 +176,8 @@ export interface IsolationSettings {
   globalKillSwitch: boolean;
   enableIpv6: boolean;
   customSingBoxPath?: string | null;
+  autoHealthCheckEnabled?: boolean;
+  autoHealthCheckMinutes?: number;
 }
 
 export interface SidecarEngineStatus {
@@ -192,6 +196,7 @@ export interface SeatTrafficSnapshot {
   appName: string;
   localPort: number;
   boundNodeName: string;
+  effectiveNodeName?: string | null;
   exitIp: string;
   activeConnections: number;
   totalConnections: number;
@@ -422,24 +427,70 @@ export interface ModelPricingRule {
   isCustom: boolean;
 }
 
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
-    ...init
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    try {
-      const parsed = JSON.parse(txt) as { message?: string };
-      if (parsed?.message) throw new Error(parsed.message);
-    } catch (inner) {
-      if (inner instanceof Error && inner.message && inner.message !== txt && !inner.message.startsWith('Unexpected token')) {
-        throw inner;
-      }
+export interface StorageStatsDto {
+  hubDir: string;
+  totalBytes: number;
+  fileCount: number;
+  takeoverBackupCount: number;
+  tempFileCount: number;
+  launcherFileCount: number;
+  profileCount: number;
+}
+
+export interface StorageCleanupResult {
+  removedFiles: number;
+  freedBytes: number;
+  message: string;
+  stats: StorageStatsDto;
+}
+
+async function requestJson<T>(url: string, init?: RequestInit, timeoutMs = 8000): Promise<T> {
+  const ctrl = new AbortController();
+  const extSignal = init?.signal;
+  let timedOut = false;
+
+  const onExternalAbort = () => ctrl.abort();
+  if (extSignal) {
+    if (extSignal.aborted) {
+      ctrl.abort();
+    } else {
+      extSignal.addEventListener('abort', onExternalAbort, { once: true });
     }
-    throw new Error(txt || `HTTP ${res.status}`);
   }
-  return res.json() as Promise<T>;
+
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    ctrl.abort();
+  }, Math.max(1500, timeoutMs));
+
+  try {
+    const res = await fetch(url, {
+      ...init,
+      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) }
+    });
+    if (!res.ok) {
+      const txt = await res.text();
+      try {
+        const parsed = JSON.parse(txt) as { message?: string };
+        if (parsed?.message) throw new Error(parsed.message);
+      } catch (inner) {
+        if (inner instanceof Error && inner.message && inner.message !== txt && !inner.message.startsWith('Unexpected token')) {
+          throw inner;
+        }
+      }
+      throw new Error(txt || `HTTP ${res.status}`);
+    }
+    return res.json() as Promise<T>;
+  } catch (err) {
+    if (timedOut && !extSignal?.aborted) {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}s），已自动停止`);
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+    extSignal?.removeEventListener('abort', onExternalAbort);
+  }
 }
 
 export const api = {
@@ -461,17 +512,19 @@ export const api = {
     requestJson<{ rawText: string; preview: BatchParseResult; detectedFormat: string; suggestedTitle?: string }>('/api/nodes/fetch-subscription', {
       method: 'POST',
       body: JSON.stringify({ url, defaultGroup, proxyUrl: proxyUrl?.trim() || undefined })
-    }),
+    }, 22000),
   getSubscriptions: () => requestJson<SubscriptionSourceDto[]>('/api/subscriptions'),
   upsertSubscription: (body: { id?: string; name?: string; url: string; group?: string; proxyUrl?: string; autoRefreshHours?: number }) =>
     requestJson<{ subscription: SubscriptionSourceDto; diff: { addedCount: number; updatedCount: number; removedCount: number; driftCount: number; totalInSubscription: number } }>(
       '/api/subscriptions',
-      { method: 'POST', body: JSON.stringify(body) }
+      { method: 'POST', body: JSON.stringify(body) },
+      22000
     ),
   refreshSubscription: (id: string) =>
     requestJson<{ subscription: SubscriptionSourceDto; diff: { addedCount: number; updatedCount: number; removedCount: number; driftCount: number; totalInSubscription: number } }>(
       `/api/subscriptions/${id}/refresh`,
-      { method: 'POST' }
+      { method: 'POST' },
+      22000
     ),
   deleteSubscription: (id: string, removeNodes = false) =>
     requestJson<{ removed: number }>(`/api/subscriptions/${id}?removeNodes=${removeNodes}`, { method: 'DELETE' }),
@@ -488,12 +541,13 @@ export const api = {
       body: JSON.stringify({ rawText, defaultProtocol, defaultGroup })
     }),
   deleteNode: (id: string) => requestJson<{ removed: number }>(`/api/nodes/${id}`, { method: 'DELETE' }),
-  verifyNode: (id: string, signal?: AbortSignal) => requestJson<ProxyNode>(`/api/nodes/${id}/verify`, { method: 'POST', signal }),
-  verifyAllNodes: (signal?: AbortSignal) => requestJson<ProxyNode[]>('/api/nodes/verify-all', { method: 'POST', signal }),
+  verifyNode: (id: string, signal?: AbortSignal) => requestJson<ProxyNode>(`/api/nodes/${id}/verify`, { method: 'POST', signal }, 9500),
+  verifyAllNodes: (signal?: AbortSignal) => requestJson<ProxyNode[]>('/api/nodes/verify-all', { method: 'POST', signal }, 25000),
   updateSeat: (id: string, body: {
     enabled?: boolean;
     boundNodeId?: string;
     relayNodeId?: string;
+    fallbackNodeId?: string;
     killSwitchEnabled?: boolean;
     expectedCountryCode?: string;
     customNoProxy?: string;
@@ -516,12 +570,14 @@ export const api = {
   launchSeatApp: (id: string) =>
     requestJson<{ ok: boolean; blockedByCountryGuard?: boolean; countryCheck?: CountryCheckRecord; message: string; seatTakeovers: SeatTakeoverStatus[] }>(
       `/api/seats/${id}/launch`,
-      { method: 'POST' }
+      { method: 'POST' },
+      12000
     ),
   restartSeatApp: (id: string) =>
     requestJson<{ ok: boolean; message: string; seatTakeovers: SeatTakeoverStatus[] }>(
       `/api/seats/${id}/restart`,
-      { method: 'POST' }
+      { method: 'POST' },
+      15000
     ),
   getInstances: () => requestJson<ManagedAppInstance[]>('/api/instances'),
   createInstance: (body: { baseSeatId: string; name: string; profileDir?: string; boundNodeId?: string; extraArgs?: string; workingDirectory?: string }) =>
@@ -539,24 +595,25 @@ export const api = {
       body: JSON.stringify({ localPath, expectedSha256: expectedSha256 || null })
     }),
   testWebDav: (body: { webDavUrl?: string; webDavUsername?: string; webDavPassword?: string }) =>
-    requestJson<{ ok: boolean; message: string }>('/api/webdav/test', { method: 'POST', body: JSON.stringify(body) }),
+    requestJson<{ ok: boolean; message: string }>('/api/webdav/test', { method: 'POST', body: JSON.stringify(body) }, 22000),
   pushWebDav: (body: { webDavUrl?: string; webDavUsername?: string; webDavPassword?: string; passphrase?: string }) =>
-    requestJson<{ ok: boolean; message: string; lastWebDavSyncAt?: string | null }>('/api/webdav/push', { method: 'POST', body: JSON.stringify(body) }),
+    requestJson<{ ok: boolean; message: string; lastWebDavSyncAt?: string | null }>('/api/webdav/push', { method: 'POST', body: JSON.stringify(body) }, 22000),
   pullWebDav: (body: { webDavUrl?: string; webDavUsername?: string; webDavPassword?: string; passphrase?: string }) =>
-    requestJson<{ ok: boolean; message: string; lastWebDavSyncAt?: string | null }>('/api/webdav/pull', { method: 'POST', body: JSON.stringify(body) }),
+    requestJson<{ ok: boolean; message: string; lastWebDavSyncAt?: string | null }>('/api/webdav/pull', { method: 'POST', body: JSON.stringify(body) }, 22000),
   getConversationAudit: (conversationId: string) =>
     requestJson<ConversationAuditReport>(`/api/stats/conversations/${encodeURIComponent(conversationId)}/audit`),
   checkSeatCountry: (id: string) =>
     requestJson<{ check: CountryCheckRecord; history: CountryCheckRecord[] }>(
       `/api/seats/${id}/check-country`,
-      { method: 'POST' }
+      { method: 'POST' },
+      9000
     ),
   getSeatConnections: (id: string, limit = 20) =>
     requestJson<{ connections: RecentConnectionEntry[]; countryHistory: CountryCheckRecord[] }>(
       `/api/seats/${id}/connections?limit=${limit}`
     ),
   verifySeatTunnel: (id: string) =>
-    requestJson<TunnelVerificationResult>(`/api/seats/${id}/verify-tunnel`, { method: 'POST' }),
+    requestJson<TunnelVerificationResult>(`/api/seats/${id}/verify-tunnel`, { method: 'POST' }, 10500),
   getIsolation: () =>
     requestJson<{
       settings: IsolationSettings;
@@ -581,7 +638,7 @@ export const api = {
     requestJson<{ ok: boolean; message: string; status: SidecarEngineStatus }>('/api/engine/singbox/install', {
       method: 'POST',
       body: JSON.stringify({ proxyUrl: proxyUrl || null })
-    }),
+    }, 185000),
   setSingBoxPath: (binaryPath: string) =>
     requestJson<{ ok: boolean; message: string; status: SidecarEngineStatus }>('/api/engine/singbox/path', {
       method: 'PUT',
@@ -623,8 +680,62 @@ export const api = {
     requestJson<{ opened: boolean; url: string; error?: string }>(
       targetUrl ? `/api/system/open-repo?targetUrl=${encodeURIComponent(targetUrl)}` : '/api/system/open-repo',
       { method: 'POST' }
-    )
+    ),
+  getMaintenanceStats: () => requestJson<StorageStatsDto>('/api/maintenance/stats'),
+  cleanupMaintenance: () => requestJson<StorageCleanupResult>('/api/maintenance/cleanup', { method: 'POST' })
 };
+
+export function connectOverviewStream(
+  onOverview: (data: OverviewResponse) => void,
+  onStatusChange?: (connected: boolean) => void
+): () => void {
+  if (typeof window === 'undefined' || typeof WebSocket === 'undefined') {
+    return () => {};
+  }
+
+  let closedByCaller = false;
+  let ws: WebSocket | null = null;
+  let retryTimer: number | null = null;
+
+  const connect = () => {
+    if (closedByCaller) return;
+    try {
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      ws = new WebSocket(`${proto}//${window.location.host}/ws/events`);
+      ws.onopen = () => onStatusChange?.(true);
+      ws.onmessage = ev => {
+        try {
+          const parsed = JSON.parse(String(ev.data)) as { type?: string; data?: OverviewResponse };
+          if (parsed?.type === 'overview' && parsed.data) {
+            onOverview(parsed.data);
+          }
+        } catch { }
+      };
+      ws.onerror = () => {
+        try { ws?.close(); } catch { }
+      };
+      ws.onclose = () => {
+        onStatusChange?.(false);
+        if (!closedByCaller) {
+          retryTimer = window.setTimeout(connect, 2200);
+        }
+      };
+    } catch {
+      onStatusChange?.(false);
+      if (!closedByCaller) {
+        retryTimer = window.setTimeout(connect, 3000);
+      }
+    }
+  };
+
+  connect();
+
+  return () => {
+    closedByCaller = true;
+    if (retryTimer !== null) window.clearTimeout(retryTimer);
+    try { ws?.close(); } catch { }
+  };
+}
 
 export function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return '0 B';

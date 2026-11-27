@@ -90,14 +90,37 @@ export function subscribeMaximizedState(onChange: (maximized: boolean) => void):
 }
 
 export function subscribeTrayShown(onShown: () => void): () => void {
+  return subscribeTrayVisibility(visible => {
+    if (visible) onShown();
+  });
+}
+
+export function subscribeTrayVisibility(onChange: (visible: boolean) => void): () => void {
   const webview = window.chrome?.webview;
   if (!webview?.addEventListener) return () => {};
   const handler = (ev: { data: unknown }) => {
     try {
       const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
-      if (data && typeof data === 'object' && (data as { type?: string }).type === 'tray:shown') {
-        onShown();
-      }
+      const type = data && typeof data === 'object' ? (data as { type?: string }).type : undefined;
+      if (type === 'tray:shown') onChange(true);
+      else if (type === 'tray:hidden') onChange(false);
+    } catch {
+      // 忽略无关消息
+    }
+  };
+  webview.addEventListener('message', handler);
+  return () => webview.removeEventListener?.('message', handler);
+}
+
+export function subscribeMiniVisibility(onChange: (visible: boolean) => void): () => void {
+  const webview = window.chrome?.webview;
+  if (!webview?.addEventListener) return () => {};
+  const handler = (ev: { data: unknown }) => {
+    try {
+      const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
+      const type = data && typeof data === 'object' ? (data as { type?: string }).type : undefined;
+      if (type === 'mini:shown') onChange(true);
+      else if (type === 'mini:hidden') onChange(false);
     } catch {
       // 忽略无关消息
     }

@@ -26,6 +26,7 @@ public sealed class FloatingMiniForm : Form
     private readonly string _apiBaseUrl;
     private readonly WebView2 _webView;
     private bool _initialized;
+    private bool _desiredVisible;
     private string? _pendingUrl;
     private int _logicalHeight = 136;
 
@@ -86,6 +87,7 @@ public sealed class FloatingMiniForm : Form
             _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
             _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
             _webView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
+            _webView.CoreWebView2.NavigationCompleted += (_, _) => NotifyMiniVisibility(_desiredVisible || Visible);
             _webView.Source = new Uri(_pendingUrl);
             _initialized = true;
         }
@@ -94,6 +96,7 @@ public sealed class FloatingMiniForm : Form
 
     public void ShowMini(int? savedX, int? savedY)
     {
+        _desiredVisible = true;
         if (!IsHandleCreated) _ = Handle;
         Rectangle wa = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1040);
         int w = ScalePx(LogicalWidth);
@@ -110,11 +113,27 @@ public sealed class FloatingMiniForm : Form
         ApplyDwmStyle();
         Show();
         TopMost = true;
+        NotifyMiniVisibility(true);
     }
 
     public void HideMini()
     {
+        _desiredVisible = false;
+        NotifyMiniVisibility(false);
         if (Visible) Hide();
+    }
+
+    private void NotifyMiniVisibility(bool visible)
+    {
+        try
+        {
+            if (_webView.CoreWebView2 != null)
+            {
+                _webView.CoreWebView2.PostWebMessageAsJson(
+                    visible ? "{\"type\":\"mini:shown\"}" : "{\"type\":\"mini:hidden\"}");
+            }
+        }
+        catch { }
     }
 
     private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
@@ -170,7 +189,8 @@ public sealed class FloatingMiniForm : Form
     {
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            using var handler = new SocketsHttpHandler { UseProxy = false };
+            using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(2) };
             string json = JsonSerializer.Serialize(body);
             using var content = new StringContent(json, Encoding.UTF8, "application/json");
             await http.PutAsync($"{_apiBaseUrl}/api/preferences", content);

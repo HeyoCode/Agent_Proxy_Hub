@@ -60,6 +60,7 @@ public sealed class SeatTrafficSnapshot
     public string AppName { get; set; } = string.Empty;
     public int LocalPort { get; set; }
     public string BoundNodeName { get; set; } = "未绑定";
+    public string? EffectiveNodeName { get; set; }
     public string ExitIp { get; set; } = "—";
     public long ActiveConnections { get; set; }
     public long TotalConnections { get; set; }

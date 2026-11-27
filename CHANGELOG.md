@@ -2,6 +2,29 @@
 
 All notable changes to **Agent Proxy Hub** are documented in this file.
 
+## [v0.7.0] - 2026-11-28
+
+### ⚡ 桌面启动秒开重构（彻底根治长时间黑屏）
+- **后台并行构建 + 原生启动过渡遮罩**：桌面宿主 [Program.cs](src/AgentProxyHub.Desktop.Win/Program.cs) 立即创窗进入消息循环并后台初始化代理内核，[MainForm.cs](src/AgentProxyHub.Desktop.Win/MainForm.cs) 跟随 Windows 深浅色注册表设置窗口背景色、`DWMWA_USE_IMMERSIVE_DARK_MODE` 与双缓冲启动过渡层，[index.html](web/index.html) 同步预注入主题底色。
+- **WebView2 增量版本印记缓存**：改为仅在版本号或构建时间戳变更时清理旧磁盘缓存，日常启动零销毁 V8 字节码与字体缓存。
+- **零开销 `/api/health` 探活 + 进程快照缓存**：启动探活改为 `UseProxy = false` 直连 `/api/health`（35ms 间隔），`AppProxyTakeoverService` 采用 3s 单次 `Process.GetProcesses()` 快照与 2.5s `InspectAll` 结果缓存，消除 21 席位重复 OS 内核枚举与启动超时阻塞；并将托盘面板与悬浮窗延后至主首屏渲染完成后再预热。
+
+### 🔀 显式备用容灾与实时推送 (`FallbackNodeId` + WebSocket)
+- **每席位显式备用容灾线路**：`AppSeat` 新增 `FallbackNodeId`，`MixedProxyServer` 按 `绑定主线路 → 显式备用线路 → 同组自动容灾` 顺序切换并在 `SeatTrafficSnapshot.EffectiveNodeName` 与右侧检视栏实时标注当前实际容灾节点。
+- **受环回安全守卫保护的 WebSocket `/ws/events`**：前后端（主控制台与悬浮监控窗）优先通过本地 WebSocket 实时推送刷新概览与吞吐速率，状态变更即时推送，断线自动无感回退轮询。
+
+### 🛠️ 生态与跨端运维 (`aph` CLI + Remote-SSH + 存储维护)
+- **独立无界面命令行工具 `aph`（`AgentProxyHub.Cli`）**：内置 `SocketsHttpHandler { UseProxy = false }`，支持 `status / seats / nodes / verify / bind / takeover / launch / cleanup` 及 `--json` 结构化输出，同步集成至 Windows / macOS 安装打包脚本。
+- **Remote-SSH 反向代理隧道生成器**：「应用接管 & CLI」新增 **Remote-SSH** 页签，针对当前选中席位与目标远端主机一键生成 `ssh -R`、`~/.ssh/config` `RemoteForward` 及远端环境变量导出脚本。
+- **本地存储维护 (`StorageMaintenanceService`)**：「网卡隔离」页新增配置目录容量审计与一键安全清理失效备份/临时文件功能。
+
+### 🛡️ 并发连接池防堵死、验真硬超时与运行日志回填
+- **彻底解决同源 6 连接堵死导致的统计空白、日志空白与操作卡顿**：将 `BuildOverviewPayload()` 锁内采集拆至 `stateLock` 外部执行；隐藏态托盘快捷面板与悬浮监控窗自动停止后台轮询与 WebSocket 占用；前端请求统一引入 `AbortController` 超时、防重入锁与可见性门控，用量大盘加载过渡态显示清晰、当日零数据时支持一键切换历史视图。
+- **单节点/全链路/全量验真硬超时停止与每 5 分钟后台无感自动测试**：`NodeHealthChecker` 单节点 `6s` / 全链路 `7.5s` / 全量 `22s` 与前端 `9.5s~25s` 双保险超时止损；后端每 5 分钟自动低并发（并发 3、至多 16 条优先节点）静默巡检并可在线路池一键开关；同组多节点故障回退收敛为前 3 候选且单节点 `6s` 快速切走。
+- **运行日志磁盘启动回填与全链路埋点**：`HubEventLogger` 启动时从 `~/.agent-proxy-hub/logs/hub-*.log` 回填最近 200 条脱敏历史事件，补齐单节点验真、全链路验真、后台巡检与席位接管切换事件记录；全量 **37 项 xUnit 单元测试**通过回归验证。
+
+---
+
 ## [v0.6.0] - 2026-11-28
 
 ### 🧩 21 款 AI 应用、多开账号隔离与排序置顶

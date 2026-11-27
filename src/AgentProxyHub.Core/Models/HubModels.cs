@@ -152,6 +152,10 @@ public sealed class AppSeat
     public int LocalPort { get; set; }
     public string? BoundNodeId { get; set; }
     public string? RelayNodeId { get; set; }
+    /// <summary>
+    /// 主绑定节点异常时的显式备用容灾节点 ID
+    /// </summary>
+    public string? FallbackNodeId { get; set; }
     public bool Enabled { get; set; } = true;
     public bool KillSwitchEnabled { get; set; } = true;
     public bool AllowSameGroupFailover { get; set; } = true;
@@ -384,6 +388,14 @@ public sealed class IsolationSettings
     public bool GlobalKillSwitch { get; set; } = true;
     public bool EnableIpv6 { get; set; } = false;
     public string? CustomSingBoxPath { get; set; }
+    /// <summary>
+    /// 是否开启每 N 分钟后台无感自动线路健康巡检
+    /// </summary>
+    public bool AutoHealthCheckEnabled { get; set; } = true;
+    /// <summary>
+    /// 后台自动线路巡检周期（分钟，默认 5 分钟）
+    /// </summary>
+    public int AutoHealthCheckMinutes { get; set; } = 5;
 }
 
 /// <summary>
@@ -479,7 +491,7 @@ public sealed class SidecarEngineStatus
 public static class ProjectMetadata
 {
     public const string Name = "Agent Proxy Hub";
-    public const string Version = "0.6.0";
+    public const string Version = "0.7.0";
     public const string RepoOwner = "HeyoCode";
     public const string RepoName = "Agent_Proxy_Hub";
     public const string RepoSlug = "HeyoCode/Agent_Proxy_Hub";

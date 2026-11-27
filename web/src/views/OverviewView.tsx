@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AppSeat,
   OverviewResponse,
@@ -80,10 +80,13 @@ export const OverviewView: React.FC<Props> = ({
   const [topoPage, setTopoPage] = useState(0);
   const [togglingAll, setTogglingAll] = useState(false);
   const [togglingIpv6, setTogglingIpv6] = useState(false);
+  const statsInFlightRef = useRef(false);
 
   useEffect(() => {
     let active = true;
     const pullStats = () => {
+      if (statsInFlightRef.current) return;
+      statsInFlightRef.current = true;
       void api.getStatsDashboard({
         range: chartRange,
         appFilter: 'all',
@@ -94,12 +97,16 @@ export const OverviewView: React.FC<Props> = ({
         if (active) {
           setStats(res);
         }
-      }).catch(() => {});
+      }).catch(() => {}).finally(() => {
+        statsInFlightRef.current = false;
+      });
     };
 
     pullStats();
     setHoverIdx(null);
-    const timer = window.setInterval(pullStats, 5000);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) pullStats();
+    }, 5000);
     return () => {
       active = false;
       window.clearInterval(timer);

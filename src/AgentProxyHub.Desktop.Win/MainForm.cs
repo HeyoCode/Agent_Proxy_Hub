@@ -25,6 +25,7 @@ public sealed class MainForm : Form
     private const int HtBottomLeft = 16;
     private const int HtBottomRight = 17;
 
+    private const int DwmwaUseImmersiveDarkMode = 20;
     private const int DwmwaWindowCornerPreference = 33;
     private const int DwmwcpDoNotRound = 1;
     private const int DwmwcpRound = 2;
@@ -33,11 +34,13 @@ public sealed class MainForm : Form
 
     private readonly string _url;
     private readonly WebView2 _webView;
+    private readonly Panel _startupCover;
     private readonly NotifyIcon _trayIcon;
     private TrayFlyoutForm? _trayFlyout;
     private FloatingMiniForm? _floatingMini;
     private bool _reallyExiting;
     private bool _isCustomMaximized;
+    private bool _coverDismissed;
     private Rectangle _restoreBounds;
     private string _closeAction = "minimize_to_tray";
     private string _trayLeftClickAction = "toggle_flyout";
@@ -72,6 +75,11 @@ public sealed class MainForm : Form
     public MainForm(string url, bool startMinimized = false)
     {
         _url = url;
+        bool isDark = IsWindowsDarkMode();
+        Color initBg = isDark ? Color.FromArgb(13, 16, 33) : Color.FromArgb(242, 244, 249);
+        Color initFg = isDark ? Color.FromArgb(232, 236, 247) : Color.FromArgb(25, 32, 56);
+        Color initMuted = isDark ? Color.FromArgb(134, 145, 179) : Color.FromArgb(100, 111, 142);
+
         Text = $"{ProjectMetadata.Name} v{ProjectMetadata.Version}";
         FormBorderStyle = FormBorderStyle.None;
         DoubleBuffered = true;
@@ -79,7 +87,7 @@ public sealed class MainForm : Form
         Height = 850;
         MinimumSize = new Size(1080, 700);
         StartPosition = FormStartPosition.CenterScreen;
-        BackColor = Color.FromArgb(242, 244, 249);
+        BackColor = initBg;
         _restoreBounds = new Rectangle(120, 80, 1360, 850);
 
         Icon? appIcon = TryLoadAppIcon();
@@ -95,9 +103,32 @@ public sealed class MainForm : Form
         _webView = new WebView2
         {
             Dock = DockStyle.Fill,
-            DefaultBackgroundColor = Color.FromArgb(242, 244, 249)
+            DefaultBackgroundColor = initBg
         };
         Controls.Add(_webView);
+
+        // 原生双缓冲启动过渡层：WebView2 引擎和首帧完成合成前铺满窗口，彻底消除黑屏等待感
+        _startupCover = new Panel
+        {
+            Dock = DockStyle.Fill,
+            BackColor = initBg
+        };
+        _startupCover.Paint += (_, pe) =>
+        {
+            var g = pe.Graphics;
+            g.Clear(initBg);
+            using var titleFont = new Font("Segoe UI", 16f, FontStyle.Bold);
+            using var subFont = new Font("Segoe UI", 10f, FontStyle.Regular);
+            using var fgBrush = new SolidBrush(initFg);
+            using var mutedBrush = new SolidBrush(initMuted);
+            var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            float cx = _startupCover.Width / 2f;
+            float cy = _startupCover.Height / 2f;
+            g.DrawString($"{ProjectMetadata.Name} v{ProjectMetadata.Version}", titleFont, fgBrush, cx, cy - 14, sf);
+            g.DrawString("正在加载物理网卡直出引擎...", subFont, mutedBrush, cx, cy + 16, sf);
+        };
+        Controls.Add(_startupCover);
+        _startupCover.BringToFront();
 
         _trayIcon = new NotifyIcon
         {
@@ -159,7 +190,10 @@ public sealed class MainForm : Form
         if (!IsHandleCreated) return;
         try
         {
-            // Windows 11 启用系统圆角（最大化时关闭圆角）并彻底隐藏 1px 外边框描边
+            // Windows 11 启用系统圆角（最大化时关闭圆角）、深色标题栏属性并隐藏 1px 外边框描边
+            int darkAttr = IsWindowsDarkMode() ? 1 : 0;
+            _ = DwmSetWindowAttribute(Handle, DwmwaUseImmersiveDarkMode, ref darkAttr, sizeof(int));
+
             int corner = _isCustomMaximized ? DwmwcpDoNotRound : DwmwcpRound;
             _ = DwmSetWindowAttribute(Handle, DwmwaWindowCornerPreference, ref corner, sizeof(int));
 
@@ -169,6 +203,21 @@ public sealed class MainForm : Form
         catch
         {
             // Windows 10 等旧版本自动忽略未知 DWM 属性，退回到 CS_DROPSHADOW
+        }
+    }
+
+    private static bool IsWindowsDarkMode()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            object? val = key?.GetValue("AppsUseLightTheme");
+            return val is int i && i == 0;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -202,20 +251,6 @@ public sealed class MainForm : Form
             _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
             _webView.CoreWebView2.NewWindowRequested += OnWebViewNewWindowRequested;
             _webView.CoreWebView2.WebMessageReceived += OnWebViewMessageReceived;
-            _webView.CoreWebView2.NavigationCompleted += (_, _) => NotifyMaximizedState();
-
-            // 每次启动清理旧 HTTP 磁盘缓存，防止版本更新后命中残留 HTML / JS
-            try
-            {
-                if (_webView.CoreWebView2.Profile != null)
-                {
-                    await _webView.CoreWebView2.Profile.ClearBrowsingDataAsync(
-                        CoreWebView2BrowsingDataKinds.DiskCache | CoreWebView2BrowsingDataKinds.CacheStorage);
-                }
-            }
-            catch { }
-
-            await WaitLocalBackendReadyAsync();
 
             long buildTicks = 0;
             try
@@ -224,20 +259,80 @@ public sealed class MainForm : Form
             }
             catch { }
 
+            // 仅当软件版本或构建时间戳发生变化时清理旧缓存；日常冷启动 0ms 保留 V8 字节码与静态缓存
+            string stampPath = Path.Combine(webViewUserData, ".cache-stamp");
+            string expectedStamp = $"{ProjectMetadata.Version}:{buildTicks}";
+            try
+            {
+                string? existingStamp = File.Exists(stampPath) ? File.ReadAllText(stampPath).Trim() : null;
+                if (!string.Equals(existingStamp, expectedStamp, StringComparison.Ordinal))
+                {
+                    if (_webView.CoreWebView2.Profile != null)
+                    {
+                        await _webView.CoreWebView2.Profile.ClearBrowsingDataAsync(
+                            CoreWebView2BrowsingDataKinds.DiskCache | CoreWebView2BrowsingDataKinds.CacheStorage);
+                    }
+                    File.WriteAllText(stampPath, expectedStamp);
+                }
+            }
+            catch { }
+
+            await WaitLocalBackendReadyAsync();
+
             var sep = _url.Contains('?') ? "&" : "?";
             string navUrl = $"{_url}{sep}v={Uri.EscapeDataString(ProjectMetadata.Version)}&b={buildTicks}";
-            _webView.Source = new Uri(navUrl);
-
-            // 后台无感预热托盘快捷面板（复用共享 WebView2 环境，首击毫秒级呼出）
             string trayUrl = $"{_url}{sep}tray=1&v={Uri.EscapeDataString(ProjectMetadata.Version)}&b={buildTicks}";
-            _trayFlyout = new TrayFlyoutForm(ShowMainWindow, ExitApplication, ToggleMiniCard);
-            _ = _trayFlyout.WarmUpAsync(env, trayUrl);
-
-            // 预热极简悬浮监控卡片（Always-on-Top）并按用户偏好自动恢复显示
             string miniUrl = $"{_url}{sep}mini=1&v={Uri.EscapeDataString(ProjectMetadata.Version)}&b={buildTicks}";
+
+            _trayFlyout = new TrayFlyoutForm(ShowMainWindow, ExitApplication, ToggleMiniCard);
             _floatingMini = new FloatingMiniForm(ShowMainWindow, _url);
-            _ = _floatingMini.WarmUpAsync(env, miniUrl);
-            await SyncDesktopPreferencesAsync();
+
+            void DismissCover()
+            {
+                if (_coverDismissed) return;
+                _coverDismissed = true;
+                try
+                {
+                    if (!_startupCover.IsDisposed)
+                    {
+                        Controls.Remove(_startupCover);
+                        _startupCover.Dispose();
+                    }
+                }
+                catch { }
+            }
+
+            _webView.CoreWebView2.NavigationCompleted += (_, _) =>
+            {
+                BeginInvoke(() =>
+                {
+                    DismissCover();
+                    NotifyMaximizedState();
+                });
+
+                // 延迟到主界面首屏绘制完成之后再后台预热托盘面板与悬浮窗，避免与首屏抢占 CPU / GPU
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(800);
+                    if (IsDisposed) return;
+                    BeginInvoke(async () =>
+                    {
+                        await SyncDesktopPreferencesAsync();
+                        _ = _trayFlyout.WarmUpAsync(env, trayUrl);
+                        _ = _floatingMini.WarmUpAsync(env, miniUrl);
+                    });
+                });
+            };
+
+            // 兜底安全网：即便极端情况未收到 NavigationCompleted，2.5s 后也确保移除过渡遮罩
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(2500);
+                if (!IsDisposed && !_coverDismissed)
+                    BeginInvoke(DismissCover);
+            });
+
+            _webView.Source = new Uri(navUrl);
         }
         catch (Exception ex)
         {
@@ -248,9 +343,11 @@ public sealed class MainForm : Form
 
     private async Task WaitLocalBackendReadyAsync()
     {
-        using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(400) };
-        string probeUrl = _url.TrimEnd('/') + "/api/overview";
-        for (int i = 0; i < 25; i++)
+        // 显式绕过系统代理并探测零开销 /api/health，彻底避免首次启动命中 Clash 代理或全进程扫描超时
+        using var handler = new SocketsHttpHandler { UseProxy = false };
+        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(250) };
+        string probeUrl = _url.TrimEnd('/') + "/api/health";
+        for (int i = 0; i < 120; i++)
         {
             try
             {
@@ -258,7 +355,7 @@ public sealed class MainForm : Form
                 if (resp.IsSuccessStatusCode) return;
             }
             catch { }
-            await Task.Delay(100);
+            await Task.Delay(35);
         }
     }
 

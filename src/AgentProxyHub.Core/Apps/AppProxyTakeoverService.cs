@@ -57,6 +57,12 @@ public sealed class AppProxyTakeoverService
     private readonly Func<string[], bool> _processChecker;
     private readonly bool _isMacOs;
     private readonly object _opLock = new();
+    private DateTime _inspectCacheExpiresUtc = DateTime.MinValue;
+    private IReadOnlyList<SeatTakeoverStatus>? _inspectCache;
+
+    private static readonly object ProcSnapshotLock = new();
+    private static DateTime _procSnapshotExpiresUtc = DateTime.MinValue;
+    private static HashSet<string> _procSnapshotNames = new(StringComparer.OrdinalIgnoreCase);
 
     public sealed class BackupEntry
     {
@@ -100,13 +106,37 @@ public sealed class AppProxyTakeoverService
     }
 
     /// <summary>
-    /// 只读检查全部席位的应用运行状态、配置文件接管状态与可用启动器路径
+    /// 使席位进程/接管检查短缓存失效（配置修改、接管切换后自动调用）
+    /// </summary>
+    public void InvalidateCache()
+    {
+        lock (_opLock)
+        {
+            _inspectCacheExpiresUtc = DateTime.MinValue;
+            _inspectCache = null;
+        }
+        lock (ProcSnapshotLock)
+        {
+            _procSnapshotExpiresUtc = DateTime.MinValue;
+        }
+    }
+
+    /// <summary>
+    /// 只读检查全部席位的应用运行状态、配置文件接管状态与可用启动器路径（内置 2.5s 短缓存降低开销）
     /// </summary>
     public IReadOnlyList<SeatTakeoverStatus> InspectAll(IReadOnlyList<AppSeat> seats)
     {
         lock (_opLock)
         {
-            return seats.Select(InspectSeatInternal).ToList();
+            DateTime now = DateTime.UtcNow;
+            if (now <= _inspectCacheExpiresUtc && _inspectCache != null && _inspectCache.Count == seats.Count)
+            {
+                return _inspectCache;
+            }
+            var fresh = seats.Select(InspectSeatInternal).ToList();
+            _inspectCache = fresh;
+            _inspectCacheExpiresUtc = now.AddSeconds(2.5);
+            return fresh;
         }
     }
 
@@ -138,6 +168,8 @@ public sealed class AppProxyTakeoverService
                     _ => enable ? EnableGenericLauncherTakeover(seat) : RestoreGenericLauncherTakeover(seat)
                 };
 
+                _inspectCacheExpiresUtc = DateTime.MinValue;
+                _inspectCache = null;
                 var status = InspectSeatInternal(seat);
                 return (ok, msg, status);
             }
@@ -1339,11 +1371,37 @@ public sealed class AppProxyTakeoverService
 
     private static bool DefaultCheckProcessRunning(string[] processNames)
     {
+        if (processNames.Length == 0) return false;
         try
         {
+            HashSet<string> names;
+            lock (ProcSnapshotLock)
+            {
+                DateTime now = DateTime.UtcNow;
+                if (now > _procSnapshotExpiresUtc)
+                {
+                    var fresh = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var p in Process.GetProcesses())
+                    {
+                        using (p)
+                        {
+                            try
+                            {
+                                string pn = p.ProcessName;
+                                if (!string.IsNullOrEmpty(pn)) fresh.Add(pn);
+                            }
+                            catch { }
+                        }
+                    }
+                    _procSnapshotNames = fresh;
+                    _procSnapshotExpiresUtc = now.AddSeconds(3);
+                }
+                names = _procSnapshotNames;
+            }
+
             foreach (string name in processNames)
             {
-                if (Process.GetProcessesByName(name).Length > 0)
+                if (names.Contains(name))
                     return true;
             }
         }

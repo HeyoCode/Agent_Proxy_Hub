@@ -21,7 +21,8 @@ interface Props {
 }
 
 export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onReload, onToast }) => {
-  const [cliTab, setCliTab] = useState<'ps' | 'zsh' | 'claude' | 'agy'>(data.os === 'mac' ? 'zsh' : 'ps');
+  const [cliTab, setCliTab] = useState<'ps' | 'zsh' | 'ssh' | 'claude' | 'agy'>(data.os === 'mac' ? 'zsh' : 'ps');
+  const [sshHost, setSshHost] = useState('dev@your-remote-server');
   const [copied, setCopied] = useState(false);
   const [busySeat, setBusySeat] = useState<string | null>(null);
   const [focusedSeatId, setFocusedSeatId] = useState<string>(data.seats[0]?.id ?? 'claude');
@@ -64,6 +65,10 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
     }
     if (cliTab === 'zsh' && focusedSeat) {
       return `# macOS / Linux Zsh · ${focusedSeat.name} 独立专线注入（不改系统代理，绕过 Surge/Clash）\nexport HTTPS_PROXY="http://127.0.0.1:${focusedPort}"\nexport HTTP_PROXY="http://127.0.0.1:${focusedPort}"\nexport ALL_PROXY="socks5h://127.0.0.1:${focusedPort}"\nexport NO_PROXY="${effectiveNoProxyMac}"\n${focusedCmdMac}`;
+    }
+    if (cliTab === 'ssh' && focusedSeat) {
+      const hostStr = sshHost.trim() || 'dev@your-remote-server';
+      return `# 1) 在本地终端建立 SSH 反向代理隧道（将远端 :${focusedPort} 映射到本机 ${focusedSeat.name} 独立专线）\nssh -N -R 127.0.0.1:${focusedPort}:127.0.0.1:${focusedPort} ${hostStr}\n\n# 2) 或写入本地 ~/.ssh/config 长期自动映射\nHost remote-ai\n  HostName ${hostStr.includes('@') ? hostStr.split('@')[1] : hostStr}\n  RemoteForward 127.0.0.1:${focusedPort} 127.0.0.1:${focusedPort}\n\n# 3) 在远端服务器会话注入代理即可走本机静态住宅出口\nexport HTTPS_PROXY="http://127.0.0.1:${focusedPort}" HTTP_PROXY="http://127.0.0.1:${focusedPort}" ALL_PROXY="socks5h://127.0.0.1:${focusedPort}"\n${focusedCmdMac}`;
     }
     return data.cliSnippets[cliTab] ?? '';
   })();
@@ -425,17 +430,30 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
         </div>
 
         <div style={{ marginBottom: 12 }}>
-          <SegmentedTabs<'ps' | 'zsh' | 'claude' | 'agy'>
+          <SegmentedTabs<'ps' | 'zsh' | 'ssh' | 'claude' | 'agy'>
             value={cliTab}
             onChange={setCliTab}
             items={[
               { value: 'ps', label: 'PowerShell' },
               { value: 'zsh', label: 'macOS / Zsh' },
+              { value: 'ssh', label: 'Remote-SSH' },
               { value: 'claude', label: 'Claude Code' },
               { value: 'agy', label: 'Antigravity' }
             ]}
           />
         </div>
+
+        {cliTab === 'ssh' && (
+          <div style={{ marginBottom: 10 }}>
+            <input
+              className="clean-input mono"
+              style={{ height: 32, fontSize: 12 }}
+              placeholder="输入 SSH 目标主机（如 dev@192.168.1.50）"
+              value={sshHost}
+              onChange={e => setSshHost(e.target.value)}
+            />
+          </div>
+        )}
 
         <div className="code-surface">{codeText}</div>
 

@@ -266,11 +266,12 @@ Agent_Proxy_Hub/
 ├── src/
 │   ├── AgentProxyHub.Core/             # 多协议代理内核、CredentialVault、国家门禁、订阅同步、日志与统计库
 │   ├── AgentProxyHub.Host/             # 跨平台本地守护与环回受保护 REST API 服务 (127.0.0.1:17880)
-│   └── AgentProxyHub.Desktop.Win/      # Windows 无边框 WebView2 主窗与原生圆角托盘悬浮窗
+│   ├── AgentProxyHub.Cli/              # 独立 CLI 工具 aph（支持 --json 脚本控制与自动化）
+│   └── AgentProxyHub.Desktop.Win/      # Windows 无边框 WebView2 主窗（秒开零黑屏）与原生托盘/悬浮窗
 ├── macos/                              # macOS 原生菜单栏 NSPopover + WKWebView 宿主与脚本
 ├── web/                                # React 19 + TypeScript + Vite 前端（双主题自适应 + 隐私护盾 + 365天热力图）
 ├── installer/                          # Inno Setup 6 (Windows) 与 DMG (macOS) 打包脚本
-├── tests/AgentProxyHub.Tests/          # 29 项 xUnit 测试（多协议 / 21 应用 / 多开隔离 / WebDAV AES-GCM / 审计）
+├── tests/AgentProxyHub.Tests/          # 34 项 xUnit 测试（多协议 / 21 应用 / 备用容灾 / WebSocket / CLI / 审计）
 └── docs/screenshots/                   # README 展示截图资源
 ```
 
@@ -281,8 +282,11 @@ Agent_Proxy_Hub/
 pnpm --dir web install
 pnpm --dir web build
 
-# 2. 运行全套 xUnit 单元测试（29 项全绿）
+# 2. 运行全套 xUnit 单元测试（37 项全绿）
 dotnet test AgentProxyHub.sln -c Release
+
+# 3. 命令行脚本控制示例 (aph CLI)
+dotnet run --project src/AgentProxyHub.Cli/AgentProxyHub.Cli.csproj -c Release -- status --json
 
 # 3. 启动 Windows 无边框托盘客户端
 dotnet run --project src/AgentProxyHub.Desktop.Win/AgentProxyHub.Desktop.Win.csproj -c Release
@@ -296,16 +300,16 @@ dotnet run --project src/AgentProxyHub.Host/AgentProxyHub.Host.csproj -c Release
 
 ```powershell
 # Windows 轻量安装程序（需安装 Inno Setup 6）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.5.0
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.7.0
 
 # Windows 离线独立版（内置完整 .NET 10 运行时）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.5.0 -SelfContained
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.7.0 -SelfContained
 ```
 
 ```bash
 # macOS Apple Silicon / Intel DMG 镜像
 chmod +x installer/macos/build-dmg.sh
-./installer/macos/build-dmg.sh osx-arm64 0.5.0
+./installer/macos/build-dmg.sh osx-arm64 0.7.0
 ```
 
 </details>
@@ -315,7 +319,10 @@ chmod +x installer/macos/build-dmg.sh
 
 | 方法 | 路径 | 说明 |
 | :---: | :--- | :--- |
+| `GET` | `/api/health` | 零开销本地启动健康检查（绕过系统代理） |
+| `WS` | `/ws/events` | 受环回 Origin/Host 校验的实时状态与速率推送通道 |
 | `GET` | `/api/overview` | 获取物理网卡、绕过隧道、21 款席位配置、多开实例、桌面偏好、节点池、实时吞吐与接管状态 |
+| `GET / POST` | `/api/maintenance/{stats,cleanup}` | 查询 `~/.agent-proxy-hub` 目录占用并安全清理失效接管备份与 `.tmp` 缓存 |
 | `POST` | `/api/seats/reorder` | 保存自定义 AI 席位展示顺序 |
 | `POST` | `/api/seats/{id}/restart` | 优雅关闭旧进程并携独立代理端口重连（严格保护 Antigravity） |
 | `GET / POST / PUT / DELETE` | `/api/instances` | 多开隔离实例（独立 `ProfileDir` + `:17920+`）增删改查与 `/launch` 隔离启动 |
@@ -332,7 +339,7 @@ chmod +x installer/macos/build-dmg.sh
 | `POST` | `/api/subscriptions` | 创建或更新托管订阅源并执行首次增量导入（支持 `profile-title` 自动命名） |
 | `POST` | `/api/subscriptions/{id}/refresh` | 手动刷新指定订阅源，含席位出口**快照防漂移锁定**检查 |
 | `POST` | `/api/nodes/{id}/approve-insecure` | 显式批准外部导入的 `allowInsecure` 节点跳过 TLS 证书校验 |
-| `PUT` | `/api/seats/{id}` | 更新席位启停、绑定线路、前置中转、预期国家门禁、自定义路径/`NO_PROXY` 与漂移确认 |
+| `PUT` | `/api/seats/{id}` | 更新席位启停、绑定线路、前置中转、显式备用容灾 (`fallbackNodeId`)、预期国家门禁、自定义路径/`NO_PROXY` 与漂移确认 |
 | `POST` | `/api/seats/{id}/takeover` | 对目标 AI 应用执行一键无损代理接管或还原默认配置 |
 | `POST` | `/api/seats/{id}/launch` | 先校验预期出口国家硬门禁，通过后注入独立代理环境变量受控启动应用 |
 | `POST` | `/api/seats/{id}/check-country` | 通过 Cloudflare Trace 立即核验当前席位出口国家与历史记录 |

@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { HubLogEntry, OverviewResponse, UpdateCheckResult, api } from './api';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { HubLogEntry, OverviewResponse, UpdateCheckResult, api, connectOverviewStream } from './api';
 import {
   AppsNavIcon,
   BrandLogoIcon,
@@ -46,7 +46,7 @@ type TabKey = 'overview' | 'usage' | 'nodes' | 'apps' | 'isolation';
 
 const FALLBACK_PROJECT = {
   name: 'Agent Proxy Hub',
-  version: '0.6.0',
+  version: '0.7.0',
   repoOwner: 'HeyoCode',
   repoName: 'Agent_Proxy_Hub',
   repoSlug: 'HeyoCode/Agent_Proxy_Hub',
@@ -91,9 +91,14 @@ export const App: React.FC = () => {
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResult | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [logs, setLogs] = useState<HubLogEntry[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
   const [logLevel, setLogLevel] = useState<'ALL' | 'INFO' | 'WARN' | 'ERROR'>('ALL');
   const [logSearch, setLogSearch] = useState('');
+  const [wsConnected, setWsConnected] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const overviewInFlightRef = useRef(false);
+  const logsInFlightRef = useRef(false);
 
   useEffect(() => {
     const apply = () => {
@@ -118,8 +123,16 @@ export const App: React.FC = () => {
   }, []);
 
   const reloadOverview = useCallback(async () => {
-    const res = await api.getOverview();
-    setOverview(res);
+    if (overviewInFlightRef.current) return;
+    overviewInFlightRef.current = true;
+    try {
+      const res = await api.getOverview();
+      setOverview(res);
+    } catch {
+      // 保留上次正常状态，等待下轮刷新
+    } finally {
+      overviewInFlightRef.current = false;
+    }
   }, []);
 
   const handleChangeThroughputMode = useCallback((mode: 'realtime' | 'cumulative') => {
@@ -138,11 +151,23 @@ export const App: React.FC = () => {
     });
   }, [toast]);
 
-  const loadDiagnosticLogs = useCallback(async (lv = logLevel, kw = logSearch) => {
+  const loadDiagnosticLogs = useCallback(async (lv = logLevel, kw = logSearch, silent = false) => {
+    if (logsInFlightRef.current) return;
+    logsInFlightRef.current = true;
+    if (!silent) {
+      setLogsLoading(true);
+      setLogsError(null);
+    }
     try {
       const list = await api.getDiagnosticLogs({ level: lv, keyword: kw, limit: 200 });
       setLogs(list);
-    } catch { }
+      setLogsError(null);
+    } catch (err) {
+      setLogsError(err instanceof Error ? err.message : '读取运行日志失败');
+    } finally {
+      logsInFlightRef.current = false;
+      if (!silent) setLogsLoading(false);
+    }
   }, [logLevel, logSearch]);
 
   const handleCheckUpdate = useCallback(async (force = false) => {
@@ -169,17 +194,31 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     if (!showLogsModal) return;
-    void loadDiagnosticLogs();
+    void loadDiagnosticLogs(logLevel, logSearch, false);
+    const timer = window.setInterval(() => {
+      if (!document.hidden) {
+        void loadDiagnosticLogs(logLevel, logSearch, true);
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
   }, [showLogsModal, logLevel, logSearch, loadDiagnosticLogs]);
 
   useEffect(() => {
     void reloadOverview();
-    const intervalMs = throughputMode === 'realtime' ? 1500 : 4000;
+    const unsubWs = connectOverviewStream(ov => setOverview(ov), setWsConnected);
+    return () => unsubWs();
+  }, [reloadOverview]);
+
+  useEffect(() => {
+    // WebSocket 在线时仅 15s 低频兜底；断线时自动回退高频轮询；标签不可见时挂起
+    const intervalMs = wsConnected ? 15000 : (throughputMode === 'realtime' ? 1500 : 4000);
     const timer = window.setInterval(() => {
-      void reloadOverview();
+      if (!document.hidden) {
+        void reloadOverview();
+      }
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [reloadOverview, throughputMode]);
+  }, [reloadOverview, throughputMode, wsConnected]);
 
   useEffect(() => {
     if (!overview?.seats.length) return;
@@ -438,11 +477,21 @@ export const App: React.FC = () => {
                   nodes={overview.nodes}
                   subscriptions={overview.subscriptions ?? []}
                   privacyMode={privacyMode}
+                  autoHealthCheckEnabled={overview.isolation.autoHealthCheckEnabled ?? true}
+                  autoHealthCheckMinutes={overview.isolation.autoHealthCheckMinutes ?? 5}
                   showManual={showManual}
                   showBatch={showBatch}
                   onCloseModals={() => { setShowManual(false); setShowBatch(false); }}
                   onOpenManual={() => setShowManual(true)}
                   onOpenBatch={() => setShowBatch(true)}
+                  onToggleAutoHealthCheck={async () => {
+                    const next = !(overview.isolation.autoHealthCheckEnabled ?? true);
+                    await api.updateIsolation({ autoHealthCheckEnabled: next });
+                    await reloadOverview();
+                    toast(next
+                      ? `已开启每 ${overview.isolation.autoHealthCheckMinutes ?? 5} 分钟后台无感自动验真`
+                      : '已暂停后台自动验真');
+                  }}
                   onReload={reloadOverview}
                   onToast={toast}
                 />
@@ -607,7 +656,22 @@ export const App: React.FC = () => {
             </div>
 
             <div style={{ padding: '0 22px 16px', maxHeight: '54vh', overflowY: 'auto' }}>
-              {logs.length === 0 ? (
+              {logsError ? (
+                <div style={{ padding: 28, textAlign: 'center', color: 'var(--accent-coral-text)', fontSize: 12.5, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+                  <span>读取运行日志失败：{logsError}</span>
+                  <button
+                    type="button"
+                    className="btn-pill btn-soft btn-sm"
+                    onClick={() => void loadDiagnosticLogs(logLevel, logSearch, false)}
+                  >
+                    立即重试
+                  </button>
+                </div>
+              ) : logsLoading && logs.length === 0 ? (
+                <div style={{ padding: 36, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12.5 }}>
+                  正在加载运行事件日志...
+                </div>
+              ) : logs.length === 0 ? (
                 <div style={{ padding: 36, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12.5 }}>
                   暂无匹配的运行事件记录
                 </div>

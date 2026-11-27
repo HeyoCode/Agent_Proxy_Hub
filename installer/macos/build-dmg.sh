@@ -21,8 +21,11 @@ echo "[1/5] 构建 Cult UI React 前端..."
 pnpm --dir "$ROOT_DIR/web" install --frozen-lockfile --network-concurrency=2
 pnpm --dir "$ROOT_DIR/web" build
 
-echo "[2/5] 发布 .NET 10 跨平台后端服务 ($ARCH)..."
+echo "[2/5] 发布 .NET 10 跨平台后端服务与 aph CLI ($ARCH)..."
 dotnet publish "$ROOT_DIR/src/AgentProxyHub.Host/AgentProxyHub.Host.csproj" \
+  -c Release -r "$ARCH" --self-contained true \
+  -o "$MACOS_DIR"
+dotnet publish "$ROOT_DIR/src/AgentProxyHub.Cli/AgentProxyHub.Cli.csproj" \
   -c Release -r "$ARCH" --self-contained true \
   -o "$MACOS_DIR"
 

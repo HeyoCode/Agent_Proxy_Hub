@@ -9,11 +9,14 @@ interface Props {
   nodes: ProxyNode[];
   subscriptions?: SubscriptionSourceDto[];
   privacyMode?: boolean;
+  autoHealthCheckEnabled?: boolean;
+  autoHealthCheckMinutes?: number;
   showManual: boolean;
   showBatch: boolean;
   onCloseModals: () => void;
   onOpenManual: () => void;
   onOpenBatch: () => void;
+  onToggleAutoHealthCheck?: () => Promise<void>;
   onReload: () => Promise<void>;
   onToast: (msg: string) => void;
 }
@@ -55,17 +58,23 @@ export const NodesView: React.FC<Props> = ({
   nodes,
   subscriptions = [],
   privacyMode = false,
+  autoHealthCheckEnabled = true,
+  autoHealthCheckMinutes = 5,
   showManual,
   showBatch,
   onCloseModals,
   onOpenManual,
   onOpenBatch,
+  onToggleAutoHealthCheck,
   onReload,
   onToast
 }) => {
   const [filter, setFilter] = useState<'all' | 'NATIVE' | 'SIDECAR'>('all');
   const [testingAll, setTestingAll] = useState(false);
+  const [verifyingIds, setVerifyingIds] = useState<Record<string, boolean>>({});
+  const [togglingPatrol, setTogglingPatrol] = useState(false);
   const verifyAbortRef = useRef<AbortController | null>(null);
+  const singleVerifyAbortsRef = useRef<Record<string, AbortController>>({});
   const [refreshingSubId, setRefreshingSubId] = useState<string | null>(null);
 
   // 手动添加表单（L1 + L2 全协议）
@@ -348,13 +357,38 @@ export const NodesView: React.FC<Props> = ({
   }
 
   async function handleVerifyOne(id: string) {
+    if (verifyingIds[id]) {
+      singleVerifyAbortsRef.current[id]?.abort();
+      delete singleVerifyAbortsRef.current[id];
+      setVerifyingIds(prev => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      onToast('已取消单节点验真');
+      return;
+    }
+
+    const ctrl = new AbortController();
+    singleVerifyAbortsRef.current[id] = ctrl;
+    setVerifyingIds(prev => ({ ...prev, [id]: true }));
     onToast('正在直绑物理网卡测试出口与 AI 连通性...');
     try {
-      const res = await api.verifyNode(id);
+      const res = await api.verifyNode(id, ctrl.signal);
       await onReload();
       onToast(res.status === 'online' ? `节点在线：${maskIp(res.exitIp, privacyMode)} (${res.latencyMs ?? 1} ms)` : `节点不可达：${res.ispSummary}`);
     } catch (err) {
-      onToast(err instanceof Error ? err.message : '验真失败');
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        onToast(err instanceof Error ? err.message : '验真失败');
+        void onReload();
+      }
+    } finally {
+      delete singleVerifyAbortsRef.current[id];
+      setVerifyingIds(prev => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
     }
   }
 
@@ -412,7 +446,30 @@ export const NodesView: React.FC<Props> = ({
             ]}
           />
 
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {onToggleAutoHealthCheck && (
+              <button
+                type="button"
+                className="btn-pill btn-soft btn-sm"
+                disabled={togglingPatrol}
+                style={{
+                  border: autoHealthCheckEnabled ? '1px solid rgba(16, 185, 129, 0.28)' : '1px solid transparent',
+                  color: autoHealthCheckEnabled ? 'var(--accent-emerald-text)' : 'var(--text-muted)'
+                }}
+                title="在不影响正常使用的前提下，每 5 分钟后台低并发自动测试主要与过期线路"
+                onClick={async () => {
+                  setTogglingPatrol(true);
+                  try {
+                    await onToggleAutoHealthCheck();
+                  } finally {
+                    setTogglingPatrol(false);
+                  }
+                }}
+              >
+                <span className={`live-sync-dot ${autoHealthCheckEnabled ? 'on' : ''}`} />
+                <span>{autoHealthCheckEnabled ? `每 ${autoHealthCheckMinutes}m 自动验真` : '自动验真已关'}</span>
+              </button>
+            )}
             {savedSub?.url && subscriptions.length === 0 && (
               <button
                 type="button"
@@ -548,14 +605,26 @@ export const NodesView: React.FC<Props> = ({
                     color: n.status === 'offline' ? 'var(--accent-coral-text)' : (n.latencyMs ? 'var(--accent-emerald-text)' : 'var(--text-muted)')
                   }}
                 >
-                  {n.latencyMs ? `${n.latencyMs} ms` : (n.status === 'offline' ? '超时' : '待测')}
+                  <div>{n.latencyMs ? `${n.latencyMs} ms` : (n.status === 'offline' ? '超时' : '待测')}</div>
+                  {n.lastCheckedAt && (
+                    <div style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-muted)' }}>
+                      {new Date(n.lastCheckedAt).toLocaleTimeString('zh-CN', { hour12: false })}
+                    </div>
+                  )}
                 </td>
                 <td className="num-r nowrap">
                   <div style={{ display: 'inline-flex', gap: 6 }}>
                     {n.allowInsecure && !n.insecureApproved && (
                       <button type="button" className="btn-pill btn-indigo btn-sm" onClick={() => handleApproveInsecure(n)}>批准风险</button>
                     )}
-                    <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleVerifyOne(n.id)}>验真</button>
+                    <button
+                      type="button"
+                      className={`btn-pill btn-sm ${verifyingIds[n.id] ? 'btn-coral' : 'btn-soft'}`}
+                      onClick={() => handleVerifyOne(n.id)}
+                    >
+                      {verifyingIds[n.id] ? <RefreshSpinIcon size={12} spinning /> : null}
+                      <span>{verifyingIds[n.id] ? '取消' : '验真'}</span>
+                    </button>
                     {n.id !== 'direct-phy' && (
                       <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleDelete(n.id)}>删除</button>
                     )}

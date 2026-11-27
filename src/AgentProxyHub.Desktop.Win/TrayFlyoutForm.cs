@@ -83,6 +83,7 @@ public sealed class TrayFlyoutForm : Form
             {
                 _lastDeactivatedUtc = DateTime.UtcNow;
                 Hide();
+                NotifyTrayHidden();
             }
         };
     }
@@ -189,6 +190,7 @@ public sealed class TrayFlyoutForm : Form
         if (!IsDisposed && Visible)
         {
             Hide();
+            NotifyTrayHidden();
         }
     }
 
@@ -199,6 +201,18 @@ public sealed class TrayFlyoutForm : Form
             if (_webView.CoreWebView2 != null)
             {
                 _webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"tray:shown\"}");
+            }
+        }
+        catch { }
+    }
+
+    private void NotifyTrayHidden()
+    {
+        try
+        {
+            if (_webView.CoreWebView2 != null)
+            {
+                _webView.CoreWebView2.PostWebMessageAsJson("{\"type\":\"tray:hidden\"}");
             }
         }
         catch { }

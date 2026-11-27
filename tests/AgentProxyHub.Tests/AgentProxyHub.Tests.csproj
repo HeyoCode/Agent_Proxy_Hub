@@ -12,5 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\AgentProxyHub.Core\AgentProxyHub.Core.csproj" />
+    <ProjectReference Include="..\..\src\AgentProxyHub.Cli\AgentProxyHub.Cli.csproj" />
+    <ProjectReference Include="..\..\src\AgentProxyHub.Host\AgentProxyHub.Host.csproj" />
   </ItemGroup>
 </Project>

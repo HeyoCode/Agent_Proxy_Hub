@@ -38,6 +38,7 @@ public sealed class MixedProxyServer : IDisposable
         public long SniRecoveredCount;
         public long KillSwitchBlockedCount;
         public long Ipv6BlockedCount;
+        public string? LastEffectiveNodeName;
         public readonly object ConnLogLock = new();
         public readonly LinkedList<RecentConnectionEntry> RecentConnections = new();
     }
@@ -96,7 +97,7 @@ public sealed class MixedProxyServer : IDisposable
             {
                 var neededL2Ids = seats
                     .Where(s => s.Enabled)
-                    .SelectMany(s => new[] { s.BoundNodeId, s.RelayNodeId })
+                    .SelectMany(s => new[] { s.BoundNodeId, s.RelayNodeId, s.FallbackNodeId })
                     .Where(id => !string.IsNullOrWhiteSpace(id))
                     .ToHashSet(StringComparer.Ordinal);
                 var neededL2Nodes = _nodes
@@ -136,6 +137,7 @@ public sealed class MixedProxyServer : IDisposable
                 AppName = st.Seat.Name,
                 LocalPort = st.Listener?.LocalEndpoint is IPEndPoint ep ? ep.Port : st.Seat.LocalPort,
                 BoundNodeName = bound?.Name ?? "未绑定线路",
+                EffectiveNodeName = st.LastEffectiveNodeName,
                 ExitIp = bound?.ExitIp ?? "—",
                 ActiveConnections = Interlocked.Read(ref st.ActiveConnections),
                 TotalConnections = Interlocked.Read(ref st.TotalConnections),
@@ -686,12 +688,17 @@ public sealed class MixedProxyServer : IDisposable
                 ? null
                 : _nodes.FirstOrDefault(n => n.Id == seat.RelayNodeId && n.Enabled);
             var primary = _nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId && n.Enabled);
+            var explicitFallback = !string.IsNullOrWhiteSpace(seat.FallbackNodeId)
+                ? _nodes.FirstOrDefault(n => n.Id == seat.FallbackNodeId && n.Enabled)
+                : null;
             candidateNodes = new List<ProxyNode>();
             if (primary != null) candidateNodes.Add(primary);
+            if (explicitFallback != null && candidateNodes.All(x => x.Id != explicitFallback.Id))
+                candidateNodes.Add(explicitFallback);
             if (seat.AllowSameGroupFailover && primary != null)
             {
                 candidateNodes.AddRange(_nodes.Where(n =>
-                    n.Id != primary.Id &&
+                    candidateNodes.All(x => x.Id != n.Id) &&
                     n.Enabled &&
                     n.Group == primary.Group &&
                     n.Status != "offline"));
@@ -707,11 +714,14 @@ public sealed class MixedProxyServer : IDisposable
                 return new DialResult(null, "熔断锁阻断 (无可用线路)", "KILLSWITCH");
             }
             var phy = await _connector.ConnectDirectPhysicalAsync(targetHost, targetPort, iso, ct);
+            st.LastEffectiveNodeName = "物理网卡直出";
             return new DialResult(phy, "物理网卡直出", "OK");
         }
 
         bool sawUnapprovedTls = false;
-        foreach (var node in candidateNodes)
+        var boundedCandidates = candidateNodes.Take(3).ToList();
+        bool hasBackup = boundedCandidates.Count > 1;
+        foreach (var node in boundedCandidates)
         {
             if (node.AllowInsecure && !node.InsecureApproved)
             {
@@ -720,17 +730,26 @@ public sealed class MixedProxyServer : IDisposable
             }
             try
             {
+                using var candidateCts = hasBackup
+                    ? CancellationTokenSource.CreateLinkedTokenSource(ct)
+                    : null;
+                candidateCts?.CancelAfter(TimeSpan.FromSeconds(6));
+                CancellationToken dialCt = candidateCts?.Token ?? ct;
+
                 if (relayNode != null && relayNode.Id != node.Id)
                 {
-                    var chainStream = await _connector.ConnectChainAsync(relayNode, node, targetHost, targetPort, iso, ct);
-                    return new DialResult(chainStream, $"{relayNode.Name} → {node.Name}", "OK");
+                    var chainStream = await _connector.ConnectChainAsync(relayNode, node, targetHost, targetPort, iso, dialCt);
+                    st.LastEffectiveNodeName = $"{relayNode.Name} → {node.Name}";
+                    return new DialResult(chainStream, st.LastEffectiveNodeName, "OK");
                 }
-                var stream = await _connector.ConnectViaNodeAsync(node, targetHost, targetPort, iso, ct);
+                var stream = await _connector.ConnectViaNodeAsync(node, targetHost, targetPort, iso, dialCt);
+                st.LastEffectiveNodeName = node.Name;
                 return new DialResult(stream, node.Name, "OK");
             }
             catch
             {
-                // 尝试同组下一备用节点
+                if (ct.IsCancellationRequested) break;
+                // 尝试显式备用或同组下一备用节点
             }
         }
 

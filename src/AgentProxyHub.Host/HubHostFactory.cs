@@ -1,5 +1,7 @@
 using System.Diagnostics;
+using System.Net.WebSockets;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgentProxyHub.Core.Apps;
@@ -61,7 +63,8 @@ public static class HubHostFactory
         bool? AcknowledgeDrift = null,
         bool? IsHidden = null,
         bool? IsPinned = null,
-        int? SortOrder = null);
+        int? SortOrder = null,
+        string? FallbackNodeId = null);
 
     public sealed record ReorderSeatsRequest(List<string> OrderedSeatIds);
 
@@ -116,7 +119,9 @@ public static class HubHostFactory
         bool? DirectPhysicalDohEnabled,
         string? DohServerIp,
         bool? GlobalKillSwitch,
-        bool? EnableIpv6);
+        bool? EnableIpv6,
+        bool? AutoHealthCheckEnabled = null,
+        int? AutoHealthCheckMinutes = null);
 
     public sealed record PricingUpsertRequest(
         string Pattern,
@@ -152,6 +157,7 @@ public static class HubHostFactory
         var takeoverService = new AppProxyTakeoverService();
         var instanceManager = new AppInstanceManager(store, takeoverService);
         var webDavSync = new WebDavSyncService();
+        var maintenanceService = new StorageMaintenanceService();
 
         // 支持仅用于截图/UI验收的隔离端口模式，避免与已运行实例的端口冲突
         int? verifyPort = ParseVerifyPort(args);
@@ -192,11 +198,22 @@ public static class HubHostFactory
         builder.Services.AddSingleton(takeoverService);
         builder.Services.AddSingleton(instanceManager);
         builder.Services.AddSingleton(webDavSync);
+        builder.Services.AddSingleton(maintenanceService);
 
         var app = builder.Build();
+        app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
         var stateLock = new object();
         var subRefreshGate = new SemaphoreSlim(1, 1);
-        HubEventLogger.Default.Info("SYSTEM", $"Agent Proxy Hub v{ProjectMetadata.Version} 核心初始化完成（VerifyOnly={isVerifyOnly}）");
+        long stateRevision = 0;
+        int manualVerifyRunning = 0;
+        var wsJsonOpts = new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            Converters = { new JsonStringEnumConverter() }
+        };
+        HubEventLogger.Default.Info(
+            "SYSTEM",
+            $"Agent Proxy Hub v{ProjectMetadata.Version} 核心初始化完成（VerifyOnly={isVerifyOnly} · 网卡={nicManager.GetLockedAdapter()?.Name ?? "未锁定"} · 启用席位={doc.Seats.Count(s => s.Enabled)}/{doc.Seats.Count}）");
 
         // 本地环回安全守卫：拦截 DNS Rebinding 非法 Host 头与外部网页跨站写请求 (CSRF)
         app.Use(async (ctx, next) =>
@@ -204,7 +221,9 @@ public static class HubHostFactory
             string? hostHdr = ctx.Request.Headers.Host.FirstOrDefault();
             string? originHdr = ctx.Request.Headers.Origin.FirstOrDefault();
             string path = ctx.Request.Path.Value ?? "/";
-            if (!LoopbackSecurityGuard.IsAllowedRequest(hostHdr, ctx.Request.Method, originHdr, path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)))
+            bool isProtectedRoute = path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase)
+                || path.StartsWith("/ws/", StringComparison.OrdinalIgnoreCase);
+            if (!LoopbackSecurityGuard.IsAllowedRequest(hostHdr, ctx.Request.Method, originHdr, isProtectedRoute))
             {
                 ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
                 await ctx.Response.WriteAsJsonAsync(new { message = "Forbidden: loopback origin/host validation failed" });
@@ -213,10 +232,65 @@ public static class HubHostFactory
             await next();
         });
 
+        object BuildOverviewPayload()
+        {
+            IsolationSettings isoSnap;
+            List<AppSeat> orderedSeats;
+            List<ManagedAppInstance> instSnap;
+            HubUiPreferences prefSnap;
+            List<ProxyNode> redactedNodes;
+            List<SubscriptionPublicDto> subDtos;
+
+            lock (stateLock)
+            {
+                isoSnap = doc.Isolation;
+                orderedSeats = doc.Seats
+                    .OrderBy(s => s.IsPinned ? 0 : 1)
+                    .ThenBy(s => s.SortOrder)
+                    .ToList();
+                instSnap = doc.Instances.ToList();
+                prefSnap = doc.Preferences.ToRedactedCopy();
+                redactedNodes = doc.Nodes.Select(n => n.ToRedactedCopy()).ToList();
+                subDtos = (doc.Subscriptions ?? []).Select(s => s.ToPublicDto()).ToList();
+            }
+
+            // 锁外采集网卡、进程接管和流量快照，防止 IO/OS 枚举阻塞写操作或状态锁排队
+            var lockedNic = nicManager.GetLockedAdapter();
+            var traffic = proxyServer.GetTrafficSnapshots();
+            var adapters = nicManager.GetAdapters();
+            var excludedVirtuals = adapters.Where(a => a.IsVirtualOrTunnel && a.Status == "Up").ToList();
+            var cliSnippets = AppSeatManager.BuildCliSnippets(
+                orderedSeats.FirstOrDefault(s => s.Id == "claude"),
+                orderedSeats.FirstOrDefault(s => s.Id == "agy"));
+            var seatTakeovers = takeoverService.InspectAll(orderedSeats);
+
+            return new
+            {
+                project = ProjectMetadata.ToDto(),
+                os = OperatingSystem.IsMacOS() ? "mac" : "win",
+                arch = RuntimeInformation.OSArchitecture.ToString(),
+                memoryMb = Math.Round(Process.GetCurrentProcess().WorkingSet64 / 1024.0 / 1024.0, 1),
+                lockedNic,
+                hasDetectedTunnel = nicManager.HasDetectedClashOrTunnel,
+                excludedVirtualNics = excludedVirtuals,
+                isolation = isoSnap,
+                seats = orderedSeats,
+                instances = instSnap,
+                preferences = prefSnap,
+                nodes = redactedNodes,
+                subscriptions = subDtos,
+                trafficSnapshots = traffic,
+                seatTakeovers,
+                sidecarEngine = sidecar.GetStatus(),
+                cliSnippets
+            };
+        }
+
         // 后台每 5 秒自动增量同步一次本地 AI 会话日志，新产生对话 5 秒内自动呈现在大盘中
         var stoppingToken = app.Lifetime.ApplicationStopping;
         stoppingToken.Register(() =>
         {
+            try { proxyServer.Dispose(); } catch { }
             try { sidecar.Dispose(); } catch { }
         });
         _ = Task.Run(async () =>
@@ -276,48 +350,77 @@ public static class HubHostFactory
             });
         }
 
-        // 1. 总览与实时隔离状态
-        app.MapGet("/api/overview", () =>
-        {
-            lock (stateLock)
-            {
-                var lockedNic = nicManager.GetLockedAdapter();
-                var traffic = proxyServer.GetTrafficSnapshots();
-                var adapters = nicManager.GetAdapters();
-                var excludedVirtuals = adapters.Where(a => a.IsVirtualOrTunnel && a.Status == "Up").ToList();
-                var cliSnippets = AppSeatManager.BuildCliSnippets(
-                    doc.Seats.FirstOrDefault(s => s.Id == "claude"),
-                    doc.Seats.FirstOrDefault(s => s.Id == "agy"));
-                var orderedSeats = doc.Seats
-                    .OrderBy(s => s.IsPinned ? 0 : 1)
-                    .ThenBy(s => s.SortOrder)
-                    .ToList();
-                var seatTakeovers = takeoverService.InspectAll(orderedSeats);
-                var redactedNodes = doc.Nodes.Select(n => n.ToRedactedCopy()).ToList();
-                var subDtos = (doc.Subscriptions ?? []).Select(s => s.ToPublicDto()).ToList();
+        // 0. 零开销启动探活 + 本地 WebSocket 实时状态推送 (/ws/events)
+        app.MapGet("/api/health", () => Results.Ok(new { ok = true, version = ProjectMetadata.Version }));
 
-                return Results.Ok(new
+        app.MapGet("/ws/events", async (HttpContext ctx) =>
+        {
+            if (!ctx.WebSockets.IsWebSocketRequest)
+            {
+                ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted, stoppingToken);
+            var ct = linkedCts.Token;
+
+            // 持续读取对端控制帧以响应客户端主动 Close 握手，防止断连挂起
+            var recvTask = Task.Run(async () =>
+            {
+                var recvBuf = new byte[1024];
+                try
                 {
-                    project = ProjectMetadata.ToDto(),
-                    os = OperatingSystem.IsMacOS() ? "mac" : "win",
-                    arch = RuntimeInformation.OSArchitecture.ToString(),
-                    memoryMb = Math.Round(Process.GetCurrentProcess().WorkingSet64 / 1024.0 / 1024.0, 1),
-                    lockedNic,
-                    hasDetectedTunnel = nicManager.HasDetectedClashOrTunnel,
-                    excludedVirtualNics = excludedVirtuals,
-                    isolation = doc.Isolation,
-                    seats = orderedSeats,
-                    instances = doc.Instances,
-                    preferences = doc.Preferences.ToRedactedCopy(),
-                    nodes = redactedNodes,
-                    subscriptions = subDtos,
-                    trafficSnapshots = traffic,
-                    seatTakeovers,
-                    sidecarEngine = sidecar.GetStatus(),
-                    cliSnippets
-                });
+                    while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
+                    {
+                        var recv = await ws.ReceiveAsync(recvBuf, ct);
+                        if (recv.MessageType == WebSocketMessageType.Close)
+                        {
+                            linkedCts.Cancel();
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            }, CancellationToken.None);
+
+            try
+            {
+                long lastSentRev = -1;
+                while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
+                {
+                    long curRev = Interlocked.Read(ref stateRevision);
+                    var msg = new { type = "overview", revision = curRev, data = BuildOverviewPayload() };
+                    byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(msg, wsJsonOpts);
+                    await ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+                    lastSentRev = curRev;
+
+                    // 1.5s 周期推送实时速率；若期间配置变更（revision 跃升）则提前唤醒推送
+                    for (int step = 0; step < 6 && !ct.IsCancellationRequested; step++)
+                    {
+                        await Task.Delay(250, ct);
+                        if (Interlocked.Read(ref stateRevision) != lastSentRev) break;
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (WebSocketException) { }
+            finally
+            {
+                if (ws.State == WebSocketState.CloseReceived)
+                {
+                    try { await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "ack", CancellationToken.None); } catch { }
+                }
+                else if (ws.State == WebSocketState.Open)
+                {
+                    try { await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "closed", CancellationToken.None); } catch { }
+                }
+                try { await recvTask; } catch { }
             }
         });
+
+        // 1. 总览与实时隔离状态
+        app.MapGet("/api/overview", () => Results.Ok(BuildOverviewPayload()));
 
         // 2. 线路池：查询、手动添加、批量预览、批量导入、删除、风险审批、验真
         app.MapGet("/api/nodes", () =>
@@ -522,6 +625,87 @@ public static class HubHostFactory
             catch (OperationCanceledException) { }
         }, stoppingToken);
 
+        // 每 N 分钟（默认 5 分钟）后台无感自动线路健康巡检：避开首屏峰值与用户手动验真，最多探测 16 条优先级最高节点
+        if (!isVerifyOnly)
+        {
+            _ = Task.Run(async () =>
+            {
+                DateTimeOffset lastPatrolUtc = DateTimeOffset.MinValue;
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(20), stoppingToken);
+                    using var patrolTicker = new PeriodicTimer(TimeSpan.FromSeconds(30));
+                    while (true)
+                    {
+                        bool enabled;
+                        int intervalMin;
+                        List<ProxyNode> targets = [];
+                        IsolationSettings iso;
+                        string? lockedNicName;
+
+                        lock (stateLock)
+                        {
+                            enabled = doc.Isolation.AutoHealthCheckEnabled;
+                            intervalMin = Math.Clamp(doc.Isolation.AutoHealthCheckMinutes, 1, 60);
+                            iso = doc.Isolation;
+                        }
+
+                        var nowUtc = DateTimeOffset.UtcNow;
+                        if (enabled
+                            && Volatile.Read(ref manualVerifyRunning) == 0
+                            && (lastPatrolUtc == DateTimeOffset.MinValue || (nowUtc - lastPatrolUtc).TotalMinutes >= intervalMin))
+                        {
+                            lock (stateLock)
+                            {
+                                var priorityIds = doc.Seats
+                                    .Where(s => s.Enabled)
+                                    .SelectMany(s => new[] { s.BoundNodeId, s.FallbackNodeId, s.RelayNodeId })
+                                    .Where(id => !string.IsNullOrWhiteSpace(id))
+                                    .ToHashSet(StringComparer.Ordinal);
+
+                                var priorityNodes = doc.Nodes
+                                    .Where(n => priorityIds.Contains(n.Id) && n.Protocol != ProxyProtocol.DIRECT_PHYSICAL && n.Enabled)
+                                    .ToList();
+                                var fillNodes = doc.Nodes
+                                    .Where(n => !priorityIds.Contains(n.Id) && n.Protocol != ProxyProtocol.DIRECT_PHYSICAL && n.Enabled)
+                                    .OrderBy(n => n.LastCheckedAt ?? DateTimeOffset.MinValue)
+                                    .Take(Math.Max(0, 16 - priorityNodes.Count))
+                                    .ToList();
+
+                                targets = priorityNodes.Concat(fillNodes).Take(16).ToList();
+                            }
+
+                            lockedNicName = nicManager.GetLockedAdapter()?.Name;
+                            lastPatrolUtc = DateTimeOffset.UtcNow;
+
+                            if (targets.Count > 0)
+                            {
+                                var (checkedCount, onlineCount, offlineCount) =
+                                    await healthChecker.RunSilentPatrolAsync(targets, iso, lockedNicName, stoppingToken);
+
+                                if (checkedCount > 0)
+                                {
+                                    lock (stateLock) store.Save(doc);
+                                    Interlocked.Increment(ref stateRevision);
+                                    HubEventLogger.Default.Info(
+                                        "VERIFY",
+                                        $"后台每 {intervalMin} 分钟无感自动验真完成：共检测 {checkedCount} 条（在线 {onlineCount} / 离线 {offlineCount}）");
+                                }
+                            }
+                        }
+
+                        if (!await patrolTicker.WaitForNextTickAsync(stoppingToken))
+                            break;
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch
+                {
+                    // 自动巡检绝不影响核心代理守护循环
+                }
+            }, stoppingToken);
+        }
+
         app.MapPost("/api/nodes/fetch-subscription", async (SubscriptionFetchRequest req, CancellationToken ct) =>
         {
             if (string.IsNullOrWhiteSpace(req.Url) ||
@@ -719,8 +903,11 @@ public static class HubHostFactory
                         seat.BoundNodeId = doc.Nodes.FirstOrDefault()?.Id;
                     if (seat.RelayNodeId == id)
                         seat.RelayNodeId = null;
+                    if (seat.FallbackNodeId == id)
+                        seat.FallbackNodeId = null;
                 }
                 store.Save(doc);
+                Interlocked.Increment(ref stateRevision);
                 if (!isVerifyOnly)
                     proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 return Results.Ok(new { removed });
@@ -747,11 +934,20 @@ public static class HubHostFactory
                 target.AiReachability = ["物理直出通道"];
                 target.LastCheckedAt = DateTimeOffset.UtcNow;
                 lock (stateLock) store.Save(doc);
+                Interlocked.Increment(ref stateRevision);
+                HubEventLogger.Default.Info("VERIFY", $"节点「{target.Name}」直出验真完成：{target.ExitIp} (1 ms)");
                 return Results.Ok(target.ToRedactedCopy());
             }
 
-            await healthChecker.VerifyNodeAsync(target, iso, ct);
+            using var verifyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            verifyCts.CancelAfter(TimeSpan.FromSeconds(8));
+            await healthChecker.VerifyNodeAsync(target, iso, verifyCts.Token);
             lock (stateLock) store.Save(doc);
+            Interlocked.Increment(ref stateRevision);
+            if (target.Status == "online")
+                HubEventLogger.Default.Info("VERIFY", $"节点「{target.Name}」验真通过：{target.ExitIp} ({target.LatencyMs ?? 1} ms)");
+            else
+                HubEventLogger.Default.Warn("VERIFY", $"节点「{target.Name}」验真离线：{target.IspSummary}");
             return Results.Ok(target.ToRedactedCopy());
         });
 
@@ -767,6 +963,8 @@ public static class HubHostFactory
                 lockedNicName = nicManager.GetLockedAdapter()?.Name;
             }
 
+            Interlocked.Increment(ref manualVerifyRunning);
+            var verifiedSet = new System.Collections.Concurrent.ConcurrentDictionary<string, byte>(StringComparer.Ordinal);
             // 批量验真前一次性预热全部待测 L2 节点至 sing-box 并集桥，避免并发连环重启
             var l2Targets = targets.Where(n => n.RequiresSidecarEngine && (!n.AllowInsecure || n.InsecureApproved)).ToList();
             if (l2Targets.Count > 0 && sidecar.GetStatus().Installed)
@@ -776,22 +974,42 @@ public static class HubHostFactory
 
             try
             {
+                using var batchCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                batchCts.CancelAfter(TimeSpan.FromSeconds(22));
                 using var gate = new SemaphoreSlim(8, 8);
-                await Task.WhenAll(targets.Select(async n =>
+                try
                 {
-                    await gate.WaitAsync(ct);
-                    try
+                    await Task.WhenAll(targets.Select(async n =>
                     {
-                        await healthChecker.VerifyNodeAsync(n, iso, ct);
-                    }
-                    finally
+                        await gate.WaitAsync(batchCts.Token);
+                        try
+                        {
+                            await healthChecker.VerifyNodeAsync(n, iso, batchCts.Token);
+                            verifiedSet.TryAdd(n.Id, 1);
+                        }
+                        finally
+                        {
+                            gate.Release();
+                        }
+                    }));
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    // 全量 22s 硬超时触发时，将尚未测完的节点置为连接超时，确保接口必有响应且不无限挂起
+                    foreach (var pendingNode in targets.Where(t => !verifiedSet.ContainsKey(t.Id)))
                     {
-                        gate.Release();
+                        pendingNode.Status = "offline";
+                        pendingNode.LatencyMs = null;
+                        pendingNode.ExitIp = "—";
+                        pendingNode.IspSummary = "批量验真超时";
+                        pendingNode.AiReachability = new List<string> { "连接超时" };
+                        pendingNode.LastCheckedAt = DateTimeOffset.UtcNow;
                     }
-                }));
+                }
             }
             finally
             {
+                Interlocked.Decrement(ref manualVerifyRunning);
                 if (l2Targets.Count > 0)
                 {
                     sidecar.ReleaseEphemeralNodes(l2Targets.Select(n => n.Id));
@@ -799,6 +1017,9 @@ public static class HubHostFactory
             }
 
             lock (stateLock) store.Save(doc);
+            Interlocked.Increment(ref stateRevision);
+            int onlineCount = targets.Count(n => n.Status == "online");
+            HubEventLogger.Default.Info("VERIFY", $"全量线路验真完成：共 {targets.Count} 条，在线 {onlineCount} 条 / 离线 {targets.Count - onlineCount} 条");
             return Results.Ok(doc.Nodes.Select(n => n.ToRedactedCopy()).ToList());
         });
 
@@ -826,6 +1047,14 @@ public static class HubHostFactory
                         return Results.BadRequest(new { message = $"前置中转「{relayCand.Name}」跳过 TLS 证书校验尚未批准，请先批准风险。" });
                     }
                 }
+                if (!string.IsNullOrWhiteSpace(req.FallbackNodeId))
+                {
+                    var fbCand = doc.Nodes.FirstOrDefault(n => n.Id == req.FallbackNodeId);
+                    if (fbCand != null && fbCand.AllowInsecure && !fbCand.InsecureApproved)
+                    {
+                        return Results.BadRequest(new { message = $"备用容灾节点「{fbCand.Name}」跳过 TLS 证书校验尚未批准，请先批准风险。" });
+                    }
+                }
 
                 bool portChanged = req.LocalPort is >= 1024 and <= 65535 && req.LocalPort.Value != seat.LocalPort;
                 if (req.Enabled.HasValue) seat.Enabled = req.Enabled.Value;
@@ -837,6 +1066,7 @@ public static class HubHostFactory
                     seat.HasNodeDrift = false;
                 }
                 if (req.RelayNodeId != null) seat.RelayNodeId = string.IsNullOrWhiteSpace(req.RelayNodeId) ? null : req.RelayNodeId;
+                if (req.FallbackNodeId != null) seat.FallbackNodeId = string.IsNullOrWhiteSpace(req.FallbackNodeId) ? null : req.FallbackNodeId;
                 if (req.LocalPort is >= 1024 and <= 65535) seat.LocalPort = req.LocalPort.Value;
                 if (req.KillSwitchEnabled.HasValue) seat.KillSwitchEnabled = req.KillSwitchEnabled.Value;
                 if (req.AllowSameGroupFailover.HasValue) seat.AllowSameGroupFailover = req.AllowSameGroupFailover.Value;
@@ -859,7 +1089,9 @@ public static class HubHostFactory
                 if (req.IsPinned.HasValue) seat.IsPinned = req.IsPinned.Value;
                 if (req.SortOrder.HasValue) seat.SortOrder = req.SortOrder.Value;
 
+                takeoverService.InvalidateCache();
                 store.Save(doc);
+                Interlocked.Increment(ref stateRevision);
                 if (!isVerifyOnly)
                 {
                     proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
@@ -867,6 +1099,11 @@ public static class HubHostFactory
                     {
                         takeoverService.SetTakeover(seat, true);
                     }
+                }
+                if (req.Enabled.HasValue || req.BoundNodeId != null || req.FallbackNodeId != null || req.RelayNodeId != null)
+                {
+                    string boundName = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId)?.Name ?? "未绑定";
+                    HubEventLogger.Default.Info("PROXY", $"更新席位「{seat.Name}」(:{seat.LocalPort})：状态={(seat.Enabled ? "启用" : "暂停")} · 主线={boundName}");
                 }
                 return Results.Ok(seat);
             }
@@ -897,6 +1134,8 @@ public static class HubHostFactory
                 }
 
                 var (ok, message, status) = takeoverService.SetTakeover(seat, req.Enabled);
+                Interlocked.Increment(ref stateRevision);
+                HubEventLogger.Default.Info("PROXY", $"席位「{seat.Name}」{(req.Enabled ? "接管" : "还原")} -> {message}");
                 return Results.Ok(new
                 {
                     ok,
@@ -1020,7 +1259,13 @@ public static class HubHostFactory
             if (isVerifyOnly)
             {
                 if (boundNode != null && boundNode.Protocol != ProxyProtocol.DIRECT_PHYSICAL)
-                    await healthChecker.VerifyNodeAsync(boundNode, iso, ct);
+                {
+                    using var verifyCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    verifyCts.CancelAfter(TimeSpan.FromSeconds(8));
+                    await healthChecker.VerifyNodeAsync(boundNode, iso, verifyCts.Token);
+                }
+                Interlocked.Increment(ref stateRevision);
+                HubEventLogger.Default.Info("VERIFY", $"席位「{seat.Name}」预览直连验真完成：{boundNode?.ExitIp ?? "—"}");
                 return Results.Ok(new TunnelVerificationResult
                 {
                     Ok = boundNode?.Status == "online",
@@ -1033,7 +1278,9 @@ public static class HubHostFactory
                 });
             }
 
-            var res = await healthChecker.VerifyViaLocalSeatAsync(seat.Id, seat.LocalPort, boundNode, iso, null, ct);
+            using var tunnelCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            tunnelCts.CancelAfter(TimeSpan.FromSeconds(9));
+            var res = await healthChecker.VerifyViaLocalSeatAsync(seat.Id, seat.LocalPort, boundNode, iso, null, tunnelCts.Token);
             var snap = proxyServer.GetTrafficSnapshots().FirstOrDefault(s => s.SeatId == seat.Id);
             res.BytesTx = snap?.BytesTx ?? 0;
             res.BytesRx = snap?.BytesRx ?? 0;
@@ -1042,6 +1289,11 @@ public static class HubHostFactory
             {
                 store.Save(doc);
             }
+            Interlocked.Increment(ref stateRevision);
+            if (res.Ok)
+                HubEventLogger.Default.Info("VERIFY", $"{seat.Name} :{seat.LocalPort} {res.Message}");
+            else
+                HubEventLogger.Default.Warn("VERIFY", $"{seat.Name} :{seat.LocalPort} {res.Message}");
 
             return Results.Ok(res);
         });
@@ -1056,8 +1308,10 @@ public static class HubHostFactory
                 }
 
                 store.Save(doc);
+                Interlocked.Increment(ref stateRevision);
                 if (!isVerifyOnly)
                     proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
+                HubEventLogger.Default.Info("PROXY", req.Enabled ? "已一键开启全部 AI 席位独立端口" : "已一键暂停全部 AI 席位监听");
                 return Results.Ok(doc.Seats);
             }
         });
@@ -1241,11 +1495,15 @@ public static class HubHostFactory
                 if (!string.IsNullOrWhiteSpace(req.DohServerIp)) doc.Isolation.DohServerIp = req.DohServerIp.Trim();
                 if (req.GlobalKillSwitch.HasValue) doc.Isolation.GlobalKillSwitch = req.GlobalKillSwitch.Value;
                 if (req.EnableIpv6.HasValue) doc.Isolation.EnableIpv6 = req.EnableIpv6.Value;
+                if (req.AutoHealthCheckEnabled.HasValue) doc.Isolation.AutoHealthCheckEnabled = req.AutoHealthCheckEnabled.Value;
+                if (req.AutoHealthCheckMinutes.HasValue) doc.Isolation.AutoHealthCheckMinutes = Math.Clamp(req.AutoHealthCheckMinutes.Value, 1, 60);
 
                 nicManager.Refresh(doc.Isolation.LockedPhysicalNicId);
                 store.Save(doc);
+                Interlocked.Increment(ref stateRevision);
                 if (!isVerifyOnly)
                     proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
+                HubEventLogger.Default.Info("NIC", $"更新隔离策略（网卡={nicManager.GetLockedAdapter()?.Name ?? "未锁定"} · 自动巡检={(doc.Isolation.AutoHealthCheckEnabled ? $"{doc.Isolation.AutoHealthCheckMinutes}m" : "关闭")}）");
                 return Results.Ok(new
                 {
                     settings = doc.Isolation,
@@ -1600,6 +1858,22 @@ public static class HubHostFactory
             catch (Exception ex)
             {
                 return Results.Ok(new { opened = false, url = urlToOpen, error = ex.Message });
+            }
+        });
+
+        // 7. 本地配置存储体积统计与失效接管备份/临时文件安全清理
+        app.MapGet("/api/maintenance/stats", () => Results.Ok(maintenanceService.GetStorageStats()));
+
+        app.MapPost("/api/maintenance/cleanup", () =>
+        {
+            lock (stateLock)
+            {
+                takeoverService.InvalidateCache();
+                var takeovers = takeoverService.InspectAll(doc.Seats);
+                var activeIds = takeovers.Where(t => t.IsTakenOver).Select(t => t.SeatId).ToList();
+                var res = maintenanceService.CleanupRedundantFiles(activeIds);
+                HubEventLogger.Default.Info("MAINT", res.Message);
+                return Results.Ok(res);
             }
         });
 

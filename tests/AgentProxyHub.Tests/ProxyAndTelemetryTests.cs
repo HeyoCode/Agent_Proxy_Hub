@@ -1613,4 +1613,342 @@ public class ProxyAndTelemetryTests
             if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
         }
     }
+
+    [Fact]
+    public void TakeoverInspectAll_CachesSnapshotForFastOverview_And_InvalidatesOnChange()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"aph_cache_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            int procCalls = 0;
+            var svc = new AppProxyTakeoverService(tempRoot, tempRoot, tempRoot, _ =>
+            {
+                Interlocked.Increment(ref procCalls);
+                return false;
+            }, forceMacOs: false);
+
+            var seats = new HubStateStore(tempRoot).LoadOrCreateDefault().Seats;
+            var r1 = svc.InspectAll(seats);
+            int callsAfterFirst = procCalls;
+            var r2 = svc.InspectAll(seats);
+
+            Assert.Equal(21, r1.Count);
+            Assert.Equal(21, r2.Count);
+            Assert.Equal(callsAfterFirst, procCalls); // 第二次命中 2.5s 短缓存，零额外进程扫描
+
+            svc.InvalidateCache();
+            _ = svc.InspectAll(seats);
+            Assert.True(procCalls > callsAfterFirst);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
+
+    [Fact]
+    public async Task MixedProxyServer_FallbackNodeId_TakesOverWhenPrimaryDown_And_ReportsEffectiveNode()
+    {
+        using var echo = new TcpListener(IPAddress.Loopback, 0);
+        echo.Start();
+        int echoPort = ((IPEndPoint)echo.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                TcpClient c;
+                try { c = await echo.AcceptTcpClientAsync(); }
+                catch { break; }
+                _ = Task.Run(async () =>
+                {
+                    using (c)
+                    using (var s = c.GetStream())
+                    {
+                        var buf = new byte[128];
+                        int n = await s.ReadAsync(buf);
+                        if (n > 0) await s.WriteAsync(buf.AsMemory(0, n));
+                    }
+                });
+            }
+        });
+
+        using var fallbackSocks = new TcpListener(IPAddress.Loopback, 0);
+        fallbackSocks.Start();
+        int fbPort = ((IPEndPoint)fallbackSocks.LocalEndpoint).Port;
+        _ = Task.Run(async () =>
+        {
+            while (true)
+            {
+                TcpClient c;
+                try { c = await fallbackSocks.AcceptTcpClientAsync(); }
+                catch { break; }
+                _ = Task.Run(() => HandleMockSocks5Async(c, "fbU", "fbP"));
+            }
+        });
+
+        int deadPort = GetFreeTcpPort();
+        var nicMgr = new PhysicalNicManager();
+        var dns = new CleanDnsResolver(nicMgr);
+        var connector = new UpstreamConnector(nicMgr, dns);
+        using var server = new MixedProxyServer(connector);
+
+        var primaryDead = new ProxyNode { Id = "n-dead", Name = "PrimaryDead", Protocol = ProxyProtocol.SOCKS5, Host = "127.0.0.1", Port = deadPort, Enabled = true };
+        var fallbackOk = new ProxyNode { Id = "n-fb", Name = "FallbackHealthy", Protocol = ProxyProtocol.SOCKS5, Host = "127.0.0.1", Port = fbPort, Username = "fbU", Password = "fbP", Enabled = true };
+        int seatPort = GetFreeTcpPort();
+        var seat = new AppSeat
+        {
+            Id = "fb-seat",
+            Name = "FallbackApp",
+            LocalPort = seatPort,
+            BoundNodeId = primaryDead.Id,
+            FallbackNodeId = fallbackOk.Id,
+            Enabled = true,
+            KillSwitchEnabled = true,
+            AllowSameGroupFailover = false
+        };
+        server.UpdateTopology([seat], [primaryDead, fallbackOk], new IsolationSettings { GlobalKillSwitch = true });
+
+        using (var client = new TcpClient())
+        {
+            await client.ConnectAsync(IPAddress.Loopback, seatPort);
+            using var s = client.GetStream();
+            await s.WriteAsync(Encoding.ASCII.GetBytes($"CONNECT 127.0.0.1:{echoPort} HTTP/1.1\r\nHost: 127.0.0.1:{echoPort}\r\n\r\n"));
+            var respBuf = new byte[128];
+            int rn = await s.ReadAsync(respBuf);
+            Assert.Contains("200 Connection Established", Encoding.ASCII.GetString(respBuf, 0, rn));
+
+            await s.WriteAsync("fallback-echo-ok"u8.ToArray());
+            var back = new byte[64];
+            int bn = await s.ReadAsync(back);
+            Assert.Equal("fallback-echo-ok", Encoding.UTF8.GetString(back, 0, bn));
+        }
+
+        var snap = server.GetTrafficSnapshots().First(x => x.SeatId == "fb-seat");
+        Assert.Equal("PrimaryDead", snap.BoundNodeName);
+        Assert.Equal("FallbackHealthy", snap.EffectiveNodeName);
+        Assert.True(snap.BytesTx > 0 && snap.BytesRx > 0);
+    }
+
+    [Fact]
+    public void StorageMaintenanceService_CleansUnusedTempAndBackups_PreservingStateAndActiveBackups()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"aph_maint_{Guid.NewGuid():N}");
+        string hubDir = Path.Combine(tempRoot, ".agent-proxy-hub");
+        string bakDir = Path.Combine(hubDir, "takeover-backups");
+        Directory.CreateDirectory(bakDir);
+
+        try
+        {
+            string stateFile = Path.Combine(hubDir, "state.json");
+            File.WriteAllText(stateFile, "{}");
+            string staleTmp = Path.Combine(hubDir, "state.json.tmp");
+            File.WriteAllText(staleTmp, "partial");
+            string activeBak = Path.Combine(bakDir, "windsurf.json.bak");
+            File.WriteAllText(activeBak, "keep");
+            string unusedBak = Path.Combine(bakDir, "zed.json.bak");
+            File.WriteAllText(unusedBak, "stale-backup-payload");
+
+            var maint = new StorageMaintenanceService(tempRoot);
+            var before = maint.GetStorageStats();
+            Assert.Equal(2, before.TakeoverBackupCount);
+            Assert.Equal(1, before.TempFileCount);
+
+            var res = maint.CleanupRedundantFiles(["windsurf"]);
+            Assert.Equal(2, res.RemovedFiles);
+            Assert.True(File.Exists(stateFile));
+            Assert.True(File.Exists(activeBak));
+            Assert.False(File.Exists(staleTmp));
+            Assert.False(File.Exists(unusedBak));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
+
+    private sealed class MockOverviewHttpHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string body = request.RequestUri?.AbsolutePath switch
+            {
+                "/api/overview" => """
+                    {"project":{"version":"0.7.0"},"os":"win","memoryMb":42.5,"lockedNic":{"name":"以太网","iPv4Address":"192.168.5.16"},"nodes":[{"id":"n1"}],"seats":[{"id":"claude","localPort":17891,"enabled":true,"boundNodeId":"n1","fallbackNodeId":"n2"}]}
+                    """,
+                _ => "{}"
+            };
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            });
+        }
+    }
+
+    [Fact]
+    public async Task AphCliRunner_FormatsStatusAndSeatsJsonCorrectly()
+    {
+        using var mockHttp = new HttpClient(new MockOverviewHttpHandler());
+        using var swOut = new StringWriter();
+        using var swErr = new StringWriter();
+
+        int codeStatus = await AgentProxyHub.Cli.AphCliRunner.RunAsync(["status", "--json", "--port", "17899"], swOut, swErr, mockHttp);
+        Assert.Equal(0, codeStatus);
+        string statusOut = swOut.ToString();
+        Assert.Contains("\"version\": \"0.7.0\"", statusOut);
+        Assert.Contains("\"activeSeats\": 1", statusOut);
+
+        using var swSeats = new StringWriter();
+        int codeSeats = await AgentProxyHub.Cli.AphCliRunner.RunAsync(["seats"], swSeats, swErr, mockHttp);
+        Assert.Equal(0, codeSeats);
+        Assert.Contains("claude", swSeats.ToString());
+        Assert.Contains("fallback=n2", swSeats.ToString());
+    }
+
+    [Fact]
+    public async Task HubWebSocket_LoopbackEndpoint_StreamsOverviewSnapshot()
+    {
+        int port = GetFreeTcpPort();
+        var app = AgentProxyHub.Host.HubHostFactory.BuildApp([$"--verify-port={port}"]);
+        await app.StartAsync();
+        try
+        {
+            using var ws = new System.Net.WebSockets.ClientWebSocket();
+            ws.Options.Proxy = new WebProxy(); // 绕过运行环境中可能继承的 HTTP_PROXY
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await ws.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/ws/events"), cts.Token);
+
+            var buf = new byte[65536];
+            var ms = new MemoryStream();
+            System.Net.WebSockets.WebSocketReceiveResult result;
+            do
+            {
+                result = await ws.ReceiveAsync(buf, cts.Token);
+                ms.Write(buf, 0, result.Count);
+            }
+            while (!result.EndOfMessage);
+
+            string payload = Encoding.UTF8.GetString(ms.ToArray());
+            var node = JsonNode.Parse(payload)?.AsObject();
+            Assert.NotNull(node);
+            Assert.Equal("overview", node!["type"]?.GetValue<string>());
+            Assert.Equal("0.7.0", node["data"]?["project"]?["version"]?.GetValue<string>());
+            Assert.Equal(21, node["data"]?["seats"]?.AsArray().Count);
+
+            await ws.CloseAsync(System.Net.WebSockets.WebSocketCloseStatus.NormalClosure, "done", cts.Token);
+        }
+        finally
+        {
+            using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+            try { await app.StopAsync(stopCts.Token); } catch { }
+            await app.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public void HubEventLogger_PreloadsRecentEntriesFromDailyLogFileOnStartup()
+    {
+        string tempLogDir = Path.Combine(Path.GetTempPath(), $"aph_log_preload_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempLogDir);
+        try
+        {
+            string logPath = Path.Combine(tempLogDir, $"hub-{DateTime.Now:yyyyMMdd}.log");
+            File.WriteAllLines(logPath,
+            [
+                "2026-11-28 02:10:00.123 +08:00 [INFO] [SYSTEM] 历史启动事件一",
+                "2026-11-28 02:11:00.456 +08:00 [WARN] [GUARD] Bearer secret-xyz 已脱敏测试"
+            ]);
+
+            var logger = new AgentProxyHub.Core.Diagnostics.HubEventLogger(tempLogDir);
+            var list = logger.Query(limit: 20);
+            Assert.Equal(2, list.Count);
+            Assert.Equal("GUARD", list[0].Category);
+            Assert.Contains("Bearer [REDACTED]", list[0].Message);
+            Assert.Equal("SYSTEM", list[1].Category);
+            Assert.Equal("历史启动事件一", list[1].Message);
+        }
+        finally
+        {
+            if (Directory.Exists(tempLogDir)) Directory.Delete(tempLogDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task NodeHealthChecker_VerifyNode_EnforcesHardTimeoutWhenUpstreamHangs()
+    {
+        using var blackholeListener = new TcpListener(IPAddress.Loopback, 0);
+        blackholeListener.Start();
+        int port = ((IPEndPoint)blackholeListener.LocalEndpoint).Port;
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        _ = Task.Run(async () =>
+        {
+            var heldSockets = new List<Socket>();
+            try
+            {
+                while (!cts.IsCancellationRequested)
+                {
+                    var sock = await blackholeListener.AcceptSocketAsync(cts.Token);
+                    heldSockets.Add(sock);
+                }
+            }
+            catch { }
+            finally
+            {
+                foreach (var s in heldSockets) { try { s.Dispose(); } catch { } }
+            }
+        }, cts.Token);
+
+        var nic = new PhysicalNicManager();
+        var dns = new CleanDnsResolver(nic);
+        var connector = new UpstreamConnector(nic, dns);
+        var checker = new NodeHealthChecker(connector);
+        var deadNode = new ProxyNode
+        {
+            Id = "hang-node",
+            Name = "BlackholeUpstream",
+            Protocol = ProxyProtocol.SOCKS5,
+            Host = "127.0.0.1",
+            Port = port
+        };
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var res = await checker.VerifyNodeAsync(deadNode, new IsolationSettings { EnableIpv6 = false });
+        sw.Stop();
+
+        Assert.Equal("offline", res.Status);
+        Assert.InRange(sw.ElapsedMilliseconds, 100, 7500);
+        Assert.NotNull(res.LastCheckedAt);
+    }
+
+    [Fact]
+    public async Task NodeHealthChecker_RunSilentPatrolAsync_ChecksNodesWithBoundedConcurrency()
+    {
+        int port = GetFreeTcpPort();
+        var nic = new PhysicalNicManager();
+        var dns = new CleanDnsResolver(nic);
+        var connector = new UpstreamConnector(nic, dns);
+        var checker = new NodeHealthChecker(connector);
+
+        var nodes = new List<ProxyNode>
+        {
+            new() { Id = "phy", Name = "Direct", Protocol = ProxyProtocol.DIRECT_PHYSICAL, Host = "127.0.0.1", Port = 0, Enabled = true },
+            new() { Id = "dis", Name = "Disabled", Protocol = ProxyProtocol.SOCKS5, Host = "127.0.0.1", Port = port, Enabled = false },
+            new() { Id = "n1", Name = "Closed1", Protocol = ProxyProtocol.SOCKS5, Host = "127.0.0.1", Port = port, Enabled = true },
+            new() { Id = "n2", Name = "Closed2", Protocol = ProxyProtocol.SOCKS5, Host = "127.0.0.1", Port = port, Enabled = true }
+        };
+
+        var (checkedCount, onlineCount, offlineCount) = await checker.RunSilentPatrolAsync(
+            nodes,
+            new IsolationSettings { EnableIpv6 = false },
+            null);
+
+        Assert.Equal(2, checkedCount);
+        Assert.Equal(0, onlineCount);
+        Assert.Equal(2, offlineCount);
+        Assert.Equal("offline", nodes[2].Status);
+        Assert.Equal("offline", nodes[3].Status);
+        Assert.Equal("unverified", nodes[0].Status);
+        Assert.Equal("unverified", nodes[1].Status);
+    }
 }

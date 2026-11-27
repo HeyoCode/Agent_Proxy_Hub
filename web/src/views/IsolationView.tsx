@@ -1,5 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { HubUiPreferences, IsolationSettings, NetworkAdapterInfo, SidecarEngineStatus, api } from '../api';
+import {
+  HubUiPreferences,
+  IsolationSettings,
+  NetworkAdapterInfo,
+  SidecarEngineStatus,
+  StorageStatsDto,
+  api,
+  formatBytes
+} from '../api';
 import { RefreshSpinIcon } from '../components/Icons';
 import { sendWindowCommand } from '../windowBridge';
 
@@ -29,9 +37,15 @@ export const IsolationView: React.FC<Props> = ({ onReloadOverview, onToast }) =>
   const [wdPass, setWdPass] = useState('');
   const [wdPhrase, setWdPhrase] = useState('');
   const [wdBusy, setWdBusy] = useState(false);
+  const [storageStats, setStorageStats] = useState<StorageStatsDto | null>(null);
+  const [cleaningStorage, setCleaningStorage] = useState(false);
 
   async function load() {
-    const [res, prefRes] = await Promise.all([api.getIsolation(), api.getPreferences()]);
+    const [res, prefRes, stRes] = await Promise.all([
+      api.getIsolation(),
+      api.getPreferences(),
+      api.getMaintenanceStats()
+    ]);
     setSettings(res.settings);
     setAdapters(res.adapters);
     if (res.sidecarEngine) setSidecar(res.sidecarEngine);
@@ -39,6 +53,19 @@ export const IsolationView: React.FC<Props> = ({ onReloadOverview, onToast }) =>
     setPrefs(prefRes);
     setWdUrl(prefRes.webDavUrl ?? '');
     setWdUser(prefRes.webDavUsername ?? '');
+    setStorageStats(stRes);
+  }
+
+  async function handleCleanupStorage() {
+    if (cleaningStorage) return;
+    setCleaningStorage(true);
+    try {
+      const res = await api.cleanupMaintenance();
+      setStorageStats(res.stats);
+      onToast(res.message);
+    } finally {
+      setCleaningStorage(false);
+    }
   }
 
   async function handleImportOfflineSingBox() {
@@ -559,6 +586,57 @@ export const IsolationView: React.FC<Props> = ({ onReloadOverview, onToast }) =>
               <button type="button" className="btn-pill btn-indigo btn-sm" disabled={wdBusy} onClick={handlePushWebDav}>AES-GCM 加密上传</button>
               <button type="button" className="btn-pill btn-soft btn-sm" disabled={wdBusy} onClick={handlePullWebDav}>拉取解密恢复</button>
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 本地存储维护与 aph CLI 命令行自动化 */}
+      <div className="surface-card surface-card-pad" style={{ gridColumn: 'span 2' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+          <div>
+            <div className="card-title-sm">本地存储维护 &amp; 独立命令行工具 (<span className="mono">aph</span>)</div>
+            <div className="card-subtitle-sm">
+              一键安全清理失效接管备份与临时缓存文件（绝对保留 <span className="mono">state.json / vault.key</span> 与多开数据），并通过 <span className="mono">aph</span> 脚本自动化控制本网关
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn-pill btn-indigo btn-sm"
+            disabled={cleaningStorage}
+            onClick={handleCleanupStorage}
+          >
+            {cleaningStorage ? '清理中...' : '安全清理失效备份与临时文件'}
+          </button>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 18 }}>
+          <div style={{ background: 'var(--bg-subtle)', borderRadius: 12, padding: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+              <span style={{ color: 'var(--text-muted)' }}>配置根目录</span>
+              <span className="mono" style={{ fontSize: 11 }}>{storageStats?.hubDir ?? '~/.agent-proxy-hub'}</span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginTop: 4 }}>
+              <div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>总占用</div>
+                <div className="num" style={{ fontWeight: 700, fontSize: 13 }}>{formatBytes(storageStats?.totalBytes ?? 0)}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>备份文件</div>
+                <div className="num" style={{ fontWeight: 700, fontSize: 13 }}>{storageStats?.takeoverBackupCount ?? 0}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>临时残片</div>
+                <div className="num" style={{ fontWeight: 700, fontSize: 13 }}>{storageStats?.tempFileCount ?? 0}</div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10.5, color: 'var(--text-muted)' }}>多开目录</div>
+                <div className="num" style={{ fontWeight: 700, fontSize: 13 }}>{storageStats?.profileCount ?? 0}</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="code-surface" style={{ fontSize: 11.5, padding: '10px 14px' }}>
+            {`# aph 自动化命令行工具（支持 --json 输出，自动绕过外部系统代理）\naph status --json\naph bind cursor <nodeId> --fallback <backupNodeId>\naph takeover windsurf on && aph verify --all`}
           </div>
         </div>
       </div>

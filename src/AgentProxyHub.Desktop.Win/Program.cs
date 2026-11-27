@@ -47,9 +47,23 @@ internal static class Program
         _activateSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ActivateEventName);
         _shutdownSignal = new EventWaitHandle(false, EventResetMode.AutoReset, ShutdownEventName);
 
-        // 在桌面端同进程后台拉起跨平台核心代理与本地 API 服务 (127.0.0.1:17880)
-        var webApp = AgentProxyHub.Host.HubHostFactory.BuildApp(hostArgs);
-        _ = webApp.RunAsync();
+        // 桌面壳立即创建窗口，跨平台核心代理与本地 API 在后台线程并行初始化与端口绑定，消除启动阻塞黑屏
+        Microsoft.AspNetCore.Builder.WebApplication? webApp = null;
+        var hostReadyGate = new ManualResetEventSlim(false);
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                var built = AgentProxyHub.Host.HubHostFactory.BuildApp(hostArgs);
+                webApp = built;
+                hostReadyGate.Set();
+                built.Run();
+            }
+            catch
+            {
+                hostReadyGate.Set();
+            }
+        });
 
         var mainForm = new MainForm("http://127.0.0.1:17880/", startMinimized);
         _activateWaitHandle = ThreadPool.RegisterWaitForSingleObject(
@@ -96,7 +110,12 @@ internal static class Program
             try { _shutdownWaitHandle?.Unregister(null); } catch { }
             try { _activateSignal?.Dispose(); } catch { }
             try { _shutdownSignal?.Dispose(); } catch { }
-            try { webApp.StopAsync().GetAwaiter().GetResult(); } catch { }
+            try
+            {
+                hostReadyGate.Wait(TimeSpan.FromSeconds(2));
+                if (webApp != null) webApp.StopAsync().GetAwaiter().GetResult();
+            }
+            catch { }
             _singleInstanceMutex.ReleaseMutex();
             _singleInstanceMutex.Dispose();
         }
