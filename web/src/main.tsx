@@ -3,13 +3,18 @@ import ReactDOM from 'react-dom/client';
 import '@fontsource-variable/plus-jakarta-sans';
 import '@fontsource-variable/jetbrains-mono';
 import { App } from './App';
+import { FloatingMiniCard } from './components/FloatingMiniCard';
 import { TrayQuickPanel } from './components/TrayQuickPanel';
 import { applyResolvedTheme, loadThemePreference, resolveTheme } from './theme';
 import './styles/nordic-dashboard.css';
 
-const isTrayMode = new URLSearchParams(window.location.search).get('tray') === '1';
+const params = new URLSearchParams(window.location.search);
+const isTrayMode = params.get('tray') === '1';
+const isMiniMode = params.get('mini') === '1';
 if (isTrayMode) {
   document.documentElement.setAttribute('data-tray', '1');
+} else if (isMiniMode) {
+  document.documentElement.setAttribute('data-mini', '1');
 }
 
 // 启动即同步主题并监听系统深浅色与跨窗口偏好变更
@@ -25,6 +30,6 @@ window.addEventListener('storage', e => {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    {isTrayMode ? <TrayQuickPanel /> : <App />}
+    {isMiniMode ? <FloatingMiniCard /> : (isTrayMode ? <TrayQuickPanel /> : <App />)}
   </React.StrictMode>
 );

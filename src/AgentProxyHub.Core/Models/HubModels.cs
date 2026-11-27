@@ -178,6 +178,86 @@ public sealed class AppSeat
     /// 订阅刷新检测到对应节点已变更时置位，提醒用户确认
     /// </summary>
     public bool HasNodeDrift { get; set; }
+    public int SortOrder { get; set; }
+    public bool IsHidden { get; set; }
+    public bool IsPinned { get; set; }
+
+    [JsonIgnore]
+    public bool IsInstance => Id.Contains(":inst:", StringComparison.Ordinal);
+}
+
+/// <summary>
+/// 独立数据目录（User-Data / Config Profile）的多开应用实例
+/// </summary>
+public sealed class ManagedAppInstance
+{
+    public string Id { get; set; } = $"inst-{Guid.NewGuid():N}"[..13];
+    public string BaseSeatId { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string ProfileDir { get; set; } = string.Empty;
+    public int LocalPort { get; set; }
+    public string BoundNodeId { get; set; } = "direct-phy";
+    public bool KillSwitchEnabled { get; set; } = true;
+    public bool Enabled { get; set; } = true;
+    public string? ExtraArgs { get; set; }
+    public string? WorkingDirectory { get; set; }
+    public DateTimeOffset? LastLaunchedAt { get; set; }
+
+    public AppSeat ToVirtualSeat(AppSeat baseSeat) => new()
+    {
+        Id = $"{baseSeat.Id}:inst:{Id}",
+        Glyph = baseSeat.Glyph,
+        Name = $"{baseSeat.Name} · {Name}",
+        Subtitle = $"多开隔离实例 · {ProfileDir}",
+        ProcessWin = baseSeat.ProcessWin,
+        ProcessMac = baseSeat.ProcessMac,
+        LocalPort = LocalPort,
+        BoundNodeId = BoundNodeId,
+        Enabled = Enabled,
+        KillSwitchEnabled = KillSwitchEnabled,
+        CaptureMode = $"独立实例 :{LocalPort}",
+        LaunchCommandWin = baseSeat.LaunchCommandWin,
+        LaunchCommandMac = baseSeat.LaunchCommandMac,
+        ExpectedCountryCode = baseSeat.ExpectedCountryCode,
+        CustomNoProxy = baseSeat.CustomNoProxy,
+        CustomExecutablePath = baseSeat.CustomExecutablePath,
+        SortOrder = 900
+    };
+}
+
+/// <summary>
+/// 桌面客户端交互、悬浮监控窗与 WebDAV 跨机同步偏好配置
+/// </summary>
+public sealed class HubUiPreferences
+{
+    public string CloseAction { get; set; } = "minimize_to_tray"; // minimize_to_tray | exit
+    public string TrayLeftClickAction { get; set; } = "toggle_flyout"; // toggle_flyout | show_main | toggle_mini
+    public bool MiniCardEnabled { get; set; }
+    public int? MiniCardX { get; set; }
+    public int? MiniCardY { get; set; }
+    public string? WebDavUrl { get; set; }
+    public string? WebDavUsername { get; set; }
+    public string? WebDavPassword { get; set; }
+    public string? WebDavSyncPassphrase { get; set; }
+    public DateTimeOffset? LastWebDavSyncAt { get; set; }
+    public bool HasWebDavPassword { get; set; }
+    public bool HasSyncPassphrase { get; set; }
+
+    public HubUiPreferences ToRedactedCopy() => new()
+    {
+        CloseAction = CloseAction,
+        TrayLeftClickAction = TrayLeftClickAction,
+        MiniCardEnabled = MiniCardEnabled,
+        MiniCardX = MiniCardX,
+        MiniCardY = MiniCardY,
+        WebDavUrl = WebDavUrl,
+        WebDavUsername = WebDavUsername,
+        WebDavPassword = string.IsNullOrEmpty(WebDavPassword) ? null : "••••••••",
+        WebDavSyncPassphrase = string.IsNullOrEmpty(WebDavSyncPassphrase) ? null : "••••••••",
+        LastWebDavSyncAt = LastWebDavSyncAt,
+        HasWebDavPassword = !string.IsNullOrEmpty(WebDavPassword) || HasWebDavPassword,
+        HasSyncPassphrase = !string.IsNullOrEmpty(WebDavSyncPassphrase) || HasSyncPassphrase
+    };
 }
 
 /// <summary>
@@ -314,8 +394,10 @@ public sealed class HubStateDocument
     public IsolationSettings Isolation { get; set; } = new();
     public List<ProxyNode> Nodes { get; set; } = new();
     public List<AppSeat> Seats { get; set; } = new();
+    public List<ManagedAppInstance> Instances { get; set; } = new();
     public List<SubscriptionSource> Subscriptions { get; set; } = new();
     public List<ModelPricingRule> CustomPricings { get; set; } = new();
+    public HubUiPreferences Preferences { get; set; } = new();
     public int HostApiPort { get; set; } = 17880;
 }
 
@@ -385,6 +467,7 @@ public sealed class SidecarEngineStatus
     public bool Running { get; set; }
     public string? BinaryPath { get; set; }
     public string? Version { get; set; }
+    public string? BinarySha256 { get; set; }
     public int ActiveL2NodeCount { get; set; }
     public string? BoundInterface { get; set; }
     public string? LastError { get; set; }
@@ -396,7 +479,7 @@ public sealed class SidecarEngineStatus
 public static class ProjectMetadata
 {
     public const string Name = "Agent Proxy Hub";
-    public const string Version = "0.5.0";
+    public const string Version = "0.6.0";
     public const string RepoOwner = "HeyoCode";
     public const string RepoName = "Agent_Proxy_Hub";
     public const string RepoSlug = "HeyoCode/Agent_Proxy_Hub";

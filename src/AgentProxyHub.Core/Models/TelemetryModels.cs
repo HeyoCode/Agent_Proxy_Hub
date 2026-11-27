@@ -36,6 +36,7 @@ public sealed class UsageLogEntry
     public double CacheSavedUsd { get; set; }
     public bool IsPriced { get; set; }
     public string? Workspace { get; set; }
+    public string? ConversationId { get; set; }
 }
 
 /// <summary>
@@ -167,6 +168,65 @@ public sealed class UsageDashboardResponse
     public int PageSize { get; set; }
     public List<ModelUsageSummary> ModelBreakdown { get; set; } = new();
     public List<AppUsageAndProxySummary> AppAndProxyBreakdown { get; set; } = new();
+    public List<WorkspaceUsageSummary> WorkspaceBreakdown { get; set; } = new();
+}
+
+/// <summary>
+/// 按项目工作区聚合的成本与算力排行
+/// </summary>
+public sealed class WorkspaceUsageSummary
+{
+    public string Workspace { get; set; } = string.Empty;
+    public int Requests { get; set; }
+    public long TotalTokens { get; set; }
+    public double CostUsd { get; set; }
+    public string TopApp { get; set; } = string.Empty;
+    public string TopModel { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// 单会话内工具调用频次分布
+/// </summary>
+public sealed class ToolUsageItem
+{
+    public string ToolName { get; set; } = string.Empty;
+    public int Calls { get; set; }
+}
+
+/// <summary>
+/// 单次对话轮次的上下文膨胀与工具审计明细
+/// </summary>
+public sealed class ConversationTurnAudit
+{
+    public int TurnIndex { get; set; }
+    public DateTimeOffset Timestamp { get; set; }
+    public string Model { get; set; } = string.Empty;
+    public long InputTokens { get; set; }
+    public long OutputTokens { get; set; }
+    public long CacheReadTokens { get; set; }
+    public long CumulativeContextTokens { get; set; }
+    public double DurationSeconds { get; set; }
+    public double? CostUsd { get; set; }
+    public List<string> ToolsCalled { get; set; } = new();
+}
+
+/// <summary>
+/// 单对话上下文轨迹与工具调用审计报告
+/// </summary>
+public sealed class ConversationAuditReport
+{
+    public string ConversationId { get; set; } = string.Empty;
+    public string AppName { get; set; } = string.Empty;
+    public string? Workspace { get; set; }
+    public string? FilePath { get; set; }
+    public int TotalTurns { get; set; }
+    public long PeakContextTokens { get; set; }
+    public double TotalCostUsd { get; set; }
+    public double TotalCacheSavedUsd { get; set; }
+    public double ContextGrowthRatio { get; set; }
+    public string? OptimizationHint { get; set; }
+    public List<ToolUsageItem> ToolBreakdown { get; set; } = new();
+    public List<ConversationTurnAudit> Turns { get; set; } = new();
 }
 
 public sealed class AppFilterChip

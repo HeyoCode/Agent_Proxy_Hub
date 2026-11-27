@@ -19,6 +19,25 @@ public sealed class AppProxyTakeoverService
     private const string ManagedBlockStart = "# >>> AgentProxyHub Managed Block >>>";
     private const string ManagedBlockEnd = "# <<< AgentProxyHub Managed Block <<<";
 
+    private sealed record VsCodeCompatibleIdeSpec(
+        string SeatId,
+        string DisplayName,
+        string RoamingFolderName,
+        string WinExeName,
+        string WinInstallSubdir,
+        string MacAppName,
+        string[] ProcessNames);
+
+    private static readonly Dictionary<string, VsCodeCompatibleIdeSpec> VsCodeIdeSpecs = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["cursor"] = new("cursor", "Cursor", "Cursor", "Cursor.exe", "cursor", "Cursor", ["Cursor"]),
+        ["windsurf"] = new("windsurf", "Windsurf", "Windsurf", "Windsurf.exe", "Windsurf", "Windsurf", ["Windsurf"]),
+        ["kiro"] = new("kiro", "Kiro", "Kiro", "Kiro.exe", "Kiro", "Kiro", ["Kiro"]),
+        ["vscode-copilot"] = new("vscode-copilot", "VS Code Copilot", "Code", "Code.exe", "Microsoft VS Code", "Visual Studio Code", ["Code"]),
+        ["trae"] = new("trae", "Trae", "Trae", "Trae.exe", "Trae", "Trae", ["Trae"]),
+        ["codebuddy"] = new("codebuddy", "CodeBuddy", "CodeBuddy", "CodeBuddy.exe", "CodeBuddy", "CodeBuddy", ["CodeBuddy", "codebuddy"])
+    };
+
     private static readonly JsonDocumentOptions JsonDocOpts = new()
     {
         CommentHandling = JsonCommentHandling.Skip,
@@ -111,9 +130,11 @@ public sealed class AppProxyTakeoverService
                 (bool ok, string msg) = seat.Id switch
                 {
                     "claude" => enable ? EnableClaudeTakeover(seat) : RestoreClaudeTakeover(),
-                    "cursor" => enable ? EnableCursorTakeover(seat) : RestoreCursorTakeover(),
                     "agy" or "antigravity" => enable ? EnableAntigravityTakeover(seat) : RestoreAntigravityTakeover(),
                     "chatgpt" => enable ? EnableChatGptLauncherTakeover(seat) : RestoreChatGptLauncherTakeover(),
+                    "zed" => enable ? EnableZedTakeover(seat) : RestoreZedTakeover(),
+                    _ when VsCodeIdeSpecs.TryGetValue(seat.Id, out var ideSpec) =>
+                        enable ? EnableVsCodeIdeTakeover(seat, ideSpec) : RestoreVsCodeIdeTakeover(ideSpec),
                     _ => enable ? EnableGenericLauncherTakeover(seat) : RestoreGenericLauncherTakeover(seat)
                 };
 
@@ -129,20 +150,94 @@ public sealed class AppProxyTakeoverService
     }
 
     /// <summary>
-    /// 以独立进程环境变量注入方式受控启动目标 AI 应用（绝不杀掉或重启正在运行的 Antigravity 会话）
+    /// 安全重启并携带独立代理端口重连（严格禁止终止正在运行的 Antigravity 与本网关进程）
     /// </summary>
-    public (bool Ok, string Message) LaunchWithProxy(AppSeat seat)
+    public async Task<(bool Ok, string Message)> GracefulRestartWithProxyAsync(AppSeat seat, CancellationToken ct = default)
+    {
+        if (seat.Id is "agy" or "antigravity")
+        {
+            return (false, "为保护当前正在运行的 Antigravity 会话，系统禁止一键强制结束或自动重启 Antigravity；请先确认已开启「一键接管」，再由您手动重开窗口。");
+        }
+
+        string[] procNames = ResolveProcessNames(seat);
+        if (procNames.Length == 0 && VsCodeIdeSpecs.TryGetValue(seat.Id, out var spec))
+            procNames = spec.ProcessNames;
+
+        int killed = 0;
+        foreach (string procName in procNames)
+        {
+            if (procName.Contains("Antigravity", StringComparison.OrdinalIgnoreCase)
+                || procName.Contains("language_server", StringComparison.OrdinalIgnoreCase)
+                || procName.Contains("AgentProxyHub", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            try
+            {
+                foreach (var p in Process.GetProcessesByName(procName))
+                {
+                    using (p)
+                    {
+                        try
+                        {
+                            if (!p.HasExited)
+                            {
+                                p.CloseMainWindow();
+                                if (!p.WaitForExit(900))
+                                    p.Kill(entireProcessTree: true);
+                                killed++;
+                            }
+                        }
+                        catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        if (killed > 0)
+            await Task.Delay(350, ct);
+
+        var (ok, msg) = LaunchWithProxy(seat);
+        return ok
+            ? (true, killed > 0 ? $"已关闭 {killed} 个旧进程并重连 :{seat.LocalPort}：{msg}" : msg)
+            : (false, msg);
+    }
+
+    /// <summary>
+    /// 以独立进程环境变量注入/独立 User-Data-Dir 方式受控启动目标 AI 应用（绝不杀掉或重启正在运行的 Antigravity 会话）
+    /// </summary>
+    public (bool Ok, string Message) LaunchWithProxy(
+        AppSeat seat,
+        string? profileDir = null,
+        string? extraArgs = null,
+        string? workingDirectory = null)
     {
         lock (_opLock)
         {
-            var status = InspectSeatInternal(seat);
+            string baseSeatId = seat.Id.Split(":inst:", StringSplitOptions.None)[0];
+            var baseDummy = baseSeatId == seat.Id ? seat : new AppSeat
+            {
+                Id = baseSeatId,
+                Name = seat.Name,
+                LocalPort = seat.LocalPort,
+                BoundNodeId = seat.BoundNodeId,
+                CustomExecutablePath = seat.CustomExecutablePath,
+                CustomNoProxy = seat.CustomNoProxy,
+                LaunchCommandWin = seat.LaunchCommandWin,
+                LaunchCommandMac = seat.LaunchCommandMac,
+                ProcessWin = seat.ProcessWin,
+                ProcessMac = seat.ProcessMac
+            };
+            var status = InspectSeatInternal(baseDummy);
             string proxyHttp = $"http://127.0.0.1:{seat.LocalPort}";
             string proxySocks = $"socks5h://127.0.0.1:{seat.LocalPort}";
             string noProxy = BuildEffectiveNoProxy(seat, _isMacOs);
 
-            if (seat.Id is "agy" or "antigravity")
+            if (baseSeatId is "agy" or "antigravity")
             {
-                if (status.IsProcessRunning)
+                if (string.IsNullOrWhiteSpace(profileDir) && status.IsProcessRunning)
                 {
                     return (true,
                         $"检测到 Antigravity 正在运行，为保护当前会话未强制重启；请确认已开启「一键接管」，下次打开 Antigravity 即可通过 :{seat.LocalPort} 独立出口运行。");
@@ -155,18 +250,22 @@ public sealed class AppProxyTakeoverService
                     {
                         UseShellExecute = false
                     };
+                    psi.ArgumentList.Add("-n");
                     psi.ArgumentList.Add("-a");
                     psi.ArgumentList.Add(macTarget);
                     psi.ArgumentList.Add("--args");
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
                     psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
+                    if (!string.IsNullOrWhiteSpace(profileDir))
+                        psi.ArgumentList.Add($"--user-data-dir={profileDir}");
+                    AppendSplitArgs(psi, extraArgs);
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
                     return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Antigravity");
                 }
 
                 string zhScript = GetAntigravityZhLaunchScriptPath();
-                if (string.IsNullOrWhiteSpace(seat.CustomExecutablePath) && File.Exists(zhScript))
+                if (string.IsNullOrWhiteSpace(profileDir) && string.IsNullOrWhiteSpace(seat.CustomExecutablePath) && File.Exists(zhScript))
                 {
                     string psExe = ResolveWindowsPowerShellExe();
                     var psi = new ProcessStartInfo(psExe)
@@ -191,49 +290,56 @@ public sealed class AppProxyTakeoverService
                 {
                     var psi = new ProcessStartInfo(exe)
                     {
-                        UseShellExecute = false
+                        UseShellExecute = false,
+                        WorkingDirectory = !string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory) ? workingDirectory : ""
                     };
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
                     psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
+                    if (!string.IsNullOrWhiteSpace(profileDir))
+                        psi.ArgumentList.Add($"--user-data-dir={profileDir}");
+                    AppendSplitArgs(psi, extraArgs);
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
-                    return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Antigravity");
+                    return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Antigravity" + (!string.IsNullOrWhiteSpace(profileDir) ? " (独立配置目录)" : ""));
                 }
 
                 return (false, "未找到本机 Antigravity 可执行文件，可使用专属启动脚本或在「应用接管 & CLI」指定自定义路径。");
             }
 
-            if (seat.Id == "cursor")
+            if (VsCodeIdeSpecs.TryGetValue(baseSeatId, out var launchIdeSpec))
             {
-                if (_isMacOs)
-                {
-                    string macTarget = ResolveCustomOrDetectedExe(seat, () => "Cursor") ?? "Cursor";
-                    var psi = new ProcessStartInfo("open") { UseShellExecute = false };
-                    psi.ArgumentList.Add("-a");
-                    psi.ArgumentList.Add(macTarget);
-                    psi.ArgumentList.Add("--args");
-                    psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
-                    psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
-                    ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
-                    Process.Start(psi);
-                    return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Cursor");
-                }
-
-                string? cursorExe = ResolveCustomOrDetectedExe(seat, ResolveCursorExe);
-                if (!string.IsNullOrEmpty(cursorExe))
-                {
-                    var psi = new ProcessStartInfo(cursorExe) { UseShellExecute = false };
-                    psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
-                    psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
-                    ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
-                    Process.Start(psi);
-                    return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Cursor");
-                }
-
-                return (false, "未在常见路径找到 Cursor.exe；可在「应用接管 & CLI」指定自定义可执行路径，或使用 settings.json 热接管。");
+                return LaunchVsCodeCompatibleIde(seat, launchIdeSpec, proxyHttp, proxySocks, noProxy, profileDir, extraArgs, workingDirectory);
             }
 
-            if (seat.Id == "claude-desktop")
+            if (baseSeatId == "zed")
+            {
+                string? zedExe = _isMacOs ? "Zed" : ResolveCustomOrDetectedExe(seat, ResolveZedExe);
+                if (!string.IsNullOrEmpty(zedExe))
+                {
+                    var psi = _isMacOs ? new ProcessStartInfo("open") { UseShellExecute = false } : new ProcessStartInfo(zedExe) { UseShellExecute = false };
+                    if (_isMacOs)
+                    {
+                        psi.ArgumentList.Add("-n");
+                        psi.ArgumentList.Add("-a");
+                        psi.ArgumentList.Add(zedExe);
+                        psi.ArgumentList.Add("--args");
+                    }
+                    if (!string.IsNullOrWhiteSpace(profileDir))
+                    {
+                        psi.ArgumentList.Add("--user-data-dir");
+                        psi.ArgumentList.Add(profileDir);
+                    }
+                    if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
+                        psi.WorkingDirectory = workingDirectory;
+                    AppendSplitArgs(psi, extraArgs);
+                    ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
+                    Process.Start(psi);
+                    return (true, $"已携带 :{seat.LocalPort} 独立代理环境变量启动 Zed");
+                }
+                return (false, "未找到 Zed 可执行文件；可在「应用接管 & CLI」自定义路径或使用 settings.json 接管。");
+            }
+
+            if (baseSeatId == "claude-desktop")
             {
                 if (_isMacOs)
                 {
@@ -244,6 +350,8 @@ public sealed class AppProxyTakeoverService
                     psi.ArgumentList.Add("--args");
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
                     psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
+                    if (!string.IsNullOrWhiteSpace(profileDir))
+                        psi.ArgumentList.Add($"--user-data-dir={profileDir}");
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
                     return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Claude Desktop");
@@ -255,21 +363,24 @@ public sealed class AppProxyTakeoverService
                     var psi = new ProcessStartInfo(claudeExe) { UseShellExecute = false };
                     psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
                     psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
+                    if (!string.IsNullOrWhiteSpace(profileDir))
+                        psi.ArgumentList.Add($"--user-data-dir={profileDir}");
+                    AppendSplitArgs(psi, extraArgs);
                     ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
                     Process.Start(psi);
                     return (true, $"已携带 :{seat.LocalPort} 代理参数启动 Claude Desktop");
                 }
             }
 
-            // Claude Code / Codex / Gemini CLI / Grok Build / OpenCode 等：打开已预注入该席位代理环境变量的独立终端窗口
+            // Claude Code / Codex / Gemini CLI / Grok Build / OpenCode 等：打开已预注入该席位代理环境变量（含可选隔离目录）的独立终端窗口
             string bannerTitle = seat.Name;
             string cliHint = !string.IsNullOrWhiteSpace(seat.CustomExecutablePath)
                 ? seat.CustomExecutablePath.Trim()
-                : ResolveCliHint(seat);
+                : ResolveCliHint(baseDummy);
 
             if (_isMacOs)
             {
-                string scriptPath = WriteMacLauncherScript(seat, bannerTitle, cliHint);
+                string scriptPath = WriteMacLauncherScript(seat, bannerTitle, cliHint, profileDir);
                 var psi = new ProcessStartInfo("open") { UseShellExecute = false };
                 psi.ArgumentList.Add("-a");
                 psi.ArgumentList.Add("Terminal");
@@ -278,13 +389,22 @@ public sealed class AppProxyTakeoverService
                 return (true, $"已打开预注入 :{seat.LocalPort} 独立专线的 Terminal 终端");
             }
 
+            string profileEnvCmd = string.IsNullOrWhiteSpace(profileDir)
+                ? string.Empty
+                : $"$env:CLAUDE_CONFIG_DIR='{profileDir}'; $env:CODEX_HOME='{profileDir}'; $env:GEMINI_CLI_HOME='{profileDir}'; $env:XDG_CONFIG_HOME='{profileDir}'; ";
+            string cdCmd = !string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory)
+                ? $"Set-Location '{workingDirectory.Replace("'", "''")}'; "
+                : string.Empty;
+
             string initCmd =
+                cdCmd +
                 $"$env:HTTP_PROXY='{proxyHttp}'; $env:HTTPS_PROXY='{proxyHttp}'; $env:ALL_PROXY='{proxySocks}'; $env:NO_PROXY='{noProxy}'; " +
+                profileEnvCmd +
                 $"Write-Host '[Agent Proxy Hub] {bannerTitle} 独立专线已挂载 -> {proxyHttp}' -ForegroundColor Cyan; " +
                 $"Write-Host '直接输入 {cliHint} 即可从专属出口通道通信，不影响系统或 Clash。' -ForegroundColor DarkGray";
 
             StartWindowsInteractiveShell(initCmd);
-            return (true, $"已打开已注入 :{seat.LocalPort} 独立专线的交互式终端");
+            return (true, $"已打开已注入 :{seat.LocalPort} 独立专线的交互式终端" + (!string.IsNullOrWhiteSpace(profileDir) ? $"（目录隔离: {profileDir}）" : ""));
         }
     }
 
@@ -295,9 +415,10 @@ public sealed class AppProxyTakeoverService
         return seat.Id switch
         {
             "claude" => InspectClaude(seat, expectedProxy),
-            "cursor" => InspectCursor(seat, expectedProxy),
             "agy" or "antigravity" => InspectAntigravity(seat, expectedProxy),
             "chatgpt" => InspectChatGpt(seat, expectedProxy),
+            "zed" => InspectZed(seat, expectedProxy),
+            _ when VsCodeIdeSpecs.TryGetValue(seat.Id, out var spec) => InspectVsCodeIde(seat, expectedProxy, spec),
             _ => InspectGenericLauncher(seat, expectedProxy)
         };
     }
@@ -392,12 +513,21 @@ public sealed class AppProxyTakeoverService
         "kimi-code" => "kimi",
         "deepseek-harness" => "deepseek",
         "oh-my-pi" => "omp",
+        "windsurf" => "windsurf",
+        "kiro" => "kiro",
+        "vscode-copilot" => "code",
+        "zed" => "zed",
+        "trae" => "trae",
+        "codebuddy" => "codebuddy",
         _ => string.IsNullOrWhiteSpace(seat.LaunchCommandWin) ? seat.Id : seat.LaunchCommandWin.Split(' ')[0]
     };
 
     private static string[] ResolveProcessNames(AppSeat seat) => seat.Id switch
     {
+        "claude" => ["claude"],
         "claude-desktop" => ["Claude", "claude"],
+        "cursor" => ["Cursor"],
+        "chatgpt" => ["codex", "ChatGPT"],
         "gemini-cli" => ["gemini"],
         "grok-build" => ["grok"],
         "opencode" => ["opencode"],
@@ -408,6 +538,12 @@ public sealed class AppProxyTakeoverService
         "kimi-code" => ["kimi"],
         "deepseek-harness" => ["deepseek"],
         "oh-my-pi" => ["omp"],
+        "windsurf" => ["Windsurf"],
+        "kiro" => ["Kiro"],
+        "vscode-copilot" => ["Code"],
+        "zed" => ["Zed", "zed"],
+        "trae" => ["Trae"],
+        "codebuddy" => ["CodeBuddy", "codebuddy"],
         _ => []
     };
 
@@ -445,10 +581,10 @@ public sealed class AppProxyTakeoverService
         };
     }
 
-    private SeatTakeoverStatus InspectCursor(AppSeat seat, string expectedProxy)
+    private SeatTakeoverStatus InspectVsCodeIde(AppSeat seat, string expectedProxy, VsCodeCompatibleIdeSpec spec)
     {
-        string path = GetCursorSettingsPath();
-        bool running = _processChecker(["Cursor"]);
+        string path = GetVsCodeIdeSettingsPath(spec);
+        bool running = _processChecker(spec.ProcessNames);
         bool takenOver = false;
 
         if (File.Exists(path))
@@ -462,7 +598,7 @@ public sealed class AppProxyTakeoverService
             catch { }
         }
 
-        string? exe = _isMacOs ? "/Applications/Cursor.app" : ResolveCursorExe();
+        string? exe = _isMacOs ? $"/Applications/{spec.MacAppName}.app" : ResolveVsCodeIdeExe(spec);
 
         return new SeatTakeoverStatus
         {
@@ -470,14 +606,47 @@ public sealed class AppProxyTakeoverService
             IsProcessRunning = running,
             SupportsConfigTakeover = true,
             IsTakenOver = takenOver,
-            ModeSummary = "Cursor User/settings.json 热接管",
+            ModeSummary = $"{spec.DisplayName} User/settings.json 热接管",
             TargetPath = path,
             LaunchExecutable = exe,
             StatusHint = takenOver
-                ? $"已接入 Cursor 配置 (http.proxy = {expectedProxy})，修改配置即刻热生效。"
+                ? $"已接入 {spec.DisplayName} 配置 (http.proxy = {expectedProxy})，修改配置即刻热生效。"
                 : (running
-                    ? $"检测到 Cursor 正在运行但未指向 :{seat.LocalPort}，点击「一键接管」立即写入 http.proxy 热生效。"
-                    : $"未接管配置：点击「一键接管」即可把 Cursor 流量定向到 :{seat.LocalPort}。")
+                    ? $"检测到 {spec.DisplayName} 正在运行但未指向 :{seat.LocalPort}，点击「一键接管」立即写入 http.proxy 热生效。"
+                    : $"未接管配置：点击「一键接管」即可把 {spec.DisplayName} 流量定向到 :{seat.LocalPort}。")
+        };
+    }
+
+    private SeatTakeoverStatus InspectZed(AppSeat seat, string expectedProxy)
+    {
+        string path = GetZedSettingsPath();
+        bool running = _processChecker(["Zed", "zed"]);
+        bool takenOver = false;
+
+        if (File.Exists(path))
+        {
+            try
+            {
+                var root = JsonNode.Parse(File.ReadAllText(path), null, JsonDocOpts) as JsonObject;
+                string? current = root?["proxy"]?.GetValue<string>();
+                takenOver = string.Equals(current, expectedProxy, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { }
+        }
+
+        string? exe = _isMacOs ? "/Applications/Zed.app" : ResolveZedExe();
+        return new SeatTakeoverStatus
+        {
+            SeatId = seat.Id,
+            IsProcessRunning = running,
+            SupportsConfigTakeover = true,
+            IsTakenOver = takenOver,
+            ModeSummary = "Zed settings.json 原生代理字段热接管",
+            TargetPath = path,
+            LaunchExecutable = exe,
+            StatusHint = takenOver
+                ? $"已将 proxy = {expectedProxy} 无损写入 Zed settings.json。"
+                : $"未接管：点击「一键接管」把 Zed 独立配置定向到 :{seat.LocalPort}。"
         };
     }
 
@@ -601,9 +770,9 @@ public sealed class AppProxyTakeoverService
             : (true, "未检测到历史接管备份，~/.claude/settings.json 保持原样");
     }
 
-    private (bool Ok, string Message) EnableCursorTakeover(AppSeat seat)
+    private (bool Ok, string Message) EnableVsCodeIdeTakeover(AppSeat seat, VsCodeCompatibleIdeSpec spec)
     {
-        string path = GetCursorSettingsPath();
+        string path = GetVsCodeIdeSettingsPath(spec);
         string proxy = $"http://127.0.0.1:{seat.LocalPort}";
         var updates = new Dictionary<string, JsonNode?>
         {
@@ -611,16 +780,82 @@ public sealed class AppProxyTakeoverService
             ["http.proxySupport"] = JsonValue.Create("override")
         };
 
-        UpdateJsonObjectWithBackup("cursor", path, [], updates);
-        return (true, $"已无损写入 Cursor settings.json（http.proxy -> {proxy}）");
+        UpdateJsonObjectWithBackup(spec.SeatId, path, [], updates);
+        return (true, $"已无损写入 {spec.DisplayName} settings.json（http.proxy -> {proxy}）");
     }
 
-    private (bool Ok, string Message) RestoreCursorTakeover()
+    private (bool Ok, string Message) RestoreVsCodeIdeTakeover(VsCodeCompatibleIdeSpec spec)
     {
-        bool restored = RestoreJsonObjectFromBackup("cursor", []);
+        bool restored = RestoreJsonObjectFromBackup(spec.SeatId, []);
         return restored
-            ? (true, "已按备份无损还原 Cursor 原始代理设置")
-            : (true, "未检测到 Cursor 历史接管备份，原配置未改动");
+            ? (true, $"已按备份无损还原 {spec.DisplayName} 原始代理设置")
+            : (true, $"未检测到 {spec.DisplayName} 历史接管备份，原配置未改动");
+    }
+
+    private (bool Ok, string Message) EnableZedTakeover(AppSeat seat)
+    {
+        string path = GetZedSettingsPath();
+        string proxy = $"http://127.0.0.1:{seat.LocalPort}";
+        UpdateJsonObjectWithBackup("zed", path, [], new Dictionary<string, JsonNode?>
+        {
+            ["proxy"] = JsonValue.Create(proxy)
+        });
+        return (true, $"已无损写入 Zed settings.json（proxy -> {proxy}）");
+    }
+
+    private (bool Ok, string Message) RestoreZedTakeover()
+    {
+        bool restored = RestoreJsonObjectFromBackup("zed", []);
+        return restored
+            ? (true, "已按备份无损还原 Zed 原始代理设置")
+            : (true, "未检测到 Zed 历史接管备份，原配置未改动");
+    }
+
+    private (bool Ok, string Message) LaunchVsCodeCompatibleIde(
+        AppSeat seat,
+        VsCodeCompatibleIdeSpec spec,
+        string proxyHttp,
+        string proxySocks,
+        string noProxy,
+        string? profileDir,
+        string? extraArgs,
+        string? workingDirectory)
+    {
+        if (_isMacOs)
+        {
+            string macTarget = ResolveCustomOrDetectedExe(seat, () => spec.MacAppName) ?? spec.MacAppName;
+            var psi = new ProcessStartInfo("open") { UseShellExecute = false };
+            if (!string.IsNullOrWhiteSpace(profileDir)) psi.ArgumentList.Add("-n");
+            psi.ArgumentList.Add("-a");
+            psi.ArgumentList.Add(macTarget);
+            psi.ArgumentList.Add("--args");
+            psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
+            psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
+            if (!string.IsNullOrWhiteSpace(profileDir))
+                psi.ArgumentList.Add($"--user-data-dir={profileDir}");
+            AppendSplitArgs(psi, extraArgs);
+            ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
+            Process.Start(psi);
+            return (true, $"已携带 :{seat.LocalPort} 代理参数启动 {spec.DisplayName}");
+        }
+
+        string? exe = ResolveCustomOrDetectedExe(seat, () => ResolveVsCodeIdeExe(spec));
+        if (!string.IsNullOrEmpty(exe))
+        {
+            var psi = new ProcessStartInfo(exe) { UseShellExecute = false };
+            if (!string.IsNullOrWhiteSpace(workingDirectory) && Directory.Exists(workingDirectory))
+                psi.WorkingDirectory = workingDirectory;
+            psi.ArgumentList.Add($"--proxy-server={proxyHttp}");
+            psi.ArgumentList.Add($"--proxy-bypass-list={BuildChromiumBypassList(noProxy)}");
+            if (!string.IsNullOrWhiteSpace(profileDir))
+                psi.ArgumentList.Add($"--user-data-dir={profileDir}");
+            AppendSplitArgs(psi, extraArgs);
+            ApplyProxyEnv(psi, proxyHttp, proxySocks, noProxy);
+            Process.Start(psi);
+            return (true, $"已携带 :{seat.LocalPort} 代理参数启动 {spec.DisplayName}" + (!string.IsNullOrWhiteSpace(profileDir) ? " (独立配置目录)" : ""));
+        }
+
+        return (false, $"未在常见路径找到 {spec.WinExeName}；可在「应用接管 & CLI」指定自定义可执行路径，或使用 settings.json 热接管。");
     }
 
     private (bool Ok, string Message) EnableAntigravityTakeover(AppSeat seat)
@@ -910,23 +1145,36 @@ public sealed class AppProxyTakeoverService
         return Regex.Replace(raw, pattern, string.Empty, RegexOptions.Multiline);
     }
 
-    private string WriteMacLauncherScript(AppSeat seat, string title, string cliHint)
+    private string WriteMacLauncherScript(AppSeat seat, string title, string cliHint, string? profileDir = null)
     {
         Directory.CreateDirectory(_launchersDir);
-        string path = Path.Combine(_launchersDir, $"open-{seat.Id}.command");
+        string path = Path.Combine(_launchersDir, $"open-{seat.Id.Replace(":", "_")}.command");
         string proxyHttp = $"http://127.0.0.1:{seat.LocalPort}";
         string proxySocks = $"socks5h://127.0.0.1:{seat.LocalPort}";
+        string profileExports = string.IsNullOrWhiteSpace(profileDir)
+            ? string.Empty
+            : $"export CLAUDE_CONFIG_DIR=\"{profileDir}\"\nexport CODEX_HOME=\"{profileDir}\"\nexport GEMINI_CLI_HOME=\"{profileDir}\"\nexport XDG_CONFIG_HOME=\"{profileDir}\"\n";
         string script =
             "#!/bin/bash\n" +
             $"export HTTP_PROXY=\"{proxyHttp}\"\n" +
             $"export HTTPS_PROXY=\"{proxyHttp}\"\n" +
             $"export ALL_PROXY=\"{proxySocks}\"\n" +
             "export NO_PROXY=\"" + BuildEffectiveNoProxy(seat, true) + "\"\n" +
+            profileExports +
             $"echo \"[Agent Proxy Hub] {title} 独立专线已挂载 -> {proxyHttp}\"\n" +
             $"echo \"输入 {cliHint} 即可走专属出口通道。\"\n" +
             "exec $SHELL -l\n";
         File.WriteAllText(path, script, new UTF8Encoding(false));
         return path;
+    }
+
+    private static void AppendSplitArgs(ProcessStartInfo psi, string? extraArgs)
+    {
+        if (string.IsNullOrWhiteSpace(extraArgs)) return;
+        foreach (string part in extraArgs.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+        {
+            psi.ArgumentList.Add(part.Trim());
+        }
     }
 
     public static string BuildEffectiveNoProxy(AppSeat seat, bool isMacOs)
@@ -1026,9 +1274,20 @@ public sealed class AppProxyTakeoverService
 
     private string GetClaudeSettingsPath() => Path.Combine(_userHome, ".claude", "settings.json");
 
-    private string GetCursorSettingsPath() => _isMacOs
-        ? Path.Combine(_userHome, "Library", "Application Support", "Cursor", "User", "settings.json")
-        : Path.Combine(_appDataRoaming, "Cursor", "User", "settings.json");
+    private string GetVsCodeIdeSettingsPath(VsCodeCompatibleIdeSpec spec) => _isMacOs
+        ? Path.Combine(_userHome, "Library", "Application Support", spec.RoamingFolderName, "User", "settings.json")
+        : Path.Combine(_appDataRoaming, spec.RoamingFolderName, "User", "settings.json");
+
+    private string GetZedSettingsPath()
+    {
+        if (!_isMacOs)
+        {
+            string winRoaming = Path.Combine(_appDataRoaming, "Zed", "settings.json");
+            if (File.Exists(winRoaming) || Directory.Exists(Path.Combine(_appDataRoaming, "Zed")))
+                return winRoaming;
+        }
+        return Path.Combine(_userHome, ".config", "zed", "settings.json");
+    }
 
     private string GetAntigravityIdeSettingsPath() => _isMacOs
         ? Path.Combine(_userHome, "Library", "Application Support", "Antigravity", "User", "settings.json")
@@ -1055,12 +1314,25 @@ public sealed class AppProxyTakeoverService
         return candidates.FirstOrDefault(File.Exists);
     }
 
-    private string? ResolveCursorExe()
+    private string? ResolveVsCodeIdeExe(VsCodeCompatibleIdeSpec spec)
     {
         string[] candidates =
         [
-            Path.Combine(_appDataLocal, "Programs", "cursor", "Cursor.exe"),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Cursor", "Cursor.exe")
+            Path.Combine(_appDataLocal, "Programs", spec.WinInstallSubdir, spec.WinExeName),
+            Path.Combine(_appDataLocal, "Programs", spec.RoamingFolderName, spec.WinExeName),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), spec.WinInstallSubdir, spec.WinExeName),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), spec.RoamingFolderName, spec.WinExeName)
+        ];
+        return candidates.FirstOrDefault(File.Exists);
+    }
+
+    private string? ResolveZedExe()
+    {
+        string[] candidates =
+        [
+            Path.Combine(_appDataLocal, "Programs", "Zed", "Zed.exe"),
+            Path.Combine(_appDataLocal, "Zed", "bin", "zed.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Zed", "Zed.exe")
         ];
         return candidates.FirstOrDefault(File.Exists);
     }

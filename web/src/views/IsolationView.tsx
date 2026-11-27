@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { IsolationSettings, NetworkAdapterInfo, SidecarEngineStatus, api } from '../api';
+import { HubUiPreferences, IsolationSettings, NetworkAdapterInfo, SidecarEngineStatus, api } from '../api';
 import { RefreshSpinIcon } from '../components/Icons';
+import { sendWindowCommand } from '../windowBridge';
 
 interface Props {
   onReloadOverview: () => Promise<void>;
@@ -14,13 +15,124 @@ export const IsolationView: React.FC<Props> = ({ onReloadOverview, onToast }) =>
   const [installingSb, setInstallingSb] = useState(false);
   const [downloadProxy, setDownloadProxy] = useState('');
   const [customPathInput, setCustomPathInput] = useState('');
+  const [importPkgPath, setImportPkgPath] = useState('');
+  const [importSha256, setImportSha256] = useState('');
+  const [importingSb, setImportingSb] = useState(false);
+
+  const [prefs, setPrefs] = useState<HubUiPreferences>({
+    closeAction: 'minimize_to_tray',
+    trayLeftClickAction: 'toggle_flyout',
+    miniCardEnabled: false
+  });
+  const [wdUrl, setWdUrl] = useState('');
+  const [wdUser, setWdUser] = useState('');
+  const [wdPass, setWdPass] = useState('');
+  const [wdPhrase, setWdPhrase] = useState('');
+  const [wdBusy, setWdBusy] = useState(false);
 
   async function load() {
-    const res = await api.getIsolation();
+    const [res, prefRes] = await Promise.all([api.getIsolation(), api.getPreferences()]);
     setSettings(res.settings);
     setAdapters(res.adapters);
     if (res.sidecarEngine) setSidecar(res.sidecarEngine);
     setCustomPathInput(res.settings.customSingBoxPath ?? '');
+    setPrefs(prefRes);
+    setWdUrl(prefRes.webDavUrl ?? '');
+    setWdUser(prefRes.webDavUsername ?? '');
+  }
+
+  async function handleImportOfflineSingBox() {
+    if (!importPkgPath.trim() || importingSb) return;
+    setImportingSb(true);
+    try {
+      const res = await api.importSingBox(importPkgPath.trim(), importSha256.trim() || undefined);
+      setSidecar(res.status);
+      await onReloadOverview();
+      onToast(res.message);
+      if (res.ok) {
+        setImportPkgPath('');
+        setImportSha256('');
+      }
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '离线导入 sing-box 失败');
+    } finally {
+      setImportingSb(false);
+    }
+  }
+
+  async function savePreferences(partial: Partial<HubUiPreferences>, tip: string) {
+    const updated = await api.updatePreferences(partial);
+    setPrefs(updated);
+    sendWindowCommand({ type: 'window:preferencesSync' });
+    await onReloadOverview();
+    onToast(tip);
+  }
+
+  async function handleSaveWebDavMeta() {
+    setWdBusy(true);
+    try {
+      const updated = await api.updatePreferences({
+        webDavUrl: wdUrl.trim(),
+        webDavUsername: wdUser.trim(),
+        ...(wdPass ? { webDavPassword: wdPass } : {}),
+        ...(wdPhrase ? { webDavSyncPassphrase: wdPhrase } : {})
+      });
+      setPrefs(updated);
+      setWdPass('');
+      setWdPhrase('');
+      onToast('已加密保存 WebDAV 同步凭据');
+    } finally {
+      setWdBusy(false);
+    }
+  }
+
+  async function handleTestWebDav() {
+    setWdBusy(true);
+    try {
+      const res = await api.testWebDav({
+        webDavUrl: wdUrl.trim() || undefined,
+        webDavUsername: wdUser.trim() || undefined,
+        webDavPassword: wdPass || undefined
+      });
+      onToast(res.message);
+    } finally {
+      setWdBusy(false);
+    }
+  }
+
+  async function handlePushWebDav() {
+    setWdBusy(true);
+    try {
+      const res = await api.pushWebDav({
+        webDavUrl: wdUrl.trim() || undefined,
+        webDavUsername: wdUser.trim() || undefined,
+        webDavPassword: wdPass || undefined,
+        passphrase: wdPhrase || undefined
+      });
+      if (res.lastWebDavSyncAt) {
+        setPrefs(p => ({ ...p, lastWebDavSyncAt: res.lastWebDavSyncAt }));
+      }
+      onToast(res.message);
+    } finally {
+      setWdBusy(false);
+    }
+  }
+
+  async function handlePullWebDav() {
+    setWdBusy(true);
+    try {
+      const res = await api.pullWebDav({
+        webDavUrl: wdUrl.trim() || undefined,
+        webDavUsername: wdUser.trim() || undefined,
+        webDavPassword: wdPass || undefined,
+        passphrase: wdPhrase || undefined
+      });
+      await load();
+      await onReloadOverview();
+      onToast(res.message);
+    } finally {
+      setWdBusy(false);
+    }
   }
 
   async function handleInstallSingBox() {
@@ -307,11 +419,148 @@ export const IsolationView: React.FC<Props> = ({ onReloadOverview, onToast }) =>
           </div>
         </div>
 
+        {sidecar?.binarySha256 && (
+          <div style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
+            内核 SHA-256 指纹：<span className="mono">{sidecar.binarySha256}</span>
+          </div>
+        )}
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr auto', gap: 10, marginTop: 12, alignItems: 'end' }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>
+              离线导入安装包（支持 .zip / .tar.gz / sing-box.exe，内置 Zip-Slip 防护）
+            </div>
+            <input
+              className="clean-input mono"
+              placeholder="例如 D:\Downloads\sing-box-windows-amd64.zip"
+              value={importPkgPath}
+              onChange={e => setImportPkgPath(e.target.value)}
+            />
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 4 }}>
+              预期 SHA-256（可选，严格校验防篡改）
+            </div>
+            <input
+              className="clean-input mono"
+              placeholder="留空跳过，或粘贴 64 位 SHA-256"
+              value={importSha256}
+              onChange={e => setImportSha256(e.target.value)}
+            />
+          </div>
+          <button
+            type="button"
+            className="btn-pill btn-indigo btn-sm"
+            style={{ height: 34 }}
+            disabled={importingSb || !importPkgPath.trim()}
+            onClick={handleImportOfflineSingBox}
+          >
+            {importingSb ? '校验导入中...' : '校验并导入'}
+          </button>
+        </div>
+
         {sidecar?.lastError && (
           <div style={{ marginTop: 10, fontSize: 11.5, color: 'var(--accent-coral-text)' }}>
             最近状态提示：{sidecar.lastError}
           </div>
         )}
+      </div>
+
+      {/* 桌面交互偏好与跨机器 WebDAV 加密同步卡片 */}
+      <div className="surface-card surface-card-pad" style={{ gridColumn: 'span 2' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+          <div>
+            <div className="card-title-sm">桌面客户端交互偏好 &amp; WebDAV 跨机器加密同步</div>
+            <div className="card-subtitle-sm">
+              本地采用 PBKDF2-SHA256 + AES-256-GCM 加密后上传至您的私有 WebDAV 网盘，云端零明文存储节点密码与订阅地址
+            </div>
+          </div>
+          {prefs.lastWebDavSyncAt && (
+            <span className="pill-tag tag-emerald num">
+              最近同步：{new Date(prefs.lastWebDavSyncAt).toLocaleString('zh-CN', { hour12: false })}
+            </span>
+          )}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr', gap: 18 }}>
+          <div style={{ background: 'var(--bg-subtle)', borderRadius: 12, padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <strong style={{ fontSize: 12.5 }}>桌面窗口与悬浮监控偏好</strong>
+            <div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>主窗口右上角「关闭」按钮行为</div>
+              <select
+                className="clean-input"
+                value={prefs.closeAction}
+                onChange={e => savePreferences({ closeAction: e.target.value as 'minimize_to_tray' | 'exit' }, '已更新窗口关闭行为')}
+              >
+                <option value="minimize_to_tray">最小化到系统托盘（保持后台代理常驻）</option>
+                <option value="exit">直接彻底退出程序</option>
+              </select>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>系统托盘图标「左键单击」动作</div>
+              <select
+                className="clean-input"
+                value={prefs.trayLeftClickAction}
+                onChange={e => savePreferences({ trayLeftClickAction: e.target.value as 'toggle_flyout' | 'show_main' | 'toggle_mini' }, '已更新托盘点击动作')}
+              >
+                <option value="toggle_flyout">呼出托盘快捷开关面板</option>
+                <option value="show_main">直接拉起主控制台窗口</option>
+                <option value="toggle_mini">切换置顶极简悬浮监控卡片</option>
+              </select>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 2 }}>
+              <span style={{ fontSize: 12 }}>置顶极简悬浮监控窗（Always-on-Top）</span>
+              <label className="nordic-switch">
+                <input
+                  type="checkbox"
+                  checked={prefs.miniCardEnabled}
+                  onChange={e => savePreferences({ miniCardEnabled: e.target.checked }, e.target.checked ? '已开启置顶悬浮监控窗' : '已关闭置顶悬浮监控窗')}
+                />
+                <span className="nordic-slider" />
+              </label>
+            </div>
+          </div>
+
+          <div style={{ background: 'var(--bg-subtle)', borderRadius: 12, padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <strong style={{ fontSize: 12.5 }}>WebDAV 零明文加密同步（坚果云 / Nextcloud / Alist）</strong>
+            <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 8 }}>
+              <input
+                className="clean-input mono"
+                placeholder="WebDAV 目录 URL（如 https://dav.jianguoyun.com/dav/）"
+                value={wdUrl}
+                onChange={e => setWdUrl(e.target.value)}
+              />
+              <input
+                className="clean-input"
+                placeholder="WebDAV 用户名"
+                value={wdUser}
+                onChange={e => setWdUser(e.target.value)}
+              />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <input
+                type="password"
+                className="clean-input"
+                placeholder={prefs.hasWebDavPassword ? '已加密保存应用密码（留空沿用）' : 'WebDAV 应用密码'}
+                value={wdPass}
+                onChange={e => setWdPass(e.target.value)}
+              />
+              <input
+                type="password"
+                className="clean-input"
+                placeholder={prefs.hasSyncPassphrase ? '已设置 AES-GCM 主口令（留空沿用）' : '同步加密主口令（至少 4 位）'}
+                value={wdPhrase}
+                onChange={e => setWdPhrase(e.target.value)}
+              />
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+              <button type="button" className="btn-pill btn-soft btn-sm" disabled={wdBusy} onClick={handleSaveWebDavMeta}>保存配置</button>
+              <button type="button" className="btn-pill btn-soft btn-sm" disabled={wdBusy} onClick={handleTestWebDav}>测试连通</button>
+              <button type="button" className="btn-pill btn-indigo btn-sm" disabled={wdBusy} onClick={handlePushWebDav}>AES-GCM 加密上传</button>
+              <button type="button" className="btn-pill btn-soft btn-sm" disabled={wdBusy} onClick={handlePullWebDav}>拉取解密恢复</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -58,6 +58,38 @@ export interface AppSeat {
   customExecutablePath?: string | null;
   boundNodeSnapshotHash?: string | null;
   hasNodeDrift?: boolean;
+  sortOrder?: number;
+  isHidden?: boolean;
+  isPinned?: boolean;
+}
+
+export interface ManagedAppInstance {
+  id: string;
+  baseSeatId: string;
+  name: string;
+  profileDir: string;
+  localPort: number;
+  boundNodeId: string;
+  killSwitchEnabled: boolean;
+  enabled: boolean;
+  extraArgs?: string | null;
+  workingDirectory?: string | null;
+  lastLaunchedAt?: string | null;
+}
+
+export interface HubUiPreferences {
+  closeAction: 'minimize_to_tray' | 'exit';
+  trayLeftClickAction: 'toggle_flyout' | 'show_main' | 'toggle_mini';
+  miniCardEnabled: boolean;
+  miniCardX?: number | null;
+  miniCardY?: number | null;
+  webDavUrl?: string | null;
+  webDavUsername?: string | null;
+  webDavPassword?: string | null;
+  webDavSyncPassphrase?: string | null;
+  lastWebDavSyncAt?: string | null;
+  hasWebDavPassword?: boolean;
+  hasSyncPassphrase?: boolean;
 }
 
 export interface SubscriptionSourceDto {
@@ -149,6 +181,7 @@ export interface SidecarEngineStatus {
   running: boolean;
   binaryPath?: string | null;
   version?: string | null;
+  binarySha256?: string | null;
   activeL2NodeCount: number;
   boundInterface?: string | null;
   lastError?: string | null;
@@ -217,6 +250,8 @@ export interface OverviewResponse {
   excludedVirtualNics: NetworkAdapterInfo[];
   isolation: IsolationSettings;
   seats: AppSeat[];
+  instances?: ManagedAppInstance[];
+  preferences?: HubUiPreferences;
   nodes: ProxyNode[];
   subscriptions?: SubscriptionSourceDto[];
   trafficSnapshots: SeatTrafficSnapshot[];
@@ -258,6 +293,42 @@ export interface UsageLogEntry {
   cacheSavedUsd?: number;
   isPriced: boolean;
   workspace?: string | null;
+  conversationId?: string | null;
+}
+
+export interface WorkspaceUsageSummary {
+  workspace: string;
+  requests: number;
+  totalTokens: number;
+  costUsd: number;
+  topApp: string;
+  topModel: string;
+}
+
+export interface ConversationAuditReport {
+  conversationId: string;
+  appName: string;
+  workspace?: string | null;
+  filePath?: string | null;
+  totalTurns: number;
+  peakContextTokens: number;
+  totalCostUsd: number;
+  totalCacheSavedUsd: number;
+  contextGrowthRatio: number;
+  optimizationHint?: string | null;
+  toolBreakdown: { toolName: string; calls: number }[];
+  turns: {
+    turnIndex: number;
+    timestamp: string;
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cumulativeContextTokens: number;
+    durationSeconds: number;
+    costUsd?: number | null;
+    toolsCalled: string[];
+  }[];
 }
 
 export interface DailyHeatmapCell {
@@ -338,6 +409,7 @@ export interface UsageDashboardResponse {
   pageSize: number;
   modelBreakdown: ModelUsageSummary[];
   appAndProxyBreakdown: AppUsageAndProxySummary[];
+  workspaceBreakdown?: WorkspaceUsageSummary[];
 }
 
 export interface ModelPricingRule {
@@ -427,8 +499,13 @@ export const api = {
     customNoProxy?: string;
     customExecutablePath?: string;
     acknowledgeDrift?: boolean;
+    isHidden?: boolean;
+    isPinned?: boolean;
+    sortOrder?: number;
   }) =>
     requestJson<AppSeat>(`/api/seats/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  reorderSeats: (orderedSeatIds: string[]) =>
+    requestJson<AppSeat[]>('/api/seats/reorder', { method: 'POST', body: JSON.stringify({ orderedSeatIds }) }),
   toggleAllSeats: (enabled: boolean) =>
     requestJson<AppSeat[]>('/api/seats/toggle-all', { method: 'POST', body: JSON.stringify({ enabled }) }),
   setSeatTakeover: (id: string, enabled: boolean) =>
@@ -441,6 +518,34 @@ export const api = {
       `/api/seats/${id}/launch`,
       { method: 'POST' }
     ),
+  restartSeatApp: (id: string) =>
+    requestJson<{ ok: boolean; message: string; seatTakeovers: SeatTakeoverStatus[] }>(
+      `/api/seats/${id}/restart`,
+      { method: 'POST' }
+    ),
+  getInstances: () => requestJson<ManagedAppInstance[]>('/api/instances'),
+  createInstance: (body: { baseSeatId: string; name: string; profileDir?: string; boundNodeId?: string; extraArgs?: string; workingDirectory?: string }) =>
+    requestJson<ManagedAppInstance>('/api/instances', { method: 'POST', body: JSON.stringify(body) }),
+  updateInstance: (id: string, body: { enabled?: boolean; boundNodeId?: string; killSwitchEnabled?: boolean; name?: string; extraArgs?: string; workingDirectory?: string }) =>
+    requestJson<ManagedAppInstance>(`/api/instances/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  deleteInstance: (id: string) => requestJson<{ ok: boolean; message: string }>(`/api/instances/${id}`, { method: 'DELETE' }),
+  launchInstance: (id: string) => requestJson<{ ok: boolean; message: string; instance?: ManagedAppInstance }>(`/api/instances/${id}/launch`, { method: 'POST' }),
+  getPreferences: () => requestJson<HubUiPreferences>('/api/preferences'),
+  updatePreferences: (body: Partial<HubUiPreferences>) =>
+    requestJson<HubUiPreferences>('/api/preferences', { method: 'PUT', body: JSON.stringify(body) }),
+  importSingBox: (localPath: string, expectedSha256?: string) =>
+    requestJson<{ ok: boolean; message: string; status: SidecarEngineStatus }>('/api/engine/singbox/import', {
+      method: 'POST',
+      body: JSON.stringify({ localPath, expectedSha256: expectedSha256 || null })
+    }),
+  testWebDav: (body: { webDavUrl?: string; webDavUsername?: string; webDavPassword?: string }) =>
+    requestJson<{ ok: boolean; message: string }>('/api/webdav/test', { method: 'POST', body: JSON.stringify(body) }),
+  pushWebDav: (body: { webDavUrl?: string; webDavUsername?: string; webDavPassword?: string; passphrase?: string }) =>
+    requestJson<{ ok: boolean; message: string; lastWebDavSyncAt?: string | null }>('/api/webdav/push', { method: 'POST', body: JSON.stringify(body) }),
+  pullWebDav: (body: { webDavUrl?: string; webDavUsername?: string; webDavPassword?: string; passphrase?: string }) =>
+    requestJson<{ ok: boolean; message: string; lastWebDavSyncAt?: string | null }>('/api/webdav/pull', { method: 'POST', body: JSON.stringify(body) }),
+  getConversationAudit: (conversationId: string) =>
+    requestJson<ConversationAuditReport>(`/api/stats/conversations/${encodeURIComponent(conversationId)}/audit`),
   checkSeatCountry: (id: string) =>
     requestJson<{ check: CountryCheckRecord; history: CountryCheckRecord[] }>(
       `/api/seats/${id}/check-country`,

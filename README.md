@@ -6,7 +6,7 @@
 
 **专为海外 AI 应用打造的跨平台独立出口代理网关、无损接管器与免解密用量统计中心**
 
-*让 Claude (Code / Desktop)、ChatGPT / Codex、Antigravity、Cursor、Gemini CLI、OpenClaw、Kimi / DeepSeek 等 **15 款 AI 应用**各自独占纯净静态出口 IP，与 Clash / Mihomo / Surge 平行共处、互不串线*
+*让 Claude (Code / Desktop)、ChatGPT / Codex、Antigravity、Cursor、Windsurf、Kiro、VS Code Copilot、Zed、Trae、CodeBuddy、OpenClaw 等 **21 款 AI 应用**各自独占纯净静态出口 IP（支持账号多开隔离），与 Clash / Mihomo / Surge 平行共处、互不串线*
 
 <p>
   <a href="https://github.com/HeyoCode/Agent_Proxy_Hub/releases">
@@ -36,7 +36,7 @@
   <a href="#-核心特性">核心特性</a> •
   <a href="#-界面预览">界面预览</a> •
   <a href="#-物理硬件直出架构">架构原理</a> •
-  <a href="#-支持应用与无损接管矩阵">15 款支持应用</a> •
+  <a href="#-支持应用与无损接管矩阵">21 款支持应用</a> •
   <a href="#-快速安装与使用">快速上手</a> •
   <a href="#-本地-rest-api-与开发构建">API 与开发</a> •
   <a href="#-常见问题-faq">FAQ</a> •
@@ -62,24 +62,24 @@
       <p>自动扫描并排除所有虚拟/隧道网卡，代理上游连接直绑物理以太网/Wi-Fi 出口；内置 <strong>TLS ClientHello SNI 域名还原</strong> 与<strong>物理网卡 UDP 53 + RFC 8484 HTTPS DoH 双层干净解析</strong>，全程过滤并剥离 Clash Fake-IP (<code>198.18.0.0/15</code>)。</p>
     </td>
     <td width="50%" valign="top">
-      <h3>🔌 15 款 AI 应用无损接管 & 受控启动</h3>
-      <p>内置支持 <strong>15 款主流 AI 桌面与 CLI 工具</strong>，写配置前自动备份原键值、支持一键精准还原且升级无损合并；Antigravity 启动器内置 <strong>150ms 端口探活守卫</strong>，网关开启自动导流，关闭自动直连绝不断网。</p>
+      <h3>🔌 21 款 AI 应用无损接管 &amp; 多开账号隔离</h3>
+      <p>内置支持 <strong>21 款主流 AI 桌面与 CLI 工具</strong>（含 Cursor / Windsurf / Kiro / VS Code Copilot / Zed / Trae / CodeBuddy），支持置顶排序隐藏、<strong>多开独立 User-Data 配置实例</strong>（工作/个人号分端口隔离）；Antigravity 启动器内置 <strong>150ms 端口探活守卫</strong>并严禁误杀运行中会话。</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>📊 免解密双源 AI 用量统计（365 天热力图 + 缓存节省）</h3>
-      <p>零 MITM 拆包风险，后台每 <strong>5 秒</strong>增量巡检 <code>~/.claude</code>、<code>~/.codex</code>、<code>~/.gemini/antigravity</code> 及 <code>antigravity-cli</code> 日志并去重，统计有效输入、输出、缓存命中率、<strong>Cache 累计节省金额</strong>、<strong>首字延迟估算 (TTFT)</strong> 与 <strong>365 天 AI 编码活跃热力图</strong>。</p>
+      <h3>📊 免解密双源统计 · 工作区排行 &amp; 单会话审计</h3>
+      <p>零 MITM 拆包，后台每 <strong>5 秒</strong>增量巡检本地日志并合并去重，提供<strong>项目工作区成本排行</strong>、<strong>365 天活跃热力图</strong>、<strong>Cache 节省额</strong>以及<strong>单会话上下文膨胀轨迹与工具调用审计</strong>。</p>
     </td>
     <td width="50%" valign="top">
-      <h3>⚡ 零 GC 吞吐引擎 & 实时/累计速率切换</h3>
-      <p>转发热路径采用 <code>ArrayPool</code> 零 GC 缓冲池、双工半关闭尾包排空与 1 秒滑动速率采样器；右侧双主题检视栏支持 <code>实时 (B/s · KB/s · MB/s)</code> 与 <code>累计 (B · KB · MB)</code> 一键切换及<strong>全链路实流验真</strong>。</p>
+      <h3>⚡ 零 GC 吞吐引擎 &amp; 置顶极简悬浮监控窗</h3>
+      <p>转发热路径采用 <code>ArrayPool</code> 零 GC 缓冲池、双工半关闭与滑动速率采样；Windows 桌面新增 <strong>Always-on-Top 极简悬浮监控卡</strong>与关窗/托盘左键偏好定制。</p>
     </td>
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>🌐 L1/L2 多协议 + 多订阅源托管 + 快照防漂移</h3>
-      <p><strong>L1 核心层</strong>纯 .NET 支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code> 支持 <code>VLESS / Hysteria2 / TUIC / WireGuard</code>；支持 <strong>多订阅源加密托管与自动同步</strong>、<code>skip-cert-verify</code> 风险审批，以及<strong>订阅刷新快照防漂移锁定</strong>。</p>
+      <h3>🌐 L1/L2 多协议 + SHA-256 离线校验 &amp; 防漂移</h3>
+      <p><strong>L1 核心层</strong>支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>支持 <code>sing-box</code> <strong>离线包导入（Zip-Slip 防护 + SHA-256 验真）</strong>、多订阅源同步与<strong>快照防漂移锁定</strong>。</p>
     </td>
     <td width="50%" valign="top">
       <h3>🔀 双跳链式加速（高速中转 → 静态住宅落地）</h3>
@@ -89,11 +89,11 @@
   <tr>
     <td width="50%" valign="top">
       <h3>🧊 全窗浅色/深色统一主题 · 跟随系统实时联动</h3>
-      <p>Windows 11 DWM 原生圆角无外边框窗口 + <strong>跟随系统 / 浅色 / 深色三态切换</strong>（主窗与托盘浮层实时同步），内置 15 款 AI 应用离线矢量品牌标与总控拓扑 <code>‹ 1/4 ›</code> 动态翻页。</p>
+      <p>Windows 11 DWM 原生圆角无外边框窗口 + <strong>跟随系统 / 浅色 / 深色三态切换</strong>（主窗、托盘浮层与悬浮监控卡三端同步），内置 21 款 AI 应用离线矢量品牌标与拓扑动态翻页。</p>
     </td>
     <td width="50%" valign="top">
-      <h3>🔒 国家硬门禁 · AES-GCM 静态加密 · 隐私护盾 & 审计</h3>
-      <p>支持各席位设置<strong>启动前出口国家硬门禁</strong>（不符即阻断）与 <strong>Fail-Close 熔断锁</strong>；本地凭据与订阅链接采用 <strong>DPAPI + AES-256-GCM 静态加密</strong>，前端可一键开启<strong>隐私护盾</strong>全局打码；提供<strong>近期 20 条 SNI 连接审计</strong>、脱敏日志中心与应用内更新检测。</p>
+      <h3>🔒 国家门禁 · 隐私护盾 &amp; WebDAV AES-GCM 同步</h3>
+      <p>支持各席位<strong>出口国家硬门禁</strong>与 <strong>Fail-Close 熔断锁</strong>；本地凭据与云端配置均使用 <strong>AES-256-GCM 静态加密</strong>（支持自托管 <strong>WebDAV 跨机零明文同步</strong>），并提供连接审计与脱敏日志中心。</p>
     </td>
   </tr>
 </table>
@@ -119,7 +119,7 @@
     <td width="50%" align="center">
       <img src="docs/screenshots/apps-takeover.png" alt="AI 应用一键无损接管工作台" />
       <br />
-      <sub><strong>15 款应用接管与 CLI 工作台</strong> · 搜索筛选、一键接管/无损还原、专线启动与随应用联动的终端命令</sub>
+      <sub><strong>21 款应用接管、多开隔离与 CLI 工作台</strong> · 搜索排序置顶、多开账号目录隔离、一键接管还原与专线启动</sub>
     </td>
     <td width="50%" align="center">
       <img src="docs/screenshots/tray-quick-panel.png" alt="系统托盘原生快捷面板" />
@@ -143,11 +143,11 @@
 
 ```mermaid
 flowchart LR
-    subgraph APPS["15 款独立 AI 应用层（互不串线）"]
+    subgraph APPS["21 款独立 AI 应用层 + 多开实例 (:17920+)"]
         A1["Claude Code (:17891)<br/>Claude Desktop (:17895)"]
         A2["ChatGPT / Codex<br/>:17892"]
         A3["Antigravity IDE<br/>:17893"]
-        A4["Cursor (:17894) + Gemini / Grok /<br/>OpenClaw / Kimi 等 10 款 (:17896~17905)"]
+        A4["Cursor / Windsurf / Kiro / VS Code /<br/>Zed / Trae / CodeBuddy / CLI (:17894~17911)"]
     end
 
     subgraph CORE["Agent Proxy Hub Core (.NET 10)"]
@@ -180,7 +180,7 @@ flowchart LR
 
 > 所有席位均原生监听**单端口多协议混合入站**（同时兼容 `HTTP / SOCKS5 / SOCKS4`），写入配置前自动备份原文件，随时一键无损还原。
 
-### 核心桌面与深度配置接管（5 款）
+### 核心桌面与深度配置接管（11 款）
 
 | 应用 | 默认端口 | 无损接管与还原方式 |
 | :--- | :---: | :--- |
@@ -189,6 +189,12 @@ flowchart LR
 | **Antigravity** | `:17893` | 兼容自愈启动器并内置 **150ms 端口探活守卫**（网关关闭时自动直连不断网），一键剥离还原 |
 | **Cursor** | `:17894` | 安全解析带注释的 `User/settings.json` 热写入 `http.proxy`，保留全部字体与插件配置 |
 | **Claude Desktop** | `:17895` | 自动探测本机 `Claude.exe` / `Claude.app` 注入 `--proxy-server` 桌面路由参数，支持一键清理 |
+| **Windsurf** | `:17906` | 无损备份并写入 `Windsurf/User/settings.json` (`http.proxy`)，支持 `--user-data-dir` 账号多开 |
+| **Kiro** | `:17907` | 无损备份并写入 `Kiro/User/settings.json` (`http.proxy`)，支持重启重连与独立配置多开 |
+| **VS Code Copilot** | `:17908` | 无损备份并写入 VS Code `Code/User/settings.json` (`http.proxy`)，不干扰系统代理 |
+| **Zed** | `:17909` | 无损读写 `zed/settings.json` 原生 `"proxy"` 字段与进程环境变量注入 |
+| **Trae** | `:17910` | 无损备份并写入 `Trae/User/settings.json` (`http.proxy`)，支持多开目录隔离 |
+| **CodeBuddy** | `:17911` | 无损读写 `CodeBuddy/User/settings.json` 与 CLI 隔离启动脚本双适配 |
 
 ### 扩展 CLI / Agent 支持矩阵（10 款，一键隔离启动器）
 
@@ -264,7 +270,7 @@ Agent_Proxy_Hub/
 ├── macos/                              # macOS 原生菜单栏 NSPopover + WKWebView 宿主与脚本
 ├── web/                                # React 19 + TypeScript + Vite 前端（双主题自适应 + 隐私护盾 + 365天热力图）
 ├── installer/                          # Inno Setup 6 (Windows) 与 DMG (macOS) 打包脚本
-├── tests/AgentProxyHub.Tests/          # 24 项 xUnit 测试（多协议 / 加密迁移 / 快照防漂移 / 热切换 / 安全守卫 / 热力图）
+├── tests/AgentProxyHub.Tests/          # 29 项 xUnit 测试（多协议 / 21 应用 / 多开隔离 / WebDAV AES-GCM / 审计）
 └── docs/screenshots/                   # README 展示截图资源
 ```
 
@@ -275,7 +281,7 @@ Agent_Proxy_Hub/
 pnpm --dir web install
 pnpm --dir web build
 
-# 2. 运行全套 xUnit 单元测试（24 项全绿）
+# 2. 运行全套 xUnit 单元测试（29 项全绿）
 dotnet test AgentProxyHub.sln -c Release
 
 # 3. 启动 Windows 无边框托盘客户端
@@ -309,7 +315,14 @@ chmod +x installer/macos/build-dmg.sh
 
 | 方法 | 路径 | 说明 |
 | :---: | :--- | :--- |
-| `GET` | `/api/overview` | 获取物理网卡、绕过隧道、15 款席位配置、节点池、实时吞吐/速率与接管状态 |
+| `GET` | `/api/overview` | 获取物理网卡、绕过隧道、21 款席位配置、多开实例、桌面偏好、节点池、实时吞吐与接管状态 |
+| `POST` | `/api/seats/reorder` | 保存自定义 AI 席位展示顺序 |
+| `POST` | `/api/seats/{id}/restart` | 优雅关闭旧进程并携独立代理端口重连（严格保护 Antigravity） |
+| `GET / POST / PUT / DELETE` | `/api/instances` | 多开隔离实例（独立 `ProfileDir` + `:17920+`）增删改查与 `/launch` 隔离启动 |
+| `GET / PUT` | `/api/preferences` | 读写桌面关闭行为、托盘左键动作、悬浮监控窗位置与脱敏 WebDAV 配置 |
+| `POST` | `/api/engine/singbox/import` | 离线导入 `.zip / .tar.gz / exe` 内核包（含 Zip-Slip 防护与 SHA-256 验真） |
+| `POST` | `/api/webdav/{test,push,pull}` | WebDAV 连通检测、PBKDF2+AES-256-GCM 加密备份上传与云端拉取恢复 |
+| `GET` | `/api/stats/conversations/{id}/audit` | 按需解析单会话上下文膨胀曲线与工具调用频次分布 |
 | `POST` | `/api/nodes/manual` | 手动添加单条 L1/L2 全协议独立代理线路（含扩展参数 `extra`） |
 | `POST` | `/api/nodes/batch-import` | 批量解析并去重导入多协议代理节点（支持 Clash YAML / Base64 / URI） |
 | `POST` | `/api/nodes/fetch-subscription` | 拉取机场订阅链接（自动兼容 `clash.meta` / `v2rayN` 与可选代理）并实时预览 |

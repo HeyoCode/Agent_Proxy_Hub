@@ -2292,3 +2292,187 @@ html[data-tray="1"] #root {
   border: 1px solid var(--divider);
   font-size: 11.5px;
 }
+
+.seat-mini-op-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1px solid var(--divider);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.seat-mini-op-btn:hover {
+  border-color: var(--accent-indigo);
+  color: var(--accent-indigo);
+}
+
+/* Always-on-Top 极简悬浮监控卡片 */
+html[data-mini='1'],
+html[data-mini='1'] body,
+html[data-mini='1'] #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-card);
+}
+
+.mini-card-shell {
+  width: 100%;
+  max-width: 284px;
+  min-height: 100vh;
+  padding: 9px 11px 10px;
+  box-sizing: border-box;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  overflow: hidden;
+}
+
+.mini-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: move;
+  user-select: none;
+}
+
+.mini-card-brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.mini-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--text-muted);
+}
+
+.mini-live-dot.on {
+  background: var(--accent-emerald-text);
+  box-shadow: 0 0 0 3px var(--accent-emerald-soft);
+}
+
+.mini-card-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.mini-ctrl-btn {
+  border: none;
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
+  border-radius: 6px;
+  height: 20px;
+  padding: 0 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mini-ctrl-btn:hover {
+  color: var(--accent-indigo);
+}
+
+.mini-metrics-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--bg-subtle);
+}
+
+.mini-seat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mini-seat-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 7px;
+  border-radius: 8px;
+  background: var(--bg-subtle);
+}
+
+.mini-seat-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 96px;
+}
+
+.mini-empty-row {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 8px 0;
+}
+
+.mini-tiny-switch {
+  position: relative;
+  display: inline-block;
+  width: 26px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+.mini-tiny-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.mini-tiny-slider {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--switch-off);
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+
+.mini-tiny-slider::before {
+  content: '';
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  left: 2px;
+  top: 2px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.16s ease;
+}
+
+.mini-tiny-switch input:checked + .mini-tiny-slider {
+  background: var(--accent-emerald);
+}
+
+.mini-tiny-switch input:checked + .mini-tiny-slider::before {
+  transform: translateX(11px);
+}

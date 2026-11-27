@@ -99,12 +99,21 @@ public sealed class HubStateStore
             if (!string.IsNullOrEmpty(sub.ProxyUrl) && !CredentialVault.IsEncrypted(sub.ProxyUrl))
                 return true;
         }
+        if (doc.Preferences != null)
+        {
+            if (!string.IsNullOrEmpty(doc.Preferences.WebDavPassword) && !CredentialVault.IsEncrypted(doc.Preferences.WebDavPassword))
+                return true;
+            if (!string.IsNullOrEmpty(doc.Preferences.WebDavSyncPassphrase) && !CredentialVault.IsEncrypted(doc.Preferences.WebDavSyncPassphrase))
+                return true;
+        }
         return false;
     }
 
     private void DecryptSecretsInPlace(HubStateDocument doc)
     {
         doc.Subscriptions ??= new();
+        doc.Instances ??= new();
+        doc.Preferences ??= new();
         foreach (var node in doc.Nodes)
         {
             if (!string.IsNullOrEmpty(node.Password))
@@ -130,16 +139,43 @@ public sealed class HubStateStore
             if (!string.IsNullOrEmpty(sub.ProxyUrl))
                 sub.ProxyUrl = _vault.Unprotect(sub.ProxyUrl);
         }
+        if (!string.IsNullOrEmpty(doc.Preferences.WebDavPassword))
+        {
+            doc.Preferences.WebDavPassword = _vault.Unprotect(doc.Preferences.WebDavPassword);
+            doc.Preferences.HasWebDavPassword = !string.IsNullOrEmpty(doc.Preferences.WebDavPassword);
+        }
+        if (!string.IsNullOrEmpty(doc.Preferences.WebDavSyncPassphrase))
+        {
+            doc.Preferences.WebDavSyncPassphrase = _vault.Unprotect(doc.Preferences.WebDavSyncPassphrase);
+            doc.Preferences.HasSyncPassphrase = !string.IsNullOrEmpty(doc.Preferences.WebDavSyncPassphrase);
+        }
     }
 
     private HubStateDocument CreateEncryptedClone(HubStateDocument doc)
     {
+        var pref = doc.Preferences ?? new HubUiPreferences();
         return new HubStateDocument
         {
             Isolation = doc.Isolation,
             HostApiPort = doc.HostApiPort,
             CustomPricings = doc.CustomPricings,
             Seats = doc.Seats,
+            Instances = doc.Instances ?? new(),
+            Preferences = new HubUiPreferences
+            {
+                CloseAction = pref.CloseAction,
+                TrayLeftClickAction = pref.TrayLeftClickAction,
+                MiniCardEnabled = pref.MiniCardEnabled,
+                MiniCardX = pref.MiniCardX,
+                MiniCardY = pref.MiniCardY,
+                WebDavUrl = pref.WebDavUrl,
+                WebDavUsername = pref.WebDavUsername,
+                WebDavPassword = string.IsNullOrEmpty(pref.WebDavPassword) ? pref.WebDavPassword : _vault.Protect(pref.WebDavPassword),
+                WebDavSyncPassphrase = string.IsNullOrEmpty(pref.WebDavSyncPassphrase) ? pref.WebDavSyncPassphrase : _vault.Protect(pref.WebDavSyncPassphrase),
+                LastWebDavSyncAt = pref.LastWebDavSyncAt,
+                HasWebDavPassword = !string.IsNullOrEmpty(pref.WebDavPassword) || pref.HasWebDavPassword,
+                HasSyncPassphrase = !string.IsNullOrEmpty(pref.WebDavSyncPassphrase) || pref.HasSyncPassphrase
+            },
             Subscriptions = (doc.Subscriptions ?? []).Select(s => new SubscriptionSource
             {
                 Id = s.Id,
@@ -497,6 +533,102 @@ public sealed class HubStateStore
             CaptureMode = "独立端口 :17905 + CLI 注入",
             LaunchCommandWin = "omp",
             LaunchCommandMac = "omp"
+        },
+        new AppSeat
+        {
+            Id = "windsurf",
+            Glyph = "WS",
+            Name = "Windsurf",
+            Subtitle = "Codeium Windsurf AI IDE",
+            ProcessWin = "Windsurf.exe",
+            ProcessMac = "Windsurf",
+            LocalPort = 17906,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17906 + Settings 热接管",
+            LaunchCommandWin = "windsurf",
+            LaunchCommandMac = "Windsurf"
+        },
+        new AppSeat
+        {
+            Id = "kiro",
+            Glyph = "KR",
+            Name = "Kiro",
+            Subtitle = "AWS Kiro Agentic AI IDE",
+            ProcessWin = "Kiro.exe",
+            ProcessMac = "Kiro",
+            LocalPort = 17907,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17907 + Settings 热接管",
+            LaunchCommandWin = "kiro",
+            LaunchCommandMac = "Kiro"
+        },
+        new AppSeat
+        {
+            Id = "vscode-copilot",
+            Glyph = "VC",
+            Name = "VS Code Copilot",
+            Subtitle = "VS Code & GitHub Copilot",
+            ProcessWin = "Code.exe",
+            ProcessMac = "Visual Studio Code",
+            LocalPort = 17908,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17908 + Settings 热接管",
+            LaunchCommandWin = "code",
+            LaunchCommandMac = "Visual Studio Code"
+        },
+        new AppSeat
+        {
+            Id = "zed",
+            Glyph = "ZD",
+            Name = "Zed",
+            Subtitle = "Zed 高性能 AI 编辑器",
+            ProcessWin = "Zed.exe",
+            ProcessMac = "Zed",
+            LocalPort = 17909,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17909 + settings.json",
+            LaunchCommandWin = "zed",
+            LaunchCommandMac = "Zed"
+        },
+        new AppSeat
+        {
+            Id = "trae",
+            Glyph = "TR",
+            Name = "Trae",
+            Subtitle = "ByteDance Trae AI IDE",
+            ProcessWin = "Trae.exe",
+            ProcessMac = "Trae",
+            LocalPort = 17910,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17910 + Settings 热接管",
+            LaunchCommandWin = "trae",
+            LaunchCommandMac = "Trae"
+        },
+        new AppSeat
+        {
+            Id = "codebuddy",
+            Glyph = "CB",
+            Name = "CodeBuddy",
+            Subtitle = "Tencent CodeBuddy IDE / CLI",
+            ProcessWin = "CodeBuddy.exe / codebuddy.exe",
+            ProcessMac = "CodeBuddy",
+            LocalPort = 17911,
+            BoundNodeId = "direct-phy",
+            Enabled = false,
+            KillSwitchEnabled = true,
+            CaptureMode = "独立端口 :17911 + Settings & CLI",
+            LaunchCommandWin = "codebuddy",
+            LaunchCommandMac = "CodeBuddy"
         }
     ];
 }

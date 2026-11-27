@@ -35,9 +35,15 @@ public sealed class MainForm : Form
     private readonly WebView2 _webView;
     private readonly NotifyIcon _trayIcon;
     private TrayFlyoutForm? _trayFlyout;
+    private FloatingMiniForm? _floatingMini;
     private bool _reallyExiting;
     private bool _isCustomMaximized;
     private Rectangle _restoreBounds;
+    private string _closeAction = "minimize_to_tray";
+    private string _trayLeftClickAction = "toggle_flyout";
+    private bool _miniCardEnabled;
+    private int? _miniCardX;
+    private int? _miniCardY;
 
     [DllImport("user32.dll")]
     private static extern bool ReleaseCapture();
@@ -99,15 +105,32 @@ public sealed class MainForm : Form
             Text = $"{ProjectMetadata.Name} v{ProjectMetadata.Version} · 物理直出独立代理",
             Visible = true
         };
-        // 左键或右键单击托盘图标，均弹出系统级无边框圆角快捷面板，彻底替代传统 ContextMenuStrip
+        // 左键按偏好响应（快捷面板/拉起主窗/悬浮监控窗），右键固定弹出托盘快捷面板
         _trayIcon.MouseUp += (_, e) =>
         {
-            if (e.Button is MouseButtons.Left or MouseButtons.Right)
+            if (e.Button == MouseButtons.Right)
             {
-                if (_trayFlyout != null)
-                    _trayFlyout.ToggleAtCursor();
-                else if (e.Button == MouseButtons.Left)
-                    ShowMainWindow();
+                _trayFlyout?.ToggleAtCursor();
+                return;
+            }
+            if (e.Button == MouseButtons.Left)
+            {
+                switch (_trayLeftClickAction)
+                {
+                    case "show_main":
+                        _trayFlyout?.HideFlyout();
+                        ShowMainWindow();
+                        break;
+                    case "toggle_mini":
+                        ToggleMiniCard();
+                        break;
+                    default:
+                        if (_trayFlyout != null)
+                            _trayFlyout.ToggleAtCursor();
+                        else
+                            ShowMainWindow();
+                        break;
+                }
             }
         };
         _trayIcon.DoubleClick += (_, _) =>
@@ -207,8 +230,14 @@ public sealed class MainForm : Form
 
             // 后台无感预热托盘快捷面板（复用共享 WebView2 环境，首击毫秒级呼出）
             string trayUrl = $"{_url}{sep}tray=1&v={Uri.EscapeDataString(ProjectMetadata.Version)}&b={buildTicks}";
-            _trayFlyout = new TrayFlyoutForm(ShowMainWindow, ExitApplication);
+            _trayFlyout = new TrayFlyoutForm(ShowMainWindow, ExitApplication, ToggleMiniCard);
             _ = _trayFlyout.WarmUpAsync(env, trayUrl);
+
+            // 预热极简悬浮监控卡片（Always-on-Top）并按用户偏好自动恢复显示
+            string miniUrl = $"{_url}{sep}mini=1&v={Uri.EscapeDataString(ProjectMetadata.Version)}&b={buildTicks}";
+            _floatingMini = new FloatingMiniForm(ShowMainWindow, _url);
+            _ = _floatingMini.WarmUpAsync(env, miniUrl);
+            await SyncDesktopPreferencesAsync();
         }
         catch (Exception ex)
         {
@@ -267,7 +296,19 @@ public sealed class MainForm : Form
                     break;
 
                 case "window:hideToTray":
-                    BeginInvoke(Hide);
+                    BeginInvoke(() =>
+                    {
+                        if (_closeAction == "exit") ExitApplication();
+                        else Hide();
+                    });
+                    break;
+
+                case "window:toggleMini":
+                    BeginInvoke(ToggleMiniCard);
+                    break;
+
+                case "window:preferencesSync":
+                    BeginInvoke(async () => await SyncDesktopPreferencesAsync());
                     break;
 
                 case "window:openUrl":
@@ -411,15 +452,69 @@ public sealed class MainForm : Form
     {
         _reallyExiting = true;
         _trayFlyout?.HideFlyout();
+        _floatingMini?.HideMini();
         _trayIcon.Visible = false;
         Close();
     }
 
+    private void ToggleMiniCard()
+    {
+        _miniCardEnabled = !_miniCardEnabled;
+        if (_miniCardEnabled)
+        {
+            _floatingMini?.ShowMini(_miniCardX, _miniCardY);
+        }
+        else
+        {
+            _floatingMini?.HideMini();
+        }
+        _ = PersistMiniStateAsync(_miniCardEnabled);
+    }
+
+    private async Task PersistMiniStateAsync(bool enabled)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            string payload = JsonSerializer.Serialize(new { miniCardEnabled = enabled });
+            using var content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            await http.PutAsync(_url.TrimEnd('/') + "/api/preferences", content);
+        }
+        catch { }
+    }
+
+    private async Task SyncDesktopPreferencesAsync()
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            string json = await http.GetStringAsync(_url.TrimEnd('/') + "/api/preferences");
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("closeAction", out var ca) && ca.ValueKind == JsonValueKind.String)
+                _closeAction = ca.GetString() ?? "minimize_to_tray";
+            if (root.TryGetProperty("trayLeftClickAction", out var ta) && ta.ValueKind == JsonValueKind.String)
+                _trayLeftClickAction = ta.GetString() ?? "toggle_flyout";
+            if (root.TryGetProperty("miniCardX", out var mx) && mx.ValueKind == JsonValueKind.Number)
+                _miniCardX = mx.GetInt32();
+            if (root.TryGetProperty("miniCardY", out var my) && my.ValueKind == JsonValueKind.Number)
+                _miniCardY = my.GetInt32();
+            if (root.TryGetProperty("miniCardEnabled", out var me) && me.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                bool wantMini = me.GetBoolean();
+                _miniCardEnabled = wantMini;
+                if (wantMini) _floatingMini?.ShowMini(_miniCardX, _miniCardY);
+                else _floatingMini?.HideMini();
+            }
+        }
+        catch { }
+    }
+
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
-        if (!_reallyExiting && e.CloseReason == CloseReason.UserClosing)
+        if (!_reallyExiting && e.CloseReason == CloseReason.UserClosing && _closeAction != "exit")
         {
-            // 关闭主窗口时默认收缩到系统托盘，确保后台 AI 专线持续在线不中断
+            // 按桌面偏好决定关闭按钮行为：默认最小化至系统托盘，确保后台 AI 专线持续在线不中断
             e.Cancel = true;
             Hide();
         }
@@ -429,6 +524,7 @@ public sealed class MainForm : Form
     {
         if (disposing)
         {
+            _floatingMini?.Dispose();
             _trayFlyout?.Dispose();
             _trayIcon.Dispose();
             _webView.Dispose();

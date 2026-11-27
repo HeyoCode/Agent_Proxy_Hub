@@ -9,10 +9,13 @@ interface NativeBridgePayload {
     | 'window:minimize'
     | 'window:toggleMaximize'
     | 'window:hideToTray'
+    | 'window:toggleMini'
+    | 'window:preferencesSync'
     | 'window:openUrl'
     | 'tray:openMain'
     | 'tray:hide'
     | 'tray:exitApp'
+    | 'tray:toggleMini'
     | 'tray:resize';
   edge?: WindowEdge;
   url?: string;

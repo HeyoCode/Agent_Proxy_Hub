@@ -2,6 +2,24 @@
 
 All notable changes to **Agent Proxy Hub** are documented in this file.
 
+## [v0.6.0] - 2026-11-28
+
+### 🧩 21 款 AI 应用、多开账号隔离与排序置顶
+- **内置支持矩阵扩充至 21 款主流 AI 应用**：新增 **Windsurf (`:17906`)**、**Kiro (`:17907`)**、**VS Code Copilot (`:17908`)**、**Zed (`:17909`)**、**Trae (`:17910`)** 与 **CodeBuddy (`:17911`)** 原生 SVG 品牌标识与无损 `settings.json` 代理接管/备份还原。
+- **多开账号隔离实例（Profile Isolation, `:17920+`）**：新增 `ManagedAppInstance` 与 `AppInstanceManager`，支持为任意 IDE / CLI 创建多个独立 `--user-data-dir` / `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 配置目录实例，分配独立本地混合代理端口并发多开、互不串号且各自独占出口 IP。
+- **席位排序 / 置顶 / 隐藏与安全重启重连**：支持自由上下调序（`/api/seats/reorder`）、置顶与主屏隐藏；非 Antigravity 席位支持「重启重连」（`/api/seats/{id}/restart`），并对正在运行的 `Antigravity` / `language_server` 与本网关进程施加硬保护，严禁强制结束。
+
+### 📊 工作区成本排行与单会话上下文/工具审计
+- **单会话上下文膨胀与工具调用审计 (`/api/stats/conversations/{conversationId}/audit`)**：免解密按需解析 Antigravity / Claude Code / Codex 会话流的工具调用分布（`Read` / `Edit` / `Bash` / `function_call` 等）与逐轮上下文膨胀曲线（峰值上下文、膨胀倍率与优化提示），绝不读取用户提示词或源码正文。
+- **项目工作区成本排行 (`WorkspaceBreakdown`)**：自动提取会话 `cwd / workspace` 并按工作区聚合算力耗时与估算花费，支持隐私护盾目录脱敏。
+
+### 🪟 置顶悬浮监控窗、SHA-256 离线校验与 WebDAV AES-GCM 同步
+- **Always-on-Top 极简置顶悬浮监控窗 (`FloatingMiniForm`)**：共享 WebView2 运行环境与深浅主题状态，支持透明无边框拖拽定位、实时收发速率展示、前 3 个活跃席位一键启停，以及桌面关窗行为/托盘左键点击偏好定制（`/api/preferences`）。
+- **`sing-box` 离线包 SHA-256 验证与 Zip-Slip 防护**：支持直接导入本地 `.zip` / `.tar.gz` / `.exe`，强制拦截压缩包 `..` 目录穿越攻击并校验可选 SHA-256 指纹。
+- **WebDAV 跨机器加密同步 (`WebDavSyncService`)**：基于 **PBKDF2-SHA256 + AES-256-GCM** 在本地将节点、席位、订阅源与多开实例全量加密后同步至坚果云 / Nextcloud / Alist 等 WebDAV 服务（自动剥离 WebDAV 主密码，凭据库 `CredentialVault` 静态护密），并在全量 **29 项 xUnit 单元测试**中通过回归验证。
+
+---
+
 ## [v0.5.0] - 2026-11-28
 
 ### 🛡️ 防风控门禁、凭据加密与安全护盾

@@ -5,6 +5,7 @@ import {
   BrandLogoIcon,
   GitHubIcon,
   IsolationNavIcon,
+  MiniFloatIcon,
   MoonIcon,
   NodesNavIcon,
   OverviewNavIcon,
@@ -45,7 +46,7 @@ type TabKey = 'overview' | 'usage' | 'nodes' | 'apps' | 'isolation';
 
 const FALLBACK_PROJECT = {
   name: 'Agent Proxy Hub',
-  version: '0.5.0',
+  version: '0.6.0',
   repoOwner: 'HeyoCode',
   repoName: 'Agent_Proxy_Hub',
   repoSlug: 'HeyoCode/Agent_Proxy_Hub',
@@ -285,6 +286,23 @@ export const App: React.FC = () => {
         </nav>
 
         <div className="rail-bottom">
+          <button
+            type="button"
+            className="rail-utility-btn"
+            aria-label="打开或隐藏置顶极简悬浮监控卡片"
+            onClick={() => {
+              if (isDesktopShell()) {
+                sendWindowCommand({ type: 'window:toggleMini' });
+                toast('已切换桌面置顶悬浮监控窗');
+              } else {
+                window.open('/?mini=1', 'aph_mini', 'width=300,height=170');
+              }
+            }}
+          >
+            <MiniFloatIcon size={17} />
+            <span className="rail-tooltip">置顶悬浮监控窗</span>
+          </button>
+
           <button
             type="button"
             className={`rail-utility-btn ${privacyMode ? 'active-privacy' : ''}`}

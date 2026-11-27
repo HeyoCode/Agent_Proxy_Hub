@@ -19,6 +19,7 @@ public sealed class SessionLogScanner
     private readonly string _claudeProjectsDir;
     private readonly string _codexSessionsDir;
     private readonly ConcurrentDictionary<string, CachedFileResult> _fileCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _conversationFileMap = new(StringComparer.OrdinalIgnoreCase);
     private List<UsageLogEntry>? _cachedOrdered;
     private int _lastFileCount = -1;
 
@@ -90,6 +91,16 @@ public sealed class SessionLogScanner
         {
             foreach (var item in ParseWithCache(file, parser, ref reparsedCount))
             {
+                if (!string.IsNullOrWhiteSpace(item.ConversationId))
+                {
+                    // Desktop 会话优先覆盖 CLI 镜像，保证文件定位一致
+                    _conversationFileMap.AddOrUpdate(
+                        item.ConversationId,
+                        file,
+                        (_, existing) => existing.Contains(".system_generated", StringComparison.OrdinalIgnoreCase) && !file.Contains(".system_generated", StringComparison.OrdinalIgnoreCase)
+                            ? existing
+                            : file);
+                }
                 // Desktop 与 antigravity-cli 可能镜像同一对话 ID，严格去重避免双计
                 if (seenEntryIds.Add(item.Id))
                     allEntries.Add(item);
@@ -103,6 +114,13 @@ public sealed class SessionLogScanner
             if (!seenFiles.Contains(cachedKey))
             {
                 if (_fileCache.TryRemove(cachedKey, out _)) removedAny = true;
+            }
+        }
+        foreach (var kv in _conversationFileMap)
+        {
+            if (!seenFiles.Contains(kv.Value))
+            {
+                _conversationFileMap.TryRemove(kv.Key, out _);
             }
         }
 
@@ -186,7 +204,9 @@ public sealed class SessionLogScanner
     public static List<UsageLogEntry> ParseAntigravityTranscript(string filePath)
     {
         var results = new List<UsageLogEntry>();
-        string fileTag = Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(filePath)) ?? "agy");
+        string fileTag = ExtractAntigravityConversationTag(filePath);
+        string convId = $"agy:{fileTag}";
+        string? detectedWorkspace = null;
         var pending = new List<(UsageLogEntry Entry, bool HasThinking, int ThinkingChars, double? ExplicitTtftSec)>();
         var timeline = new List<(DateTimeOffset Ts, int PendingIdx)>();
         int lineIdx = 0;
@@ -195,6 +215,13 @@ public sealed class SessionLogScanner
         {
             lineIdx++;
             if (string.IsNullOrWhiteSpace(line)) continue;
+
+            if (detectedWorkspace == null)
+            {
+                detectedWorkspace ??= TryQuickExtractJsonString(line, "\"workspace\"")
+                    ?? TryQuickExtractJsonString(line, "\"cwd\"")
+                    ?? TryQuickExtractJsonString(line, "\"working_directory\"");
+            }
 
             if (!line.Contains("\"PLANNER_RESPONSE\"", StringComparison.Ordinal))
             {
@@ -209,6 +236,9 @@ public sealed class SessionLogScanner
                 var root = doc.RootElement;
                 DateTimeOffset? ts = TryReadTimestamp(root, "created_at");
                 string? stepType = TryGetString(root, "type");
+                detectedWorkspace ??= TryGetString(root, "workspace")
+                    ?? TryGetString(root, "cwd")
+                    ?? TryGetString(root, "working_directory");
 
                 if (stepType == "PLANNER_RESPONSE")
                 {
@@ -239,7 +269,9 @@ public sealed class SessionLogScanner
                             EffectiveInputTokens = input,
                             OutputTokens = output,
                             CacheReadTokens = cacheRead,
-                            CacheWriteTokens = 0
+                            CacheWriteTokens = 0,
+                            Workspace = detectedWorkspace,
+                            ConversationId = convId
                         };
 
                         int pIdx = pending.Count;
@@ -287,6 +319,8 @@ public sealed class SessionLogScanner
                 entry.OutputTokens,
                 hasThinking,
                 thinkingChars);
+            if (string.IsNullOrWhiteSpace(entry.Workspace) && !string.IsNullOrWhiteSpace(detectedWorkspace))
+                entry.Workspace = detectedWorkspace;
 
             results.Add(entry);
         }
@@ -326,6 +360,8 @@ public sealed class SessionLogScanner
     {
         var byMessageId = new Dictionary<string, UsageLogEntry>(StringComparer.Ordinal);
         string sessionTag = Path.GetFileNameWithoutExtension(filePath);
+        string convId = $"claude:{sessionTag}";
+        string? detectedWorkspace = null;
         DateTimeOffset? prevTime = null;
         int seq = 0;
 
@@ -333,6 +369,11 @@ public sealed class SessionLogScanner
         {
             seq++;
             if (string.IsNullOrWhiteSpace(line)) continue;
+
+            if (detectedWorkspace == null && line.Contains("\"cwd\"", StringComparison.Ordinal))
+            {
+                detectedWorkspace = TryQuickExtractJsonString(line, "\"cwd\"");
+            }
 
             if (!line.Contains("\"usage\"", StringComparison.Ordinal))
             {
@@ -346,6 +387,7 @@ public sealed class SessionLogScanner
                 using var doc = JsonDocument.Parse(line);
                 var root = doc.RootElement;
                 DateTimeOffset? ts = TryReadTimestamp(root, "timestamp");
+                detectedWorkspace ??= TryGetString(root, "cwd");
 
                 if (root.TryGetProperty("message", out var msg) && msg.ValueKind == JsonValueKind.Object
                     && msg.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
@@ -384,7 +426,9 @@ public sealed class SessionLogScanner
                             OutputTokens = output,
                             DurationSeconds = durationSec,
                             FirstTokenSeconds = EstimateFirstTokenSeconds(durationSec, input + cacheRead + cacheWrite, output, false, 0),
-                            TokensPerSecond = tps
+                            TokensPerSecond = tps,
+                            Workspace = detectedWorkspace,
+                            ConversationId = convId
                         };
 
                         if (!byMessageId.TryGetValue(msgId, out var existing) || candidate.TotalTokens >= existing.TotalTokens)
@@ -402,6 +446,14 @@ public sealed class SessionLogScanner
             }
         }
 
+        if (!string.IsNullOrWhiteSpace(detectedWorkspace))
+        {
+            foreach (var v in byMessageId.Values)
+            {
+                if (string.IsNullOrWhiteSpace(v.Workspace)) v.Workspace = detectedWorkspace;
+            }
+        }
+
         return byMessageId.Values.ToList();
     }
 
@@ -412,7 +464,9 @@ public sealed class SessionLogScanner
     {
         var results = new List<UsageLogEntry>();
         string sessionTag = Path.GetFileNameWithoutExtension(filePath);
+        string convId = $"codex:{sessionTag}";
         string currentModel = "codex-unknown";
+        string? detectedWorkspace = null;
         DateTimeOffset? turnStartTime = null;
         long lastCumulativeTotal = -1;
         int seq = 0;
@@ -421,6 +475,11 @@ public sealed class SessionLogScanner
         {
             seq++;
             if (string.IsNullOrWhiteSpace(line)) continue;
+
+            if (detectedWorkspace == null && line.Contains("\"cwd\"", StringComparison.Ordinal))
+            {
+                detectedWorkspace = TryQuickExtractJsonString(line, "\"cwd\"");
+            }
 
             if (!line.Contains("\"turn_context\"", StringComparison.Ordinal)
                 && !line.Contains("\"token_count\"", StringComparison.Ordinal)
@@ -440,11 +499,13 @@ public sealed class SessionLogScanner
                 {
                     string? m = TryGetString(tc, "model");
                     if (!string.IsNullOrWhiteSpace(m)) currentModel = m;
+                    detectedWorkspace ??= TryGetString(tc, "cwd");
                     if (ts.HasValue) turnStartTime = ts;
                 }
                 else if (rowType == "event_msg" && root.TryGetProperty("payload", out var payload))
                 {
                     string? pType = TryGetString(payload, "type");
+                    detectedWorkspace ??= TryGetString(payload, "cwd");
                     if (pType == "task_started" && ts.HasValue)
                     {
                         turnStartTime = ts;
@@ -491,7 +552,9 @@ public sealed class SessionLogScanner
                                 CacheWriteTokens = cacheWrite,
                                 OutputTokens = output,
                                 DurationSeconds = durationSec,
-                                TokensPerSecond = tps
+                                TokensPerSecond = tps,
+                                Workspace = detectedWorkspace,
+                                ConversationId = convId
                             });
                             turnStartTime = ts;
                         }
@@ -501,6 +564,14 @@ public sealed class SessionLogScanner
             catch
             {
                 // 跳过单行错误
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(detectedWorkspace))
+        {
+            foreach (var r in results)
+            {
+                if (string.IsNullOrWhiteSpace(r.Workspace)) r.Workspace = detectedWorkspace;
             }
         }
 
@@ -574,5 +645,272 @@ public sealed class SessionLogScanner
         if (DateTimeOffset.TryParse(slice, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dto))
             return dto.ToLocalTime();
         return null;
+    }
+
+    private static string ExtractAntigravityConversationTag(string filePath)
+    {
+        var parent = Path.GetDirectoryName(filePath);
+        if (string.IsNullOrWhiteSpace(parent)) return "agy";
+        var folderName = Path.GetFileName(parent);
+        if (folderName.Equals("logs", StringComparison.OrdinalIgnoreCase))
+        {
+            var sysGen = Path.GetDirectoryName(parent);
+            var convDir = sysGen != null && Path.GetFileName(sysGen).Equals(".system_generated", StringComparison.OrdinalIgnoreCase)
+                ? Path.GetDirectoryName(sysGen)
+                : sysGen;
+            var convName = convDir != null ? Path.GetFileName(convDir) : null;
+            if (!string.IsNullOrWhiteSpace(convName)) return convName;
+        }
+        return string.IsNullOrWhiteSpace(folderName) ? "agy" : folderName;
+    }
+
+    private static string? TryQuickExtractJsonString(string line, string quotedKey)
+    {
+        int keyIdx = line.IndexOf(quotedKey, StringComparison.Ordinal);
+        if (keyIdx < 0) return null;
+        int colonIdx = line.IndexOf(':', keyIdx + quotedKey.Length);
+        if (colonIdx < 0) return null;
+        int q1 = line.IndexOf('"', colonIdx + 1);
+        if (q1 < 0) return null;
+        int q2 = q1 + 1;
+        while (q2 < line.Length && q2 - q1 <= 260)
+        {
+            if (line[q2] == '"' && line[q2 - 1] != '\\')
+            {
+                string raw = line.Substring(q1 + 1, q2 - q1 - 1);
+                return raw.Replace("\\\\", "\\", StringComparison.Ordinal);
+            }
+            q2++;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 按需读取单个会话的上下文膨胀轨迹与工具调用元数据（绝不读取提示词与代码正文）
+    /// </summary>
+    public ConversationAuditReport? BuildConversationAudit(string conversationId, ModelPricingCatalog pricing)
+    {
+        if (string.IsNullOrWhiteSpace(conversationId)) return null;
+
+        if (!_conversationFileMap.TryGetValue(conversationId, out string? filePath) || !File.Exists(filePath))
+        {
+            ScanIncrementalWithChangeFlag();
+            if (!_conversationFileMap.TryGetValue(conversationId, out filePath) || !File.Exists(filePath))
+                return null;
+        }
+
+        List<UsageLogEntry> entries;
+        string appName;
+        var turnTools = new Dictionary<int, List<string>>();
+        var toolCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        if (conversationId.StartsWith("claude:", StringComparison.OrdinalIgnoreCase))
+        {
+            appName = "Claude Code";
+            entries = ParseClaudeSession(filePath).OrderBy(e => e.Timestamp).ToList();
+            var toolsByMsg = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            foreach (string line in ReadLinesShared(filePath))
+            {
+                if (!line.Contains("\"tool_use\"", StringComparison.Ordinal)) continue;
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    if (doc.RootElement.TryGetProperty("message", out var msg) && msg.ValueKind == JsonValueKind.Object)
+                    {
+                        string? msgId = TryGetString(msg, "id");
+                        if (string.IsNullOrWhiteSpace(msgId)) continue;
+                        if (msg.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var block in content.EnumerateArray())
+                            {
+                                if (TryGetString(block, "type") == "tool_use")
+                                {
+                                    string? tName = TryGetString(block, "name");
+                                    if (!string.IsNullOrWhiteSpace(tName))
+                                    {
+                                        if (!toolsByMsg.TryGetValue(msgId, out var list)) toolsByMsg[msgId] = list = new();
+                                        list.Add(tName);
+                                        toolCounts[tName] = toolCounts.GetValueOrDefault(tName) + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { /* 跳过单行异常 */ }
+            }
+
+            string sessionTag = Path.GetFileNameWithoutExtension(filePath);
+            string prefix = $"claude:{sessionTag}:";
+            for (int i = 0; i < entries.Count; i++)
+            {
+                string msgKey = entries[i].Id.StartsWith(prefix, StringComparison.Ordinal)
+                    ? entries[i].Id[prefix.Length..]
+                    : entries[i].Id;
+                if (toolsByMsg.TryGetValue(msgKey, out var tList))
+                    turnTools[i] = tList;
+            }
+        }
+        else if (conversationId.StartsWith("codex:", StringComparison.OrdinalIgnoreCase))
+        {
+            appName = "Codex";
+            entries = ParseCodexSession(filePath).OrderBy(e => e.Timestamp).ToList();
+            int currentTurn = -1;
+            int codexTurnCount = 0;
+            foreach (string line in ReadLinesShared(filePath))
+            {
+                if (!line.Contains("token_count", StringComparison.Ordinal)
+                    && !line.Contains("function_call", StringComparison.Ordinal)
+                    && !line.Contains("custom_tool_call", StringComparison.Ordinal)
+                    && !line.Contains("local_shell_call", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+                    string? rowType = TryGetString(root, "type");
+                    if (rowType == "event_msg" && root.TryGetProperty("payload", out var payload))
+                    {
+                        if (TryGetString(payload, "type") == "token_count" && codexTurnCount < entries.Count)
+                        {
+                            currentTurn = Math.Min(entries.Count - 1, Math.Max(0, codexTurnCount++));
+                        }
+                    }
+                    else if (rowType == "response_item" && root.TryGetProperty("payload", out var rPayload))
+                    {
+                        string? pType = TryGetString(rPayload, "type");
+                        string? tName = pType switch
+                        {
+                            "function_call" or "custom_tool_call" => TryGetString(rPayload, "name"),
+                            "local_shell_call" => "shell",
+                            _ => null
+                        };
+                        if (!string.IsNullOrWhiteSpace(tName))
+                        {
+                            int targetIdx = Math.Max(0, Math.Min(entries.Count - 1, currentTurn < 0 ? 0 : currentTurn));
+                            if (!turnTools.TryGetValue(targetIdx, out var list)) turnTools[targetIdx] = list = new();
+                            list.Add(tName);
+                            toolCounts[tName] = toolCounts.GetValueOrDefault(tName) + 1;
+                        }
+                    }
+                }
+                catch { /* 跳过单行异常 */ }
+            }
+        }
+        else
+        {
+            appName = "Antigravity";
+            entries = ParseAntigravityTranscript(filePath).OrderBy(e => e.Timestamp).ToList();
+            int plannerIdx = -1;
+            foreach (string line in ReadLinesShared(filePath))
+            {
+                if (!line.Contains("PLANNER_RESPONSE", StringComparison.Ordinal)
+                    && !line.Contains("tool_calls", StringComparison.Ordinal)
+                    && !line.Contains("TOOL_CALL", StringComparison.Ordinal)
+                    && !line.Contains("COMMAND_EXECUTION", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                try
+                {
+                    using var doc = JsonDocument.Parse(line);
+                    var root = doc.RootElement;
+                    string? st = TryGetString(root, "type");
+                    if (st == "PLANNER_RESPONSE")
+                    {
+                        long tok = TryGetInt64(root, "input_tokens") + TryGetInt64(root, "cache_read_tokens") + TryGetInt64(root, "output_tokens");
+                        if (tok > 0) plannerIdx = Math.Min(entries.Count - 1, plannerIdx + 1);
+                        if (plannerIdx >= 0 && root.TryGetProperty("tool_calls", out var tcArr) && tcArr.ValueKind == JsonValueKind.Array)
+                        {
+                            foreach (var tc in tcArr.EnumerateArray())
+                            {
+                                string? tName = TryGetString(tc, "name") ?? TryGetString(tc, "tool_name");
+                                if (tName == null && tc.TryGetProperty("function", out var fn) && fn.ValueKind == JsonValueKind.Object)
+                                    tName = TryGetString(fn, "name");
+                                if (!string.IsNullOrWhiteSpace(tName))
+                                {
+                                    if (!turnTools.TryGetValue(plannerIdx, out var list)) turnTools[plannerIdx] = list = new();
+                                    list.Add(tName);
+                                    toolCounts[tName] = toolCounts.GetValueOrDefault(tName) + 1;
+                                }
+                            }
+                        }
+                    }
+                    else if ((st == "TOOL_CALL" || st == "COMMAND_EXECUTION" || st == "CODE_ACTION") && plannerIdx >= 0)
+                    {
+                        string? tName = TryGetString(root, "tool_name") ?? TryGetString(root, "name") ?? st;
+                        if (!string.IsNullOrWhiteSpace(tName))
+                        {
+                            if (!turnTools.TryGetValue(plannerIdx, out var list)) turnTools[plannerIdx] = list = new();
+                            list.Add(tName);
+                            toolCounts[tName] = toolCounts.GetValueOrDefault(tName) + 1;
+                        }
+                    }
+                }
+                catch { /* 跳过单行异常 */ }
+            }
+        }
+
+        double totalCost = 0;
+        double totalSaved = 0;
+        long peakContext = 0;
+        long firstContext = 0;
+        long lastContext = 0;
+        var turns = new List<ConversationTurnAudit>(entries.Count);
+
+        for (int i = 0; i < entries.Count; i++)
+        {
+            var e = entries[i];
+            var (cost, saved, isPriced) = pricing.CalculateCostAndSavings(e);
+            if (isPriced && cost.HasValue) totalCost += cost.Value;
+            totalSaved += saved;
+
+            long ctx = e.EffectiveInputTokens + e.CacheReadTokens + e.CacheWriteTokens;
+            if (i == 0) firstContext = ctx;
+            lastContext = ctx;
+            if (ctx > peakContext) peakContext = ctx;
+
+            turns.Add(new ConversationTurnAudit
+            {
+                TurnIndex = i + 1,
+                Timestamp = e.Timestamp,
+                Model = e.Model,
+                InputTokens = e.EffectiveInputTokens,
+                OutputTokens = e.OutputTokens,
+                CacheReadTokens = e.CacheReadTokens,
+                CumulativeContextTokens = ctx,
+                DurationSeconds = e.DurationSeconds,
+                CostUsd = isPriced ? cost : null,
+                ToolsCalled = turnTools.TryGetValue(i, out var tList) ? tList : []
+            });
+        }
+
+        double growthRatio = firstContext > 0 ? Math.Round((double)lastContext / firstContext, 2) : 1.0;
+        string? hint = null;
+        if (peakContext >= 100_000)
+            hint = $"峰值上下文达 {peakContext:N0} Tokens，建议开启新会话或执行 /compact 以减少高额输入成本与首字延迟。";
+        else if (growthRatio >= 4.0 || turns.Count >= 25)
+            hint = $"对话共 {turns.Count} 轮且上下文膨胀 {growthRatio:F1}x，适时拆分任务会话可显著提升命中率与响应速度。";
+
+        return new ConversationAuditReport
+        {
+            ConversationId = conversationId,
+            AppName = entries.FirstOrDefault()?.AppName ?? appName,
+            Workspace = entries.Select(e => e.Workspace).FirstOrDefault(w => !string.IsNullOrWhiteSpace(w)),
+            FilePath = filePath,
+            TotalTurns = turns.Count,
+            PeakContextTokens = peakContext,
+            TotalCostUsd = Math.Round(totalCost, 4),
+            TotalCacheSavedUsd = Math.Round(totalSaved, 4),
+            ContextGrowthRatio = growthRatio,
+            OptimizationHint = hint,
+            ToolBreakdown = toolCounts
+                .OrderByDescending(kv => kv.Value)
+                .Select(kv => new ToolUsageItem { ToolName = kv.Key, Calls = kv.Value })
+                .ToList(),
+            Turns = turns
+        };
     }
 }

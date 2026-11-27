@@ -160,8 +160,9 @@ export const TrayQuickPanel: React.FC = () => {
       <div className="tray-seat-list" style={{ maxHeight: 332, overflowY: 'auto' }}>
         {seats
           .filter(s => {
+            if (s.isHidden) return false;
             const tk = overview?.seatTakeovers?.find(t => t.seatId === s.id);
-            return ['claude', 'chatgpt', 'agy', 'antigravity', 'cursor'].includes(s.id) || s.enabled || tk?.isTakenOver;
+            return ['claude', 'chatgpt', 'agy', 'antigravity', 'cursor'].includes(s.id) || s.enabled || s.isPinned || tk?.isTakenOver;
           })
           .map(seat => {
           const bound = nodes.find(n => n.id === seat.boundNodeId);
@@ -275,7 +276,15 @@ export const TrayQuickPanel: React.FC = () => {
             }}
           >
             <GitHubIcon size={11} />
-            <span>v{project?.version ?? '0.4.0'}</span>
+            <span>v{project?.version ?? '0.6.0'}</span>
+          </button>
+          <span className="tray-footer-sep">·</span>
+          <button
+            type="button"
+            className="tray-link-btn"
+            onClick={() => sendWindowCommand({ type: 'tray:toggleMini' })}
+          >
+            <span>悬浮监控窗</span>
           </button>
         </div>
 

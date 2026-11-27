@@ -1,5 +1,6 @@
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import {
+  ConversationAuditReport,
   ModelPricingRule,
   UsageDashboardResponse,
   api,
@@ -18,7 +19,7 @@ interface Props {
 }
 
 type MetricKey = 'cost' | 'requests' | 'tokens' | 'cacheRate';
-type SubTab = 'logs' | 'models' | 'appsProxy' | 'pricing';
+type SubTab = 'logs' | 'workspaces' | 'models' | 'appsProxy' | 'pricing';
 
 const RANGE_OPTIONS = [
   { value: 'today', label: '当天' },
@@ -50,6 +51,20 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
   const [autoSync, setAutoSync] = useState(true);
 
   const [pricingDraft, setPricingDraft] = useState<Omit<ModelPricingRule, 'isCustom'> | null>(null);
+  const [auditReport, setAuditReport] = useState<ConversationAuditReport | null>(null);
+  const [loadingAuditId, setLoadingAuditId] = useState<string | null>(null);
+
+  async function openConversationAudit(conversationId: string) {
+    setLoadingAuditId(conversationId);
+    try {
+      const report = await api.getConversationAudit(conversationId);
+      setAuditReport(report);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '加载单会话审计失败');
+    } finally {
+      setLoadingAuditId(null);
+    }
+  }
 
   const loadAll = useCallback(async (targetPage: number) => {
     const [dash, rules] = await Promise.all([
@@ -316,6 +331,7 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
             onChange={setSubTab}
             items={[
               { value: 'logs', label: '请求日志', count: data?.totalLogsCount ?? 0 },
+              { value: 'workspaces', label: '工作区排行', count: data?.workspaceBreakdown?.length ?? 0 },
               { value: 'models', label: '按模型统计', count: data?.modelBreakdown.length ?? 0 },
               { value: 'appsProxy', label: '应用与专线归属', count: data?.appAndProxyBreakdown.length ?? 0 },
               { value: 'pricing', label: '模型定价表', count: pricings.length }
@@ -360,12 +376,13 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
                     <th className="num-r">流速</th>
                     <th className="num-r">首字(估)</th>
                     <th className="num-r">耗时</th>
+                    <th className="num-r">会话审计</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(data?.logs ?? []).length === 0 ? (
                     <tr>
-                      <td colSpan={11} style={{ textAlign: 'center', padding: 30, color: 'var(--text-muted)' }}>
+                      <td colSpan={12} style={{ textAlign: 'center', padding: 30, color: 'var(--text-muted)' }}>
                         当前时间范围内暂无会话记录（可切换「全部历史」或点击右上角「按需同步」）
                       </td>
                     </tr>
@@ -413,6 +430,19 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
                         <td className="num-r num nowrap" style={{ color: 'var(--text-secondary)' }}>
                           {row.durationSeconds > 0 ? `~${row.durationSeconds}s` : '—'}
                         </td>
+                        <td className="num-r nowrap">
+                          {row.conversationId ? (
+                            <button
+                              type="button"
+                              className="btn-pill btn-soft btn-sm"
+                              style={{ height: 24, fontSize: 11, padding: '0 8px' }}
+                              disabled={loadingAuditId === row.conversationId}
+                              onClick={() => openConversationAudit(row.conversationId!)}
+                            >
+                              {loadingAuditId === row.conversationId ? '...' : '审计'}
+                            </button>
+                          ) : '—'}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -440,6 +470,50 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
               </div>
             </div>
           </>
+        )}
+
+        {subTab === 'workspaces' && (
+          <table className="clean-table">
+            <thead>
+              <tr>
+                <th>项目工作区路径</th>
+                <th>主力应用</th>
+                <th>主力模型</th>
+                <th className="num-r">请求次数</th>
+                <th className="num-r">累计 Tokens</th>
+                <th className="num-r">估算成本</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data?.workspaceBreakdown ?? []).length === 0 ? (
+                <tr>
+                  <td colSpan={6} style={{ textAlign: 'center', padding: 28, color: 'var(--text-muted)' }}>
+                    当前范围内暂未扫描到含工作区标识（cwd / workspace）的会话日志
+                  </td>
+                </tr>
+              ) : (
+                (data?.workspaceBreakdown ?? []).map(ws => {
+                  const displayPath = privacyMode
+                    ? `…/${ws.workspace.split(/[\\/]/).filter(Boolean).pop() ?? ws.workspace}`
+                    : ws.workspace;
+                  return (
+                    <tr key={ws.workspace}>
+                      <td className="mono" style={{ fontWeight: 600, fontSize: 12 }} title={privacyMode ? '隐私护盾已遮蔽完整路径' : ws.workspace}>
+                        {displayPath}
+                      </td>
+                      <td><span className="pill-tag tag-neutral">{ws.topApp || '—'}</span></td>
+                      <td className="mono" style={{ fontSize: 11.5 }}>{ws.topModel || '—'}</td>
+                      <td className="num-r num">{ws.requests}</td>
+                      <td className="num-r num">{formatCompactTokens(ws.totalTokens)}</td>
+                      <td className="num-r num" style={{ color: 'var(--accent-emerald-text)', fontWeight: 600 }}>
+                        ${ws.costUsd.toFixed(4)}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
         )}
 
         {subTab === 'models' && (
@@ -601,6 +675,94 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
               <button type="submit" className="btn-pill btn-indigo">保存并重算</button>
             </div>
           </form>
+        </div>
+      )}
+
+      {auditReport && (
+        <div className="modal-backdrop" onClick={() => setAuditReport(null)}>
+          <div className="modal-surface" style={{ width: 680, maxWidth: '94vw', maxHeight: '86vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div className="card-title-sm">单会话上下文膨胀与工具调用审计</div>
+                <div className="mono" style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                  {auditReport.appName} · {auditReport.conversationId}
+                  {auditReport.workspace ? ` · ${privacyMode ? 'workspace/**' : auditReport.workspace}` : ''}
+                </div>
+              </div>
+              <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => setAuditReport(null)}>关闭</button>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+              <div style={{ background: 'var(--bg-subtle)', padding: '10px 12px', borderRadius: 10 }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>总轮次</div>
+                <div className="num" style={{ fontSize: 17, fontWeight: 700 }}>{auditReport.totalTurns}</div>
+              </div>
+              <div style={{ background: 'var(--bg-subtle)', padding: '10px 12px', borderRadius: 10 }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>峰值上下文</div>
+                <div className="num" style={{ fontSize: 17, fontWeight: 700 }}>{formatCompactTokens(auditReport.peakContextTokens)}</div>
+              </div>
+              <div style={{ background: 'var(--bg-subtle)', padding: '10px 12px', borderRadius: 10 }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>上下文膨胀倍率</div>
+                <div className="num" style={{ fontSize: 17, fontWeight: 700, color: auditReport.contextGrowthRatio >= 4 ? 'var(--accent-amber-text)' : undefined }}>
+                  {auditReport.contextGrowthRatio}x
+                </div>
+              </div>
+              <div style={{ background: 'var(--bg-subtle)', padding: '10px 12px', borderRadius: 10 }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>费用 / 缓存省</div>
+                <div className="num" style={{ fontSize: 14, fontWeight: 700, color: 'var(--accent-emerald-text)' }}>
+                  ${auditReport.totalCostUsd.toFixed(3)} / -${auditReport.totalCacheSavedUsd.toFixed(3)}
+                </div>
+              </div>
+            </div>
+
+            {auditReport.optimizationHint && (
+              <div style={{ background: 'var(--accent-amber-soft)', color: 'var(--accent-amber-text)', padding: '9px 12px', borderRadius: 10, fontSize: 12 }}>
+                {auditReport.optimizationHint}
+              </div>
+            )}
+
+            {auditReport.toolBreakdown.length > 0 && (
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }}>工具调用频次分布（零正文元数据）</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {auditReport.toolBreakdown.map(t => (
+                    <span key={t.toolName} className="pill-tag tag-indigo mono">
+                      {t.toolName} × {t.calls}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>模型</th>
+                  <th className="num-r">上下文总量</th>
+                  <th className="num-r">输出</th>
+                  <th>调用工具</th>
+                  <th className="num-r">费用</th>
+                </tr>
+              </thead>
+              <tbody>
+                {auditReport.turns.slice(0, 40).map(turn => (
+                  <tr key={turn.turnIndex}>
+                    <td className="num">{turn.turnIndex}</td>
+                    <td className="mono" style={{ fontSize: 11.5 }}>{turn.model}</td>
+                    <td className="num-r num">{formatCompactTokens(turn.cumulativeContextTokens)}</td>
+                    <td className="num-r num">{formatCompactTokens(turn.outputTokens)}</td>
+                    <td className="mono" style={{ fontSize: 11 }}>
+                      {turn.toolsCalled.length > 0 ? turn.toolsCalled.join(', ') : '—'}
+                    </td>
+                    <td className="num-r num">
+                      {turn.costUsd !== null && turn.costUsd !== undefined ? `$${turn.costUsd.toFixed(4)}` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

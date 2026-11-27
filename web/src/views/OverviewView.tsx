@@ -200,9 +200,11 @@ export const OverviewView: React.FC<Props> = ({
   const activeCoord = svgCoords[activeIdx] ?? { x: 210, y: 80 };
   const activePoint = chartPoints[activeIdx];
 
-  // 独立分流总控动态槽位：优先展示已启用席位，支持翻页总控全部 15 款应用
+  // 独立分流总控动态槽位：优先展示已启用与置顶席位（排除已隐藏席位），支持翻页总控全部支持应用
   const orderedTopoSeats = useMemo(() => {
-    return [...data.seats].sort((a, b) => Number(b.enabled) - Number(a.enabled));
+    return data.seats
+      .filter(s => !s.isHidden || s.enabled)
+      .sort((a, b) => Number(b.enabled) - Number(a.enabled) || Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned)));
   }, [data.seats]);
   const topoPageSize = 4;
   const topoTotalPages = Math.max(1, Math.ceil(orderedTopoSeats.length / topoPageSize));
@@ -615,10 +617,11 @@ export const OverviewView: React.FC<Props> = ({
       {/* 下半区：AI 应用席位卡片（默认展示核心 4 席位 + 所有已启用席位，支持一键展开全部） */}
       {(() => {
         const coreIds = new Set(['claude', 'chatgpt', 'agy', 'antigravity', 'cursor']);
+        const unhiddenSeats = data.seats.filter(s => !s.isHidden || s.enabled || s.id === selectedSeatId);
         const visibleSeats = showAllSeats
-          ? data.seats
-          : data.seats.filter(s => coreIds.has(s.id) || s.enabled || s.id === selectedSeatId);
-        const hiddenCount = data.seats.length - visibleSeats.length;
+          ? unhiddenSeats
+          : unhiddenSeats.filter(s => coreIds.has(s.id) || s.enabled || s.isPinned || s.id === selectedSeatId);
+        const hiddenCount = unhiddenSeats.length - visibleSeats.length;
 
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

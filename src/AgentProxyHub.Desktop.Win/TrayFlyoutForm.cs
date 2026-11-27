@@ -24,6 +24,7 @@ public sealed class TrayFlyoutForm : Form
 
     private readonly Action _onOpenMain;
     private readonly Action _onExitApp;
+    private readonly Action? _onToggleMini;
     private readonly WebView2 _webView;
 
     private int _logicalHeight = 468;
@@ -54,10 +55,11 @@ public sealed class TrayFlyoutForm : Form
         }
     }
 
-    public TrayFlyoutForm(Action onOpenMain, Action onExitApp)
+    public TrayFlyoutForm(Action onOpenMain, Action onExitApp, Action? onToggleMini = null)
     {
         _onOpenMain = onOpenMain;
         _onExitApp = onExitApp;
+        _onToggleMini = onToggleMini;
 
         FormBorderStyle = FormBorderStyle.None;
         ShowInTaskbar = false;
@@ -229,6 +231,14 @@ public sealed class TrayFlyoutForm : Form
                     {
                         HideFlyout();
                         _onExitApp();
+                    });
+                    break;
+
+                case "tray:toggleMini":
+                    BeginInvoke(() =>
+                    {
+                        HideFlyout();
+                        _onToggleMini?.Invoke();
                     });
                     break;
 

@@ -35,6 +35,7 @@ public sealed class SingBoxSidecarManager : IDisposable
     private IntPtr _winJobHandle = IntPtr.Zero;
     private string? _lastConfigHash;
     private string? _cachedVersion;
+    private string? _cachedSha256;
     private string? _boundInterfaceName;
     private IsolationSettings _lastIsolation = new();
     private string? _lastError;
@@ -57,6 +58,7 @@ public sealed class SingBoxSidecarManager : IDisposable
         {
             _customBinaryPath = string.IsNullOrWhiteSpace(path) ? null : path.Trim();
             _cachedVersion = null;
+            _cachedSha256 = null;
         }
     }
 
@@ -97,6 +99,10 @@ public sealed class SingBoxSidecarManager : IDisposable
             {
                 _cachedVersion = ReadSingBoxVersion(bin!);
             }
+            if (installed && _cachedSha256 == null)
+            {
+                _cachedSha256 = ComputeFileSha256Safe(bin!);
+            }
 
             bool running = _process != null && !_process.HasExited;
             return new SidecarEngineStatus
@@ -105,6 +111,7 @@ public sealed class SingBoxSidecarManager : IDisposable
                 Running = running,
                 BinaryPath = bin,
                 Version = _cachedVersion,
+                BinarySha256 = _cachedSha256,
                 ActiveL2NodeCount = _nodeBridgePorts.Count,
                 BoundInterface = _boundInterfaceName,
                 LastError = _lastError
@@ -385,49 +392,20 @@ public sealed class SingBoxSidecarManager : IDisposable
                     await resp.Content.CopyToAsync(fs, ct);
                 }
 
+                Directory.CreateDirectory(_binDir);
                 string targetBin = Path.Combine(_binDir, OperatingSystem.IsWindows() ? "sing-box.exe" : "sing-box");
                 Stop();
-
-                if (assetName.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                {
-                    using var zip = ZipFile.OpenRead(tmpArchive);
-                    var entry = zip.Entries.FirstOrDefault(e =>
-                        e.Name.Equals("sing-box.exe", StringComparison.OrdinalIgnoreCase) ||
-                        e.Name.Equals("sing-box", StringComparison.OrdinalIgnoreCase));
-                    if (entry == null)
-                        return (false, "压缩包内未找到 sing-box 可执行文件", GetStatus());
-                    entry.ExtractToFile(targetBin, overwrite: true);
-                }
-                else
-                {
-                    string extractDir = Path.Combine(Path.GetTempPath(), $"aph-sb-ext-{Guid.NewGuid():N}");
-                    Directory.CreateDirectory(extractDir);
-                    try
-                    {
-                        var tar = Process.Start(new ProcessStartInfo("tar", $"-xzf \"{tmpArchive}\" -C \"{extractDir}\"")
-                        {
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        });
-                        if (tar != null) await tar.WaitForExitAsync(ct);
-                        string? found = Directory.EnumerateFiles(extractDir, "sing-box", SearchOption.AllDirectories).FirstOrDefault();
-                        if (string.IsNullOrEmpty(found))
-                            return (false, "tar.gz 解压后未找到 sing-box 二进制文件", GetStatus());
-                        File.Copy(found, targetBin, overwrite: true);
-                        Process.Start(new ProcessStartInfo("chmod", $"+x \"{targetBin}\"") { UseShellExecute = false, CreateNoWindow = true })?.WaitForExit(2000);
-                    }
-                    finally
-                    {
-                        try { Directory.Delete(extractDir, true); } catch { }
-                    }
-                }
+                var (extOk, extMsg) = await ExtractSingBoxArchiveSafeAsync(tmpArchive, targetBin, null, ct);
+                if (!extOk)
+                    return (false, extMsg, GetStatus());
 
                 lock (_syncLock)
                 {
                     _cachedVersion = ReadSingBoxVersion(targetBin);
+                    _cachedSha256 = ComputeFileSha256Safe(targetBin);
                     _lastError = null;
                 }
-                return (true, $"已成功安装 sing-box {tag} 扩展内核", GetStatus());
+                return (true, $"已成功安装 sing-box {tag} 扩展内核（SHA-256: {_cachedSha256?[..12]}...）", GetStatus());
             }
             finally
             {
@@ -438,6 +416,167 @@ public sealed class SingBoxSidecarManager : IDisposable
         {
             lock (_syncLock) _lastError = ex.Message;
             return (false, $"在线安装 sing-box 失败：{ex.Message}（也可手动下载 sing-box 后在此导入本地路径）", GetStatus());
+        }
+    }
+
+    /// <summary>
+    /// 离线导入本地 sing-box 安装包（.zip / .tar.gz / 可执行文件），带 Zip-Slip 防护与可选 SHA-256 严格验真
+    /// </summary>
+    public async Task<(bool Ok, string Message, SidecarEngineStatus Status)> ImportOfflinePackageAsync(
+        string localFilePath,
+        string? expectedSha256 = null,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            string cleanPath = localFilePath.Trim().Trim('"');
+            if (string.IsNullOrWhiteSpace(cleanPath) || !File.Exists(cleanPath))
+                return (false, $"未找到本地安装包或可执行文件: {cleanPath}", GetStatus());
+
+            Directory.CreateDirectory(_binDir);
+            string targetBin = Path.Combine(_binDir, OperatingSystem.IsWindows() ? "sing-box.exe" : "sing-box");
+            string? expectedNorm = string.IsNullOrWhiteSpace(expectedSha256)
+                ? null
+                : expectedSha256.Trim().Replace(" ", "", StringComparison.Ordinal).ToLowerInvariant();
+            string sourceHash = ComputeFileSha256Safe(cleanPath) ?? string.Empty;
+
+            Stop();
+
+            if (cleanPath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+                || cleanPath.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase)
+                || cleanPath.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase))
+            {
+                string tmpBin = targetBin + ".import-tmp";
+                var (ok, msg) = await ExtractSingBoxArchiveSafeAsync(cleanPath, tmpBin, null, ct);
+                if (!ok)
+                {
+                    if (File.Exists(tmpBin)) File.Delete(tmpBin);
+                    return (false, msg, GetStatus());
+                }
+
+                string binHash = ComputeFileSha256Safe(tmpBin) ?? string.Empty;
+                if (expectedNorm != null && sourceHash != expectedNorm && binHash != expectedNorm)
+                {
+                    if (File.Exists(tmpBin)) File.Delete(tmpBin);
+                    return (false, $"SHA-256 校验失败：期望 {expectedNorm}，实际文件为 {sourceHash}", GetStatus());
+                }
+                File.Move(tmpBin, targetBin, overwrite: true);
+            }
+            else
+            {
+                if (expectedNorm != null && sourceHash != expectedNorm)
+                    return (false, $"SHA-256 校验失败：期望 {expectedNorm}，实际文件为 {sourceHash}", GetStatus());
+
+                File.Copy(cleanPath, targetBin, overwrite: true);
+                if (!OperatingSystem.IsWindows())
+                {
+                    Process.Start(new ProcessStartInfo("chmod", $"+x \"{targetBin}\"")
+                    {
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    })?.WaitForExit(2000);
+                }
+            }
+
+            lock (_syncLock)
+            {
+                _customBinaryPath = null;
+                _cachedVersion = ReadSingBoxVersion(targetBin);
+                _cachedSha256 = ComputeFileSha256Safe(targetBin);
+                _lastError = null;
+            }
+            return (true, $"已通过安全校验并导入 sing-box 内核（SHA-256: {_cachedSha256?[..16]}...）", GetStatus());
+        }
+        catch (Exception ex)
+        {
+            lock (_syncLock) _lastError = ex.Message;
+            return (false, $"离线导入 sing-box 失败：{ex.Message}", GetStatus());
+        }
+    }
+
+    public static string? ComputeFileSha256Safe(string filePath)
+    {
+        try
+        {
+            using var fs = File.OpenRead(filePath);
+            return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task<(bool Ok, string Message)> ExtractSingBoxArchiveSafeAsync(
+        string archivePath,
+        string targetBin,
+        string? expectedBinarySha256,
+        CancellationToken ct)
+    {
+        if (archivePath.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+        {
+            using var zip = ZipFile.OpenRead(archivePath);
+            string virtualRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "aph-zip-guard")) + Path.DirectorySeparatorChar;
+            ZipArchiveEntry? matched = null;
+
+            foreach (var entry in zip.Entries)
+            {
+                string destFull = Path.GetFullPath(Path.Combine(virtualRoot, entry.FullName));
+                if (!destFull.StartsWith(virtualRoot, StringComparison.OrdinalIgnoreCase))
+                {
+                    return (false, $"检测到压缩包存在非法路径穿越条目 (Zip-Slip): {entry.FullName}");
+                }
+                if (entry.Name.Equals("sing-box.exe", StringComparison.OrdinalIgnoreCase)
+                    || entry.Name.Equals("sing-box", StringComparison.OrdinalIgnoreCase))
+                {
+                    matched ??= entry;
+                }
+            }
+
+            if (matched == null)
+                return (false, "压缩包内未找到 sing-box 可执行文件");
+
+            matched.ExtractToFile(targetBin, overwrite: true);
+            if (!string.IsNullOrWhiteSpace(expectedBinarySha256))
+            {
+                string actual = ComputeFileSha256Safe(targetBin) ?? string.Empty;
+                if (!actual.Equals(expectedBinarySha256.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Delete(targetBin);
+                    return (false, $"内核 SHA-256 校验未通过: {actual}");
+                }
+            }
+            return (true, "OK");
+        }
+
+        string extractDir = Path.Combine(Path.GetTempPath(), $"aph-sb-ext-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(extractDir);
+        try
+        {
+            var tar = Process.Start(new ProcessStartInfo("tar", $"-xzf \"{archivePath}\" -C \"{extractDir}\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            if (tar != null) await tar.WaitForExitAsync(ct);
+            string? found = Directory.EnumerateFiles(extractDir, "sing-box*", SearchOption.AllDirectories)
+                .FirstOrDefault(f => Path.GetFileName(f) is "sing-box" or "sing-box.exe");
+            if (string.IsNullOrEmpty(found))
+                return (false, "tar.gz 解压后未找到 sing-box 二进制文件");
+            File.Copy(found, targetBin, overwrite: true);
+            if (!OperatingSystem.IsWindows())
+            {
+                Process.Start(new ProcessStartInfo("chmod", $"+x \"{targetBin}\"")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                })?.WaitForExit(2000);
+            }
+            return (true, "OK");
+        }
+        finally
+        {
+            try { Directory.Delete(extractDir, true); } catch { }
         }
     }
 

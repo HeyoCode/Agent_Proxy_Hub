@@ -180,6 +180,35 @@ public sealed class UsageStatsService
         // 应用与代理专线二维合并表
         var appAndProxy = MergeAppAndProxySummaries(inRange, proxySnapshots);
 
+        // 项目工作区成本排行（Top 12）
+        var workspaceBreakdown = filtered
+            .Where(e => !string.IsNullOrWhiteSpace(e.Workspace))
+            .GroupBy(e => e.Workspace!.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g =>
+            {
+                string topApp = g.GroupBy(x => x.AppName)
+                    .OrderByDescending(ag => ag.Count())
+                    .Select(ag => ag.Key)
+                    .FirstOrDefault() ?? "";
+                string topModel = g.GroupBy(x => x.Model)
+                    .OrderByDescending(mg => mg.Sum(m => m.TotalTokens))
+                    .Select(mg => mg.Key)
+                    .FirstOrDefault() ?? "";
+                return new WorkspaceUsageSummary
+                {
+                    Workspace = g.Key,
+                    Requests = g.Count(),
+                    TotalTokens = g.Sum(x => x.TotalTokens),
+                    CostUsd = Math.Round(g.Where(x => x.IsPriced && x.CostUsd.HasValue).Sum(x => x.CostUsd!.Value), 4),
+                    TopApp = topApp,
+                    TopModel = topModel
+                };
+            })
+            .OrderByDescending(w => w.CostUsd)
+            .ThenByDescending(w => w.TotalTokens)
+            .Take(12)
+            .ToList();
+
         int safeSize = Math.Clamp(pageSize, 10, 100);
         int safePage = Math.Max(1, page);
         var pagedLogs = filtered.Skip((safePage - 1) * safeSize).Take(safeSize).ToList();
@@ -216,9 +245,13 @@ public sealed class UsageStatsService
             Page = safePage,
             PageSize = safeSize,
             ModelBreakdown = modelBreakdown,
-            AppAndProxyBreakdown = appAndProxy
+            AppAndProxyBreakdown = appAndProxy,
+            WorkspaceBreakdown = workspaceBreakdown
         };
     }
+
+    public ConversationAuditReport? GetConversationAudit(string conversationId)
+        => _scanner.BuildConversationAudit(conversationId, _pricing);
 
     private static List<UsageBucketPoint> BuildTimeline(string range, List<UsageLogEntry> entries, DateTimeOffset now)
     {

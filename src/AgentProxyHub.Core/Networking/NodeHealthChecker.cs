@@ -87,7 +87,7 @@ public sealed class NodeHealthChecker
                     AutomaticDecompression = DecompressionMethods.None
                 };
                 using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(5) };
-                http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.5.0");
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.6.0");
                 (exitIp, observedLoc, latencyMs) = await ProbeExitIpViaLocalProxyAsync(http, ct);
             }
             else if (boundNode != null)
@@ -283,7 +283,7 @@ public sealed class NodeHealthChecker
         {
             Timeout = TimeSpan.FromSeconds(6)
         };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.5.0");
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentProxyHub/0.6.0");
 
         string? exitIp = null;
         string? loc = null;
@@ -422,7 +422,7 @@ public sealed class NodeHealthChecker
             using var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "cloudflare.com" }, cts.Token);
 
-            byte[] req = "GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.5.0\r\n\r\n"u8.ToArray();
+            byte[] req = "GET /cdn-cgi/trace HTTP/1.1\r\nHost: 1.1.1.1\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.6.0\r\n\r\n"u8.ToArray();
             await ssl.WriteAsync(req, cts.Token);
             await ssl.FlushAsync(cts.Token);
 
@@ -459,7 +459,7 @@ public sealed class NodeHealthChecker
             using var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
             await ssl.AuthenticateAsClientAsync(new SslClientAuthenticationOptions { TargetHost = "api.ipify.org" }, cts.Token);
 
-            byte[] req = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.5.0\r\n\r\n"u8.ToArray();
+            byte[] req = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\nUser-Agent: AgentProxyHub/0.6.0\r\n\r\n"u8.ToArray();
             await ssl.WriteAsync(req, cts.Token);
             await ssl.FlushAsync(cts.Token);
 

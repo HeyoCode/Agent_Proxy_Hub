@@ -1,6 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { OverviewResponse, api, formatBytes } from '../api';
-import { CheckTinyIcon, CopyIcon, PlayLaunchIcon, PlugTakeoverIcon, SeatBrandIcon } from '../components/Icons';
+import {
+  CheckTinyIcon,
+  CopyIcon,
+  LayersInstanceIcon,
+  PinStarIcon,
+  PlayLaunchIcon,
+  PlugTakeoverIcon,
+  RefreshSpinIcon,
+  SeatBrandIcon
+} from '../components/Icons';
 import { SegmentedTabs } from '../components/SegmentedTabs';
 import { maskIp } from '../privacy';
 
@@ -18,6 +27,14 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
   const [focusedSeatId, setFocusedSeatId] = useState<string>(data.seats[0]?.id ?? 'claude');
   const [appSearch, setAppSearch] = useState('');
   const [appFilter, setAppFilter] = useState<'all' | 'active'>('all');
+  const [showHidden, setShowHidden] = useState(false);
+
+  const [instBaseSeat, setInstBaseSeat] = useState('cursor');
+  const [instName, setInstName] = useState('');
+  const [instNodeId, setInstNodeId] = useState(data.nodes[0]?.id ?? 'direct-phy');
+  const [instProfileDir, setInstProfileDir] = useState('');
+  const [creatingInst, setCreatingInst] = useState(false);
+  const [busyInstId, setBusyInstId] = useState<string | null>(null);
 
   const focusedSeat = data.seats.find(s => s.id === focusedSeatId) ?? data.seats[0];
   const [customExeDraft, setCustomExeDraft] = useState('');
@@ -108,6 +125,90 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
     }
   }
 
+  async function handleRestartSeat(seatId: string) {
+    setBusySeat(seatId);
+    try {
+      const res = await api.restartSeatApp(seatId);
+      await onReload();
+      onToast(res.message);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '重启重连失败');
+    } finally {
+      setBusySeat(null);
+    }
+  }
+
+  async function handleTogglePin(seatId: string, currentPinned: boolean) {
+    await api.updateSeat(seatId, { isPinned: !currentPinned });
+    await onReload();
+    onToast(!currentPinned ? '已置顶到列表前方' : '已取消置顶');
+  }
+
+  async function handleToggleHide(seatId: string, currentHidden: boolean) {
+    await api.updateSeat(seatId, { isHidden: !currentHidden });
+    await onReload();
+    onToast(!currentHidden ? '已隐藏该席位（主屏同步收纳）' : '已恢复显示该席位');
+  }
+
+  async function handleMoveSeat(seatId: string, direction: -1 | 1) {
+    const ids = data.seats.map(s => s.id);
+    const idx = ids.indexOf(seatId);
+    const swapIdx = idx + direction;
+    if (idx < 0 || swapIdx < 0 || swapIdx >= ids.length) return;
+    [ids[idx], ids[swapIdx]] = [ids[swapIdx], ids[idx]];
+    await api.reorderSeats(ids);
+    await onReload();
+  }
+
+  async function handleCreateInstance(e: React.FormEvent) {
+    e.preventDefault();
+    if (!instName.trim() || creatingInst) return;
+    setCreatingInst(true);
+    try {
+      const created = await api.createInstance({
+        baseSeatId: instBaseSeat,
+        name: instName.trim(),
+        boundNodeId: instNodeId,
+        profileDir: instProfileDir.trim() || undefined
+      });
+      setInstName('');
+      setInstProfileDir('');
+      await onReload();
+      onToast(`已创建隔离实例「${created.name}」(端口 :${created.localPort})`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '创建多开实例失败');
+    } finally {
+      setCreatingInst(false);
+    }
+  }
+
+  async function handleLaunchInstance(id: string) {
+    setBusyInstId(id);
+    try {
+      const res = await api.launchInstance(id);
+      await onReload();
+      onToast(res.message);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '启动多开实例失败');
+    } finally {
+      setBusyInstId(null);
+    }
+  }
+
+  async function handleDeleteInstance(id: string) {
+    setBusyInstId(id);
+    try {
+      const res = await api.deleteInstance(id);
+      await onReload();
+      onToast(res.message);
+    } finally {
+      setBusyInstId(null);
+    }
+  }
+
+  const hiddenSeatsCount = data.seats.filter(s => s.isHidden).length;
+  const visibleSeats = filteredSeats.filter(s => showHidden || !s.isHidden);
+
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '1.18fr 1fr', gap: 18, alignItems: 'start' }}>
       <div className="surface-card surface-card-pad">
@@ -125,10 +226,20 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
           <input
             className="clean-input"
             style={{ flex: 1, minWidth: 160, height: 32, fontSize: 12 }}
-            placeholder="搜索应用名称、进程或端口（如 Gemini / OpenClaw / Kimi）..."
+            placeholder="搜索应用名称、进程或端口（如 Windsurf / Kiro / CodeBuddy）..."
             value={appSearch}
             onChange={e => setAppSearch(e.target.value)}
           />
+          {hiddenSeatsCount > 0 && (
+            <button
+              type="button"
+              className={`btn-pill btn-sm ${showHidden ? 'btn-indigo' : 'btn-soft'}`}
+              style={{ height: 30, fontSize: 11.5 }}
+              onClick={() => setShowHidden(v => !v)}
+            >
+              {showHidden ? '收起已隐藏' : `已隐藏 (${hiddenSeatsCount})`}
+            </button>
+          )}
           <SegmentedTabs<'all' | 'active'>
             value={appFilter}
             onChange={setAppFilter}
@@ -147,13 +258,14 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {filteredSeats.map(seat => {
+          {visibleSeats.map(seat => {
             const bound = data.nodes.find(n => n.id === seat.boundNodeId);
             const proc = data.os === 'mac' ? seat.processMac : seat.processWin;
             const takeover = data.seatTakeovers?.find(t => t.seatId === seat.id);
             const snap = data.trafficSnapshots.find(t => t.seatId === seat.id);
             const isBusy = busySeat === seat.id;
             const isFocused = focusedSeat?.id === seat.id;
+            const isAntigravity = seat.id === 'agy' || seat.id === 'antigravity';
 
             return (
               <div
@@ -168,6 +280,7 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
                   display: 'flex',
                   flexDirection: 'column',
                   gap: 7,
+                  opacity: seat.isHidden ? 0.65 : 1,
                   transition: 'border-color 0.16s ease'
                 }}
               >
@@ -191,6 +304,9 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
                     <div style={{ minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={{ fontWeight: 600, fontSize: 13 }}>{seat.name}</span>
+                        {seat.isPinned && (
+                          <span className="pill-tag tag-indigo" style={{ fontSize: 9.5, padding: '1px 6px' }}>置顶</span>
+                        )}
                         {takeover?.isProcessRunning && (
                           <span className="pill-tag tag-indigo" style={{ fontSize: 10, padding: '1px 7px' }}>运行中</span>
                         )}
@@ -200,7 +316,40 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
                       </div>
                     </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }} onClick={e => e.stopPropagation()}>
+                    <button
+                      type="button"
+                      className="seat-mini-op-btn"
+                      title={seat.isPinned ? '取消置顶' : '置顶席位'}
+                      style={{ color: seat.isPinned ? 'var(--accent-indigo)' : undefined }}
+                      onClick={() => handleTogglePin(seat.id, Boolean(seat.isPinned))}
+                    >
+                      <PinStarIcon pinned={Boolean(seat.isPinned)} size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      className="seat-mini-op-btn"
+                      title="上移排序"
+                      onClick={() => handleMoveSeat(seat.id, -1)}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      className="seat-mini-op-btn"
+                      title="下移排序"
+                      onClick={() => handleMoveSeat(seat.id, 1)}
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      className="seat-mini-op-btn"
+                      title={seat.isHidden ? '取消隐藏' : '隐藏此应用'}
+                      onClick={() => handleToggleHide(seat.id, Boolean(seat.isHidden))}
+                    >
+                      {seat.isHidden ? '显' : '隐'}
+                    </button>
                     <span className={`pill-tag ${takeover?.isTakenOver ? 'tag-emerald' : 'tag-amber'}`}>
                       {takeover?.isTakenOver ? '已接管' : '待接管'}
                     </span>
@@ -235,6 +384,18 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
                       <PlugTakeoverIcon size={12} />
                       <span>{takeover?.isTakenOver ? '还原默认' : '一键接管'}</span>
                     </button>
+                    {!isAntigravity && (
+                      <button
+                        type="button"
+                        disabled={isBusy}
+                        className="btn-pill btn-sm btn-soft"
+                        title="优雅关闭旧进程并携带独立代理端口重启"
+                        onClick={() => handleRestartSeat(seat.id)}
+                      >
+                        <RefreshSpinIcon size={12} spinning={isBusy} />
+                        <span>重启重连</span>
+                      </button>
+                    )}
                     <button
                       type="button"
                       disabled={isBusy}
@@ -335,6 +496,106 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
             </div>
           </form>
         )}
+
+        {/* 多开账号隔离实例 (Profile Isolation) */}
+        <div style={{ marginTop: 14, padding: '12px 14px', borderRadius: 12, background: 'var(--bg-subtle)', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <LayersInstanceIcon size={14} />
+              <strong style={{ fontSize: 12.5 }}>多开账号隔离实例（Profile Isolation）</strong>
+            </div>
+            <span className="pill-tag tag-indigo num">已建 {(data.instances ?? []).length} 个</span>
+          </div>
+          <div style={{ fontSize: 11.5, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+            为同一款 IDE / CLI 分配独立的 <span className="mono">--user-data-dir / CLAUDE_CONFIG_DIR</span> 与独立本地代理端口（:17920 起），实现「工作号 / 个人号」并发双开且出口 IP 完全隔离。
+          </div>
+
+          {(data.instances ?? []).length > 0 && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {(data.instances ?? []).map(inst => {
+                const instBound = data.nodes.find(n => n.id === inst.boundNodeId);
+                return (
+                  <div
+                    key={inst.id}
+                    style={{
+                      background: 'var(--bg-card)',
+                      borderRadius: 10,
+                      padding: '8px 10px',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      gap: 8,
+                      border: '1px solid var(--divider)'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+                      <SeatBrandIcon seatId={inst.baseSeatId} size={16} />
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 12, fontWeight: 600 }}>
+                          {inst.name} <span className="mono" style={{ color: 'var(--accent-indigo)' }}>:{inst.localPort}</span>
+                        </div>
+                        <div className="mono" style={{ fontSize: 10.5, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 230 }}>
+                          {instBound?.name ?? inst.boundNodeId} · {inst.profileDir}
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                      <button
+                        type="button"
+                        className="btn-pill btn-indigo btn-sm"
+                        disabled={busyInstId === inst.id}
+                        onClick={() => handleLaunchInstance(inst.id)}
+                      >
+                        启动
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-pill btn-soft btn-sm"
+                        disabled={busyInstId === inst.id}
+                        onClick={() => handleDeleteInstance(inst.id)}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <form onSubmit={handleCreateInstance} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+            <select
+              className="clean-input"
+              style={{ height: 32, fontSize: 11.5 }}
+              value={instBaseSeat}
+              onChange={e => setInstBaseSeat(e.target.value)}
+            >
+              {data.seats.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+            <input
+              className="clean-input"
+              style={{ height: 32, fontSize: 11.5 }}
+              placeholder="实例名称（如：工作主号）"
+              value={instName}
+              onChange={e => setInstName(e.target.value)}
+            />
+            <select
+              className="clean-input"
+              style={{ height: 32, fontSize: 11.5 }}
+              value={instNodeId}
+              onChange={e => setInstNodeId(e.target.value)}
+            >
+              {data.nodes.map(n => (
+                <option key={n.id} value={n.id}>{n.name}</option>
+              ))}
+            </select>
+            <button type="submit" className="btn-pill btn-indigo btn-sm" disabled={creatingInst || !instName.trim()}>
+              {creatingInst ? '创建中...' : '+ 新建隔离实例'}
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   );

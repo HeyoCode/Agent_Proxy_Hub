@@ -58,7 +58,47 @@ public static class HubHostFactory
         string? ExpectedCountryCode = null,
         string? CustomNoProxy = null,
         string? CustomExecutablePath = null,
-        bool? AcknowledgeDrift = null);
+        bool? AcknowledgeDrift = null,
+        bool? IsHidden = null,
+        bool? IsPinned = null,
+        int? SortOrder = null);
+
+    public sealed record ReorderSeatsRequest(List<string> OrderedSeatIds);
+
+    public sealed record CreateInstanceRequest(
+        string BaseSeatId,
+        string Name,
+        string? ProfileDir = null,
+        string? BoundNodeId = null,
+        string? ExtraArgs = null,
+        string? WorkingDirectory = null);
+
+    public sealed record UpdateInstanceRequest(
+        bool? Enabled = null,
+        string? BoundNodeId = null,
+        bool? KillSwitchEnabled = null,
+        string? Name = null,
+        string? ExtraArgs = null,
+        string? WorkingDirectory = null);
+
+    public sealed record PreferencesUpdateRequest(
+        string? CloseAction = null,
+        string? TrayLeftClickAction = null,
+        bool? MiniCardEnabled = null,
+        int? MiniCardX = null,
+        int? MiniCardY = null,
+        string? WebDavUrl = null,
+        string? WebDavUsername = null,
+        string? WebDavPassword = null,
+        string? WebDavSyncPassphrase = null);
+
+    public sealed record SingBoxImportRequest(string LocalPath, string? ExpectedSha256 = null);
+
+    public sealed record WebDavActionRequest(
+        string? WebDavUrl = null,
+        string? WebDavUsername = null,
+        string? WebDavPassword = null,
+        string? Passphrase = null);
 
     public sealed record ToggleAllSeatsRequest(bool Enabled);
 
@@ -110,15 +150,31 @@ public static class HubHostFactory
         var sessionScanner = new SessionLogScanner();
         var usageService = new UsageStatsService(sessionScanner, pricingCatalog);
         var takeoverService = new AppProxyTakeoverService();
+        var instanceManager = new AppInstanceManager(store, takeoverService);
+        var webDavSync = new WebDavSyncService();
 
         // 支持仅用于截图/UI验收的隔离端口模式，避免与已运行实例的端口冲突
         int? verifyPort = ParseVerifyPort(args);
         bool isVerifyOnly = verifyPort.HasValue;
 
+        static List<AppSeat> BuildEffectiveSeats(HubStateDocument d)
+        {
+            var ordered = d.Seats
+                .OrderBy(s => s.IsPinned ? 0 : 1)
+                .ThenBy(s => s.SortOrder)
+                .ToList();
+            foreach (var inst in d.Instances)
+            {
+                var baseSeat = d.Seats.FirstOrDefault(s => s.Id.Equals(inst.BaseSeatId, StringComparison.OrdinalIgnoreCase));
+                if (baseSeat != null) ordered.Add(inst.ToVirtualSeat(baseSeat));
+            }
+            return ordered;
+        }
+
         if (!isVerifyOnly)
         {
-            // 首次启动即异步预扫本地会话日志并拉起全部已启用席位端口
-            proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+            // 首次启动即异步预扫本地会话日志并拉起全部已启用席位与多开实例端口
+            proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
         }
         _ = Task.Run(() => usageService.SyncNow());
 
@@ -134,6 +190,8 @@ public static class HubHostFactory
         builder.Services.AddSingleton(pricingCatalog);
         builder.Services.AddSingleton(usageService);
         builder.Services.AddSingleton(takeoverService);
+        builder.Services.AddSingleton(instanceManager);
+        builder.Services.AddSingleton(webDavSync);
 
         var app = builder.Build();
         var stateLock = new object();
@@ -230,7 +288,11 @@ public static class HubHostFactory
                 var cliSnippets = AppSeatManager.BuildCliSnippets(
                     doc.Seats.FirstOrDefault(s => s.Id == "claude"),
                     doc.Seats.FirstOrDefault(s => s.Id == "agy"));
-                var seatTakeovers = takeoverService.InspectAll(doc.Seats);
+                var orderedSeats = doc.Seats
+                    .OrderBy(s => s.IsPinned ? 0 : 1)
+                    .ThenBy(s => s.SortOrder)
+                    .ToList();
+                var seatTakeovers = takeoverService.InspectAll(orderedSeats);
                 var redactedNodes = doc.Nodes.Select(n => n.ToRedactedCopy()).ToList();
                 var subDtos = (doc.Subscriptions ?? []).Select(s => s.ToPublicDto()).ToList();
 
@@ -244,7 +306,9 @@ public static class HubHostFactory
                     hasDetectedTunnel = nicManager.HasDetectedClashOrTunnel,
                     excludedVirtualNics = excludedVirtuals,
                     isolation = doc.Isolation,
-                    seats = doc.Seats,
+                    seats = orderedSeats,
+                    instances = doc.Instances,
+                    preferences = doc.Preferences.ToRedactedCopy(),
                     nodes = redactedNodes,
                     subscriptions = subDtos,
                     trafficSnapshots = traffic,
@@ -308,7 +372,7 @@ public static class HubHostFactory
                 doc.Nodes.Insert(0, node);
                 store.Save(doc);
                 if (!isVerifyOnly)
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
             }
             return Results.Ok(node.ToRedactedCopy());
         });
@@ -410,7 +474,7 @@ public static class HubHostFactory
                     var diff = SubscriptionSyncEngine.MergeParsedNodes(doc, sub, validNodes);
                     store.Save(doc);
                     if (!isVerifyOnly)
-                        proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                        proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                     return diff;
                 }
             }
@@ -596,7 +660,7 @@ public static class HubHostFactory
                 }
                 store.Save(doc);
                 if (!isVerifyOnly)
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 HubEventLogger.Default.Info("SUB", $"已移除订阅源 {id}（保留已绑定席位快照）");
                 return Results.Ok(new { removed = removedSub });
             }
@@ -631,7 +695,7 @@ public static class HubHostFactory
                 {
                     store.Save(doc);
                     if (!isVerifyOnly)
-                        proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                        proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 }
             }
             return Results.Ok(new
@@ -658,7 +722,7 @@ public static class HubHostFactory
                 }
                 store.Save(doc);
                 if (!isVerifyOnly)
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 return Results.Ok(new { removed });
             }
         });
@@ -791,11 +855,14 @@ public static class HubHostFactory
                     seat.BoundNodeSnapshotHash = curNode?.ConfigSnapshotHash;
                     seat.HasNodeDrift = false;
                 }
+                if (req.IsHidden.HasValue) seat.IsHidden = req.IsHidden.Value;
+                if (req.IsPinned.HasValue) seat.IsPinned = req.IsPinned.Value;
+                if (req.SortOrder.HasValue) seat.SortOrder = req.SortOrder.Value;
 
                 store.Save(doc);
                 if (!isVerifyOnly)
                 {
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                     if (portChanged && takeoverService.InspectSeat(seat).IsTakenOver)
                     {
                         takeoverService.SetTakeover(seat, true);
@@ -826,7 +893,7 @@ public static class HubHostFactory
                 {
                     seat.Enabled = true;
                     store.Save(doc);
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 }
 
                 var (ok, message, status) = takeoverService.SetTakeover(seat, req.Enabled);
@@ -864,7 +931,7 @@ public static class HubHostFactory
                 {
                     seat.Enabled = true;
                     store.Save(doc);
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 }
                 boundNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
                 iso = doc.Isolation;
@@ -910,7 +977,7 @@ public static class HubHostFactory
                 {
                     seat.Enabled = true;
                     store.Save(doc);
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 }
                 boundNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
                 iso = doc.Isolation;
@@ -944,7 +1011,7 @@ public static class HubHostFactory
                 {
                     seat.Enabled = true;
                     store.Save(doc);
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 }
                 boundNode = doc.Nodes.FirstOrDefault(n => n.Id == seat.BoundNodeId);
                 iso = doc.Isolation;
@@ -990,8 +1057,147 @@ public static class HubHostFactory
 
                 store.Save(doc);
                 if (!isVerifyOnly)
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 return Results.Ok(doc.Seats);
+            }
+        });
+
+        app.MapPost("/api/seats/reorder", (ReorderSeatsRequest req) =>
+        {
+            lock (stateLock)
+            {
+                int idx = 1;
+                var map = doc.Seats.ToDictionary(s => s.Id, StringComparer.OrdinalIgnoreCase);
+                foreach (string seatId in req.OrderedSeatIds ?? [])
+                {
+                    if (map.TryGetValue(seatId, out var s))
+                    {
+                        s.SortOrder = idx++;
+                        map.Remove(seatId);
+                    }
+                }
+                foreach (var rem in map.Values.OrderBy(s => s.SortOrder))
+                {
+                    rem.SortOrder = idx++;
+                }
+
+                store.Save(doc);
+                return Results.Ok(doc.Seats.OrderBy(s => s.IsPinned ? 0 : 1).ThenBy(s => s.SortOrder).ToList());
+            }
+        });
+
+        app.MapPost("/api/seats/{id}/restart", async (string id, CancellationToken ct) =>
+        {
+            if (isVerifyOnly)
+            {
+                return Results.Ok(new
+                {
+                    ok = false,
+                    message = "验证预览模式不终止或重启外部应用进程"
+                });
+            }
+
+            AppSeat? seat;
+            lock (stateLock)
+            {
+                seat = doc.Seats.FirstOrDefault(s => s.Id == id);
+                if (seat == null) return Results.NotFound();
+            }
+
+            var (ok, message) = await takeoverService.GracefulRestartWithProxyAsync(seat, ct);
+            HubEventLogger.Default.Info("PROXY", $"席位重启重连 {seat.Name} (:{seat.LocalPort}) -> {message}");
+            return Results.Ok(new
+            {
+                ok,
+                message,
+                seatTakeovers = takeoverService.InspectAll(doc.Seats)
+            });
+        });
+
+        // 3.5 多开隔离实例 (ManagedAppInstance) CRUD 与启动
+        app.MapGet("/api/instances", () =>
+        {
+            lock (stateLock) return Results.Ok(doc.Instances);
+        });
+
+        app.MapPost("/api/instances", (CreateInstanceRequest req) =>
+        {
+            lock (stateLock)
+            {
+                try
+                {
+                    var inst = instanceManager.CreateInstance(
+                        doc,
+                        req.BaseSeatId,
+                        req.Name,
+                        req.ProfileDir,
+                        req.BoundNodeId,
+                        req.ExtraArgs,
+                        req.WorkingDirectory);
+
+                    if (!isVerifyOnly)
+                        proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
+
+                    HubEventLogger.Default.Info("INSTANCE", $"新建多开隔离实例「{inst.Name}」(:{inst.LocalPort})");
+                    return Results.Ok(inst);
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { message = ex.Message });
+                }
+            }
+        });
+
+        app.MapPut("/api/instances/{id}", (string id, UpdateInstanceRequest req) =>
+        {
+            lock (stateLock)
+            {
+                var inst = doc.Instances.FirstOrDefault(i => i.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+                if (inst == null) return Results.NotFound();
+                if (req.Enabled.HasValue) inst.Enabled = req.Enabled.Value;
+                if (req.BoundNodeId != null) inst.BoundNodeId = req.BoundNodeId;
+                if (req.KillSwitchEnabled.HasValue) inst.KillSwitchEnabled = req.KillSwitchEnabled.Value;
+                if (!string.IsNullOrWhiteSpace(req.Name)) inst.Name = req.Name.Trim();
+                if (req.ExtraArgs != null) inst.ExtraArgs = string.IsNullOrWhiteSpace(req.ExtraArgs) ? null : req.ExtraArgs.Trim();
+                if (req.WorkingDirectory != null) inst.WorkingDirectory = string.IsNullOrWhiteSpace(req.WorkingDirectory) ? null : req.WorkingDirectory.Trim();
+
+                store.Save(doc);
+                if (!isVerifyOnly)
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
+                return Results.Ok(inst);
+            }
+        });
+
+        app.MapDelete("/api/instances/{id}", (string id) =>
+        {
+            lock (stateLock)
+            {
+                if (!instanceManager.DeleteInstance(doc, id, out string message))
+                    return Results.NotFound(new { message });
+                if (!isVerifyOnly)
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
+                return Results.Ok(new { ok = true, message });
+            }
+        });
+
+        app.MapPost("/api/instances/{id}/launch", (string id) =>
+        {
+            if (isVerifyOnly)
+                return Results.Ok(new { ok = false, message = "验证预览模式不拉起多开实例进程" });
+
+            lock (stateLock)
+            {
+                var inst = doc.Instances.FirstOrDefault(i => i.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+                if (inst == null) return Results.NotFound();
+                if (!inst.Enabled)
+                {
+                    inst.Enabled = true;
+                    store.Save(doc);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
+                }
+                var (ok, message) = instanceManager.LaunchInstance(doc, id);
+                HubEventLogger.Default.Info("INSTANCE", $"启动多开实例 {inst.Name} (:{inst.LocalPort}) -> {message}");
+                return Results.Ok(new { ok, message, instance = inst });
             }
         });
 
@@ -1039,7 +1245,7 @@ public static class HubHostFactory
                 nicManager.Refresh(doc.Isolation.LockedPhysicalNicId);
                 store.Save(doc);
                 if (!isVerifyOnly)
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 return Results.Ok(new
                 {
                     settings = doc.Isolation,
@@ -1058,7 +1264,7 @@ public static class HubHostFactory
             var (ok, message, status) = await sidecar.InstallLatestAsync(req?.ProxyUrl, ct);
             if (ok && !isVerifyOnly)
             {
-                lock (stateLock) proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                lock (stateLock) proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
             }
             return Results.Ok(new { ok, message, status = sidecar.GetStatus() });
         });
@@ -1075,7 +1281,7 @@ public static class HubHostFactory
                 sidecar.SetCustomBinaryPath(clean);
                 store.Save(doc);
                 if (!isVerifyOnly)
-                    proxyServer.UpdateTopology(doc.Seats, doc.Nodes, doc.Isolation);
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
                 return Results.Ok(new { ok = true, message = clean != null ? "已绑定自定义 sing-box 路径" : "已恢复默认路径探测", status = sidecar.GetStatus() });
             }
         });
@@ -1084,6 +1290,146 @@ public static class HubHostFactory
         {
             sidecar.Stop();
             return Results.Ok(new { ok = true, message = "已停止 sing-box 扩展引擎子进程", status = sidecar.GetStatus() });
+        });
+
+        app.MapPost("/api/engine/singbox/import", async (SingBoxImportRequest req, CancellationToken ct) =>
+        {
+            var (ok, message, status) = await sidecar.ImportOfflinePackageAsync(req.LocalPath, req.ExpectedSha256, ct);
+            if (ok)
+            {
+                lock (stateLock)
+                {
+                    doc.Isolation.CustomSingBoxPath = null;
+                    store.Save(doc);
+                    if (!isVerifyOnly)
+                        proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
+                }
+            }
+            return Results.Ok(new { ok, message, status = sidecar.GetStatus() });
+        });
+
+        // 4.8 桌面交互偏好与跨机器 WebDAV 加密同步
+        app.MapGet("/api/preferences", () =>
+        {
+            lock (stateLock) return Results.Ok(doc.Preferences.ToRedactedCopy());
+        });
+
+        app.MapPut("/api/preferences", (PreferencesUpdateRequest req) =>
+        {
+            lock (stateLock)
+            {
+                var p = doc.Preferences;
+                if (req.CloseAction is "minimize_to_tray" or "exit") p.CloseAction = req.CloseAction;
+                if (req.TrayLeftClickAction is "toggle_flyout" or "show_main" or "toggle_mini") p.TrayLeftClickAction = req.TrayLeftClickAction;
+                if (req.MiniCardEnabled.HasValue) p.MiniCardEnabled = req.MiniCardEnabled.Value;
+                if (req.MiniCardX.HasValue) p.MiniCardX = req.MiniCardX.Value;
+                if (req.MiniCardY.HasValue) p.MiniCardY = req.MiniCardY.Value;
+                if (req.WebDavUrl != null) p.WebDavUrl = string.IsNullOrWhiteSpace(req.WebDavUrl) ? null : req.WebDavUrl.Trim();
+                if (req.WebDavUsername != null) p.WebDavUsername = string.IsNullOrWhiteSpace(req.WebDavUsername) ? null : req.WebDavUsername.Trim();
+                if (req.WebDavPassword != null && req.WebDavPassword != "••••••••")
+                {
+                    p.WebDavPassword = string.IsNullOrEmpty(req.WebDavPassword) ? null : req.WebDavPassword;
+                    p.HasWebDavPassword = !string.IsNullOrEmpty(p.WebDavPassword);
+                }
+                if (req.WebDavSyncPassphrase != null && req.WebDavSyncPassphrase != "••••••••")
+                {
+                    p.WebDavSyncPassphrase = string.IsNullOrEmpty(req.WebDavSyncPassphrase) ? null : req.WebDavSyncPassphrase;
+                    p.HasSyncPassphrase = !string.IsNullOrEmpty(p.WebDavSyncPassphrase);
+                }
+                store.Save(doc);
+                return Results.Ok(p.ToRedactedCopy());
+            }
+        });
+
+        app.MapPost("/api/webdav/test", async (WebDavActionRequest req, CancellationToken ct) =>
+        {
+            string? url;
+            string? user;
+            string? pass;
+            lock (stateLock)
+            {
+                var p = doc.Preferences;
+                url = !string.IsNullOrWhiteSpace(req.WebDavUrl) ? req.WebDavUrl.Trim() : p.WebDavUrl;
+                user = req.WebDavUsername != null ? req.WebDavUsername : p.WebDavUsername;
+                pass = req.WebDavPassword != null && req.WebDavPassword != "••••••••" ? req.WebDavPassword : p.WebDavPassword;
+            }
+            if (string.IsNullOrWhiteSpace(url))
+                return Results.Ok(new { ok = false, message = "请先填写 WebDAV 地址" });
+
+            var (ok, message) = await webDavSync.TestConnectionAsync(url, user, pass, ct);
+            return Results.Ok(new { ok, message });
+        });
+
+        app.MapPost("/api/webdav/push", async (WebDavActionRequest req, CancellationToken ct) =>
+        {
+            HubStateDocument snapshot;
+            string? url;
+            string? user;
+            string? pass;
+            string? passphrase;
+            lock (stateLock)
+            {
+                var p = doc.Preferences;
+                url = !string.IsNullOrWhiteSpace(req.WebDavUrl) ? req.WebDavUrl.Trim() : p.WebDavUrl;
+                user = req.WebDavUsername != null ? req.WebDavUsername : p.WebDavUsername;
+                pass = req.WebDavPassword != null && req.WebDavPassword != "••••••••" ? req.WebDavPassword : p.WebDavPassword;
+                passphrase = req.Passphrase != null && req.Passphrase != "••••••••" ? req.Passphrase : p.WebDavSyncPassphrase;
+                snapshot = doc;
+            }
+            if (string.IsNullOrWhiteSpace(url))
+                return Results.Ok(new { ok = false, message = "请先填写 WebDAV 地址" });
+            if (string.IsNullOrWhiteSpace(passphrase))
+                return Results.Ok(new { ok = false, message = "请设置加密同步口令（至少 4 位）" });
+
+            var (ok, message, syncedAt) = await webDavSync.PushBackupAsync(snapshot, url, user, pass, passphrase, ct);
+            if (ok && syncedAt.HasValue)
+            {
+                lock (stateLock)
+                {
+                    doc.Preferences.LastWebDavSyncAt = syncedAt;
+                    store.Save(doc);
+                }
+            }
+            return Results.Ok(new { ok, message, lastWebDavSyncAt = syncedAt });
+        });
+
+        app.MapPost("/api/webdav/pull", async (WebDavActionRequest req, CancellationToken ct) =>
+        {
+            string? url;
+            string? user;
+            string? pass;
+            string? passphrase;
+            lock (stateLock)
+            {
+                var p = doc.Preferences;
+                url = !string.IsNullOrWhiteSpace(req.WebDavUrl) ? req.WebDavUrl.Trim() : p.WebDavUrl;
+                user = req.WebDavUsername != null ? req.WebDavUsername : p.WebDavUsername;
+                pass = req.WebDavPassword != null && req.WebDavPassword != "••••••••" ? req.WebDavPassword : p.WebDavPassword;
+                passphrase = req.Passphrase != null && req.Passphrase != "••••••••" ? req.Passphrase : p.WebDavSyncPassphrase;
+            }
+            if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(passphrase))
+                return Results.Ok(new { ok = false, message = "请先填写 WebDAV 地址与同步解密口令" });
+
+            var (ok, message, restored) = await webDavSync.PullBackupAsync(url, user, pass, passphrase, ct);
+            if (!ok || restored == null)
+                return Results.Ok(new { ok = false, message });
+
+            lock (stateLock)
+            {
+                doc.Isolation = restored.Isolation ?? doc.Isolation;
+                doc.Nodes = restored.Nodes ?? doc.Nodes;
+                doc.Seats = restored.Seats ?? doc.Seats;
+                doc.Instances = restored.Instances ?? new();
+                doc.Subscriptions = restored.Subscriptions ?? doc.Subscriptions;
+                doc.CustomPricings = restored.CustomPricings ?? doc.CustomPricings;
+                doc.Preferences.LastWebDavSyncAt = DateTimeOffset.UtcNow;
+                pricingCatalog.SetCustomRules(doc.CustomPricings);
+                usageService.RecalculatePricing();
+                store.Save(doc);
+                if (!isVerifyOnly)
+                    proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
+            }
+            return Results.Ok(new { ok = true, message, lastWebDavSyncAt = doc.Preferences.LastWebDavSyncAt });
         });
 
         // 5. CC Switch 级双源统计大盘、按需同步与模型定价 API
@@ -1098,6 +1444,15 @@ public static class HubHostFactory
                 pageSize ?? 20,
                 traffic);
             return Results.Ok(data);
+        });
+
+        app.MapGet("/api/stats/conversations/{conversationId}/audit", (string conversationId) =>
+        {
+            string decoded = Uri.UnescapeDataString(conversationId);
+            var report = usageService.GetConversationAudit(decoded);
+            return report != null
+                ? Results.Ok(report)
+                : Results.NotFound(new { message = $"未找到会话审计记录: {decoded}" });
         });
 
         app.MapPost("/api/stats/sync", () =>

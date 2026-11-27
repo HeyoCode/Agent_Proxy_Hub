@@ -98,7 +98,8 @@ export const GitHubIcon: React.FC<IconProps> = ({ size = 17, className }) => (
   </svg>
 );
 
-export const SeatBrandIcon: React.FC<{ seatId: string; size?: number; className?: string }> = ({ seatId, size = 22, className }) => {
+export const SeatBrandIcon: React.FC<{ seatId: string; size?: number; className?: string }> = ({ seatId: rawSeatId, size = 22, className }) => {
+  const seatId = rawSeatId.split(':inst:')[0];
   const uid = React.useId().replace(/:/g, '');
 
   if (seatId === 'claude') {
@@ -379,6 +380,64 @@ export const SeatBrandIcon: React.FC<{ seatId: string; size?: number; className?
     );
   }
 
+  if (seatId === 'windsurf') {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <rect x="2" y="2" width="20" height="20" rx="5.5" fill="#0D9488" />
+        <path d="M5.5 9.5c2.2-2.1 4.4-2.1 6.5 0s4.3 2.1 6.5 0" stroke="#F0FDFA" strokeWidth="2.1" strokeLinecap="round" />
+        <path d="M5.5 14.5c2.2-2.1 4.4-2.1 6.5 0s4.3 2.1 6.5 0" stroke="#99F6E4" strokeWidth="2.1" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'kiro') {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <rect x="2" y="2" width="20" height="20" rx="5.5" fill="#4C1D95" />
+        <path d="M8 7v10M8 12l6.5-5M10.5 10l4.8 7" stroke="#EDE9FE" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx="17.5" cy="7.5" r="1.4" fill="#C4B5FD" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'vscode-copilot') {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <path d="M17.2 3.2 21 5v14l-3.8 1.8L8.4 13l-3.6 2.8-1.8-1.4 3-2.4-3-2.4 1.8-1.4L8.4 11l8.8-7.8Z" fill="#007ACC" />
+        <path d="M17.2 6.8 11.4 12l5.8 5.2V6.8Z" fill="#E0F2FE" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'zed') {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <rect x="2.5" y="2.5" width="19" height="19" rx="4.5" stroke="#087EA4" strokeWidth="1.9" fill="rgba(8,126,164,0.12)" />
+        <path d="M7.5 8h9L7.5 16h9" stroke="#0EA5E9" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'trae') {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <rect x="2" y="2" width="20" height="20" rx="5.5" fill="#065F46" />
+        <path d="M6.8 8h10.4M12 8v9" stroke="#34D399" strokeWidth="2.3" strokeLinecap="round" />
+        <circle cx="16.5" cy="14.5" r="2" fill="#A7F3D0" />
+      </svg>
+    );
+  }
+
+  if (seatId === 'codebuddy') {
+    return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
+        <rect x="2" y="2" width="20" height="20" rx="5.5" fill="#1D4ED8" />
+        <path d="M14.8 8.3a4.6 4.6 0 1 0 0 7.4" stroke="#DBEAFE" strokeWidth="2.2" strokeLinecap="round" />
+        <circle cx="16.2" cy="12" r="1.7" fill="#60A5FA" />
+      </svg>
+    );
+  }
+
   // Cursor 官方 3D 等距立方体光标标（深浅主题自适应单色）
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" className={className} style={{ flexShrink: 0 }} aria-hidden="true">
@@ -538,5 +597,25 @@ export const AlertTriangleIcon: React.FC<IconProps> = ({ size = 13, className })
   <svg width={size} height={size} viewBox="0 0 18 18" fill="none" className={className} aria-hidden="true">
     <path d="M8.13 3.1a1 1 0 0 1 1.74 0l5.6 9.8A1 1 0 0 1 14.6 14.4H3.4a1 1 0 0 1-.87-1.5l5.6-9.8Z" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
     <path d="M9 6.8v3.4M9 12.1v.3" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
+  </svg>
+);
+
+export const MiniFloatIcon: React.FC<IconProps> = ({ size = 17, className }) => (
+  <svg width={size} height={size} viewBox="0 0 20 20" fill="none" className={className} aria-hidden="true">
+    <rect x="2.5" y="3.5" width="15" height="13" rx="2.6" stroke="currentColor" strokeWidth="1.55" />
+    <rect x="9.2" y="7.6" width="6.2" height="5.2" rx="1.4" fill="currentColor" fillOpacity="0.22" stroke="currentColor" strokeWidth="1.35" />
+  </svg>
+);
+
+export const PinStarIcon: React.FC<{ pinned?: boolean; size?: number }> = ({ pinned, size = 12 }) => (
+  <svg width={size} height={size} viewBox="0 0 16 16" fill={pinned ? 'currentColor' : 'none'} aria-hidden="true">
+    <path d="M9.8 2.2 13.8 6.2l-1.5 1.5-1.1-.4-2.5 2.5.4 2.1-1.3 1.3-2.5-2.5L2.7 13.3l-.9-.9 2.6-2.6-2.5-2.5 1.3-1.3 2.1.4 2.5-2.5-.4-1.1 1.4-1.6Z" stroke="currentColor" strokeWidth="1.25" strokeLinejoin="round" />
+  </svg>
+);
+
+export const LayersInstanceIcon: React.FC<IconProps> = ({ size = 13, className }) => (
+  <svg width={size} height={size} viewBox="0 0 18 18" fill="none" className={className} aria-hidden="true">
+    <path d="M9 2.5 15.5 6 9 9.5 2.5 6 9 2.5Z" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
+    <path d="M2.5 9.2 9 12.7l6.5-3.5M2.5 12.3 9 15.8l6.5-3.5" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 );

@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using AgentProxyHub.Core.Apps;
 using AgentProxyHub.Core.Models;
 using AgentProxyHub.Core.Networking;
+using AgentProxyHub.Core.Storage;
 using AgentProxyHub.Core.Telemetry;
 using Xunit;
 
@@ -1086,7 +1087,7 @@ public class ProxyAndTelemetryTests
         {
             var store = new AgentProxyHub.Core.Storage.HubStateStore(tmpDir);
             var doc = store.LoadOrCreateDefault();
-            Assert.Equal(15, doc.Seats.Count);
+            Assert.Equal(21, doc.Seats.Count);
             string[] expectedIds =
             [
                 "claude", "chatgpt", "agy", "cursor", "claude-desktop",
@@ -1354,6 +1355,258 @@ public class ProxyAndTelemetryTests
             Assert.Equal(365, dash.ActivityHeatmap.Count);
             Assert.True(dash.ActiveDaysLastYear >= 1);
             Assert.Contains(dash.ActivityHeatmap, c => c.Requests == 2 && c.Level > 0);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
+
+    [Fact]
+    public void DefaultSeats_Contains21BuiltInApps_And_TakeoverSupportsNewIdes()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"aph_21apps_{Guid.NewGuid():N}");
+        string hubDir = Path.Combine(tempRoot, ".agent-proxy-hub");
+        string roaming = Path.Combine(tempRoot, "AppData", "Roaming");
+        string local = Path.Combine(tempRoot, "AppData", "Local");
+        Directory.CreateDirectory(hubDir);
+        Directory.CreateDirectory(roaming);
+        Directory.CreateDirectory(local);
+
+        try
+        {
+            var store = new HubStateStore(hubDir);
+            var doc = store.LoadOrCreateDefault();
+            Assert.Equal(21, doc.Seats.Count);
+
+            string[] addedIds = ["windsurf", "kiro", "vscode-copilot", "zed", "trae", "codebuddy"];
+            foreach (string id in addedIds)
+            {
+                Assert.Contains(doc.Seats, s => s.Id == id);
+            }
+
+            // 预置 Windsurf 与 Zed 已有设置，验证无损接管保留原有配置并可精准还原
+            string windsurfSettings = Path.Combine(roaming, "Windsurf", "User", "settings.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(windsurfSettings)!);
+            File.WriteAllText(windsurfSettings, "{\n  \"editor.fontSize\": 15\n}");
+
+            string zedSettings = Path.Combine(tempRoot, ".config", "zed", "settings.json");
+            Directory.CreateDirectory(Path.GetDirectoryName(zedSettings)!);
+            File.WriteAllText(zedSettings, "{\n  \"theme\": \"One Dark\"\n}");
+
+            var takeover = new AppProxyTakeoverService(tempRoot, roaming, local, _ => false, forceMacOs: false);
+
+            var wsSeat = doc.Seats.First(s => s.Id == "windsurf");
+            var (wsOk, _, wsStatus) = takeover.SetTakeover(wsSeat, true);
+            Assert.True(wsOk);
+            Assert.True(wsStatus.IsTakenOver);
+            string wsWritten = File.ReadAllText(windsurfSettings);
+            Assert.Contains($"http://127.0.0.1:{wsSeat.LocalPort}", wsWritten);
+            Assert.Contains("15", wsWritten);
+
+            var (wsRestoreOk, _, wsRestoredStatus) = takeover.SetTakeover(wsSeat, false);
+            Assert.True(wsRestoreOk);
+            Assert.False(wsRestoredStatus.IsTakenOver);
+            string wsRestored = File.ReadAllText(windsurfSettings);
+            Assert.DoesNotContain("http.proxy", wsRestored);
+            Assert.Contains("15", wsRestored);
+
+            var zedSeat = doc.Seats.First(s => s.Id == "zed");
+            var (zedOk, _, zedStatus) = takeover.SetTakeover(zedSeat, true);
+            Assert.True(zedOk);
+            Assert.True(zedStatus.IsTakenOver);
+            string zedWritten = File.ReadAllText(zedSettings);
+            Assert.Contains($"http://127.0.0.1:{zedSeat.LocalPort}", zedWritten);
+            Assert.Contains("One Dark", zedWritten);
+
+            var (zedRestoreOk, _, _) = takeover.SetTakeover(zedSeat, false);
+            Assert.True(zedRestoreOk);
+            Assert.DoesNotContain($"127.0.0.1:{zedSeat.LocalPort}", File.ReadAllText(zedSettings));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
+
+    [Fact]
+    public async Task AppInstanceManager_AllocatesUniquePorts_And_AntigravityRestartIsHardBlocked()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"aph_inst_{Guid.NewGuid():N}");
+        string hubDir = Path.Combine(tempRoot, ".agent-proxy-hub");
+        Directory.CreateDirectory(hubDir);
+
+        try
+        {
+            var store = new HubStateStore(hubDir);
+            var doc = store.LoadOrCreateDefault();
+            var takeover = new AppProxyTakeoverService(tempRoot, tempRoot, tempRoot, _ => false, forceMacOs: false);
+            var mgr = new AppInstanceManager(store, takeover);
+
+            string p1Dir = Path.Combine(tempRoot, "profiles", "c1");
+            string p2Dir = Path.Combine(tempRoot, "profiles", "c2");
+            var inst1 = mgr.CreateInstance(doc, "cursor", "工作账号", p1Dir, "direct-phy");
+            var inst2 = mgr.CreateInstance(doc, "cursor", "个人账号", p2Dir, "direct-phy");
+
+            Assert.NotEqual(inst1.LocalPort, inst2.LocalPort);
+            Assert.True(Directory.Exists(p1Dir));
+            Assert.True(Directory.Exists(p2Dir));
+
+            var baseCursor = doc.Seats.First(s => s.Id == "cursor");
+            var vSeat = inst1.ToVirtualSeat(baseCursor);
+            Assert.Equal($"cursor:inst:{inst1.Id}", vSeat.Id);
+            Assert.True(vSeat.IsInstance);
+            Assert.Equal(inst1.LocalPort, vSeat.LocalPort);
+
+            // 验证 Antigravity 席位严禁强制重启（防误杀当前宿主 IDE 会话）
+            var agySeat = doc.Seats.First(s => s.Id == "agy");
+            var (restartOk, restartMsg) = await takeover.GracefulRestartWithProxyAsync(agySeat);
+            Assert.False(restartOk);
+            Assert.Contains("Antigravity", restartMsg);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
+
+    [Fact]
+    public async Task SingBoxSidecarManager_ImportOfflinePackage_VerifiesSha256_And_BlocksZipSlip()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"aph_sb_imp_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+
+        try
+        {
+            using var sidecar = new SingBoxSidecarManager(tempRoot);
+
+            // 1. 构造含 Zip-Slip 恶意目录穿越条目的压缩包并验证拦截
+            string evilZip = Path.Combine(tempRoot, "evil.zip");
+            using (var zip = System.IO.Compression.ZipFile.Open(evilZip, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                var entry = zip.CreateEntry("../../evil.exe");
+                using var sw = new StreamWriter(entry.Open());
+                sw.Write("evil");
+            }
+            var (evilOk, evilMsg, _) = await sidecar.ImportOfflinePackageAsync(evilZip);
+            Assert.False(evilOk);
+            Assert.Contains("Zip-Slip", evilMsg);
+
+            // 2. 构造合法 sing-box 压缩包并检验 SHA-256 严格比对
+            string binName = OperatingSystem.IsWindows() ? "sing-box.exe" : "sing-box";
+            string goodZip = Path.Combine(tempRoot, "good-singbox.zip");
+            using (var zip = System.IO.Compression.ZipFile.Open(goodZip, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                var entry = zip.CreateEntry($"sing-box-1.11.0/{binName}");
+                using var sw = new StreamWriter(entry.Open());
+                sw.Write("MZ-fake-sing-box-payload-for-sha256-test");
+            }
+
+            string wrongSha = new('0', 64);
+            var (badShaOk, badShaMsg, _) = await sidecar.ImportOfflinePackageAsync(goodZip, wrongSha);
+            Assert.False(badShaOk);
+            Assert.Contains("SHA-256", badShaMsg);
+
+            string actualZipSha = SingBoxSidecarManager.ComputeFileSha256Safe(goodZip)!;
+            var (goodOk, _, goodStatus) = await sidecar.ImportOfflinePackageAsync(goodZip, actualZipSha);
+            Assert.True(goodOk);
+            Assert.True(goodStatus.Installed);
+            Assert.False(string.IsNullOrWhiteSpace(goodStatus.BinarySha256));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot)) Directory.Delete(tempRoot, true);
+        }
+    }
+
+    [Fact]
+    public void WebDavSyncService_EncryptAndDecryptDocument_RoundTripsCrossMachine_And_RejectsWrongPassphrase()
+    {
+        var doc = new HubStateDocument
+        {
+            Nodes =
+            [
+                new ProxyNode
+                {
+                    Id = "n-dav-1",
+                    Name = "Tokyo-Static",
+                    Protocol = ProxyProtocol.SOCKS5,
+                    Host = "203.0.113.88",
+                    Port = 1080,
+                    Username = "alice",
+                    Password = "node-s3cr3t-password"
+                }
+            ],
+            Instances =
+            [
+                new ManagedAppInstance
+                {
+                    Id = "inst-work1",
+                    BaseSeatId = "cursor",
+                    Name = "工作账号",
+                    ProfileDir = @"C:\Profiles\Work",
+                    LocalPort = 17920,
+                    BoundNodeId = "n-dav-1"
+                }
+            ],
+            Preferences = new HubUiPreferences
+            {
+                CloseAction = "minimize_to_tray",
+                WebDavUrl = "https://dav.example.com/dav/",
+                WebDavPassword = "master-webdav-password",
+                WebDavSyncPassphrase = "sync-passphrase-2026"
+            }
+        };
+
+        string encrypted = WebDavSyncService.EncryptDocument(doc, "sync-passphrase-2026");
+        Assert.DoesNotContain("node-s3cr3t-password", encrypted, StringComparison.Ordinal);
+        Assert.DoesNotContain("master-webdav-password", encrypted, StringComparison.Ordinal);
+
+        Assert.Throws<InvalidDataException>(() =>
+            WebDavSyncService.DecryptDocument(encrypted, "wrong-passphrase"));
+
+        var restored = WebDavSyncService.DecryptDocument(encrypted, "sync-passphrase-2026");
+        Assert.Single(restored.Nodes);
+        Assert.Equal("node-s3cr3t-password", restored.Nodes[0].Password);
+        Assert.Single(restored.Instances);
+        Assert.Equal("工作账号", restored.Instances[0].Name);
+        Assert.Null(restored.Preferences.WebDavPassword);
+    }
+
+    [Fact]
+    public void SessionScanner_ExtractsWorkspaceAndBuildsConversationAudit_ForClaudeAndCodex()
+    {
+        string tempRoot = Path.Combine(Path.GetTempPath(), $"aph_audit_{Guid.NewGuid():N}");
+        string claudeProj = Path.Combine(tempRoot, ".claude", "projects", "proj-demo");
+        Directory.CreateDirectory(claudeProj);
+
+        try
+        {
+            string t1 = DateTimeOffset.UtcNow.AddMinutes(-2).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string t2 = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string sessionFile = Path.Combine(claudeProj, "conv-audit-99.jsonl");
+            File.WriteAllLines(sessionFile,
+            [
+                $"{{\"timestamp\":\"{t1}\",\"cwd\":\"F:\\\\source\\\\Agent_Proxy_Hub\",\"message\":{{\"id\":\"m1\",\"model\":\"claude-sonnet-4-5\",\"content\":[{{\"type\":\"tool_use\",\"name\":\"Read\"}}],\"usage\":{{\"input_tokens\":1000,\"cache_read_input_tokens\":2000,\"output_tokens\":200}}}}}}",
+                $"{{\"timestamp\":\"{t2}\",\"cwd\":\"F:\\\\source\\\\Agent_Proxy_Hub\",\"message\":{{\"id\":\"m2\",\"model\":\"claude-sonnet-4-5\",\"content\":[{{\"type\":\"tool_use\",\"name\":\"Edit\"}},{{\"type\":\"tool_use\",\"name\":\"Bash\"}}],\"usage\":{{\"input_tokens\":2500,\"cache_read_input_tokens\":15000,\"output_tokens\":500}}}}}}"
+            ]);
+
+            var scanner = new SessionLogScanner(tempRoot);
+            var stats = new UsageStatsService(scanner, new ModelPricingCatalog());
+            stats.SyncNow();
+
+            var dash = stats.QueryDashboard("all", "all", "all", 1, 20, []);
+            Assert.NotEmpty(dash.WorkspaceBreakdown);
+            Assert.Contains(dash.WorkspaceBreakdown, w => w.Workspace.Contains("Agent_Proxy_Hub", StringComparison.OrdinalIgnoreCase) && w.Requests == 2);
+
+            var audit = stats.GetConversationAudit("claude:conv-audit-99");
+            Assert.NotNull(audit);
+            Assert.Equal(2, audit!.TotalTurns);
+            Assert.Equal(17500, audit.PeakContextTokens);
+            Assert.True(audit.ContextGrowthRatio > 4.0);
+            Assert.Contains(audit.ToolBreakdown, t => t.ToolName == "Read" && t.Calls == 1);
+            Assert.Contains(audit.ToolBreakdown, t => t.ToolName == "Edit" && t.Calls == 1);
+            Assert.Contains(audit.ToolBreakdown, t => t.ToolName == "Bash" && t.Calls == 1);
         }
         finally
         {
