@@ -46,7 +46,7 @@ type TabKey = 'overview' | 'usage' | 'nodes' | 'apps' | 'isolation';
 
 const FALLBACK_PROJECT = {
   name: 'Agent Proxy Hub',
-  version: '0.7.0',
+  version: '0.8.0',
   repoOwner: 'HeyoCode',
   repoName: 'Agent_Proxy_Hub',
   repoSlug: 'HeyoCode/Agent_Proxy_Hub',
@@ -449,6 +449,17 @@ export const App: React.FC = () => {
               <span className="top-metric-label">内存:</span>
               <span className="top-metric-val num">{overview?.memoryMb ?? '—'} MB</span>
             </span>
+            {overview?.quotaSummary && (
+              <button
+                type="button"
+                className={`pill-tag pill-tag--xs ${overview.quotaSummary.headlineTone === 'critical' ? 'tag-coral' : (overview.quotaSummary.headlineTone === 'warn' ? 'tag-amber' : 'tag-emerald')}`}
+                style={{ border: 'none', cursor: 'pointer' }}
+                title="点击查看多 Agent 额度窗口与订阅流量详情"
+                onClick={() => setTab('usage')}
+              >
+                {overview.quotaSummary.headlineStatus}
+              </button>
+            )}
           </div>
         </header>
 
@@ -476,6 +487,7 @@ export const App: React.FC = () => {
                 <NodesView
                   nodes={overview.nodes}
                   subscriptions={overview.subscriptions ?? []}
+                  trafficPools={overview.quotaSummary?.trafficPools ?? []}
                   privacyMode={privacyMode}
                   autoHealthCheckEnabled={overview.isolation.autoHealthCheckEnabled ?? true}
                   autoHealthCheckMinutes={overview.isolation.autoHealthCheckMinutes ?? 5}

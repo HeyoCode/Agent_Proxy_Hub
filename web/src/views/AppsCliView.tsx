@@ -316,7 +316,7 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
                           <span className="pill-tag tag-indigo" style={{ fontSize: 10, padding: '1px 7px' }}>运行中</span>
                         )}
                       </div>
-                      <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      <div className="num cell-ellipsis" style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 168 }} title={`目标进程：${proc}`}>
                         目标进程：<span className="mono">{proc}</span>
                       </div>
                     </div>
@@ -364,9 +364,18 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
                   </div>
                 </div>
 
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11.5, color: 'var(--text-secondary)' }}>
-                  <span>绑定专线：<strong style={{ color: 'var(--text-primary)' }}>{bound?.name ?? '未绑定'}{bound?.exitIp && bound.exitIp !== '—' ? ` (${maskIp(bound.exitIp, privacyMode)})` : ''}</strong></span>
-                  <span className="num">直出吞吐：<strong style={{ color: 'var(--text-primary)' }}>↑ {formatBytes(snap?.bytesTx ?? 0)} / ↓ {formatBytes(snap?.bytesRx ?? 0)}</strong></span>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, minWidth: 0, maxWidth: '100%' }}>
+                    <span style={{ flexShrink: 0 }}>绑定专线：</span>
+                    <strong
+                      className="cell-ellipsis"
+                      style={{ color: 'var(--text-primary)', maxWidth: 230 }}
+                      title={`${bound?.name ?? '未绑定'}${bound?.exitIp && bound.exitIp !== '—' ? ` (${maskIp(bound.exitIp, privacyMode)})` : ''}`}
+                    >
+                      {bound?.name ?? '未绑定'}{bound?.exitIp && bound.exitIp !== '—' ? ` (${maskIp(bound.exitIp, privacyMode)})` : ''}
+                    </strong>
+                  </span>
+                  <span className="num nowrap">直出吞吐：<strong style={{ color: 'var(--text-primary)' }}>↑ {formatBytes(snap?.bytesTx ?? 0)} / ↓ {formatBytes(snap?.bytesRx ?? 0)}</strong></span>
                 </div>
 
                 {takeover && (
@@ -431,14 +440,15 @@ export const AppsCliView: React.FC<Props> = ({ data, privacyMode = false, onRelo
 
         <div style={{ marginBottom: 12 }}>
           <SegmentedTabs<'ps' | 'zsh' | 'ssh' | 'claude' | 'agy'>
+            size="sm"
             value={cliTab}
             onChange={setCliTab}
             items={[
               { value: 'ps', label: 'PowerShell' },
-              { value: 'zsh', label: 'macOS / Zsh' },
-              { value: 'ssh', label: 'Remote-SSH' },
-              { value: 'claude', label: 'Claude Code' },
-              { value: 'agy', label: 'Antigravity' }
+              { value: 'zsh', label: 'Zsh / macOS' },
+              { value: 'ssh', label: 'SSH' },
+              { value: 'claude', label: 'Claude' },
+              { value: 'agy', label: 'AGY' }
             ]}
           />
         </div>

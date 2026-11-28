@@ -7,6 +7,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <NoWarn>MSB3277</NoWarn>
+    <Version>0.8.0</Version>
     <ApplicationIcon>..\..\assets\app.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>

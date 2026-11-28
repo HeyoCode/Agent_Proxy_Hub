@@ -71,6 +71,11 @@ public sealed class ProxyNode
     public string EngineKind => RequiresSidecarEngine ? "sing-box" : "native";
 
     /// <summary>
+    /// 是否属于订阅源中夹带的流量余量、到期时间或官网公告提示伪节点（默认不在主测速表测速与绑定）
+    /// </summary>
+    public bool IsInfoEntry => Networking.SubscriptionTrafficParser.IsInformationalNodeName(Name);
+
+    /// <summary>
     /// 用于去重的唯一指纹（协议 + 主机 + 端口 + 用户名/方法）
     /// </summary>
     public string Fingerprint =>
@@ -279,6 +284,13 @@ public sealed class SubscriptionSource
     public int NodeCount { get; set; }
     public int DriftCount { get; set; }
     public string? LastError { get; set; }
+    public long? UploadBytes { get; set; }
+    public long? DownloadBytes { get; set; }
+    public long? TotalBytes { get; set; }
+    public long? RemainingBytes { get; set; }
+    public DateTimeOffset? ExpireAt { get; set; }
+    public int? ResetInDays { get; set; }
+    public int InfoEntryCount { get; set; }
 
     public SubscriptionPublicDto ToPublicDto()
     {
@@ -302,7 +314,14 @@ public sealed class SubscriptionSource
             LastSyncedAt = LastSyncedAt,
             NodeCount = NodeCount,
             DriftCount = DriftCount,
-            LastError = LastError
+            LastError = LastError,
+            UploadBytes = UploadBytes,
+            DownloadBytes = DownloadBytes,
+            TotalBytes = TotalBytes,
+            RemainingBytes = RemainingBytes,
+            ExpireAt = ExpireAt,
+            ResetInDays = ResetInDays,
+            InfoEntryCount = InfoEntryCount
         };
     }
 }
@@ -320,6 +339,50 @@ public sealed class SubscriptionPublicDto
     public int NodeCount { get; set; }
     public int DriftCount { get; set; }
     public string? LastError { get; set; }
+    public long? UploadBytes { get; set; }
+    public long? DownloadBytes { get; set; }
+    public long? TotalBytes { get; set; }
+    public long? RemainingBytes { get; set; }
+    public DateTimeOffset? ExpireAt { get; set; }
+    public int? ResetInDays { get; set; }
+    public int InfoEntryCount { get; set; }
+}
+
+/// <summary>
+/// 单席位配额窗口与预算规则配置（支持自动识别、5h+周双窗、单周额度、单日额度或按美元预算）
+/// </summary>
+public sealed class SeatQuotaRule
+{
+    /// <summary>
+    /// auto | subscription_windows | budget_usd | token_quota
+    /// </summary>
+    public string BillingMode { get; set; } = "auto";
+    /// <summary>
+    /// 主窗口周期分钟数（例如 300=5h、1440=日额度、10080=周额度、43200=月额度）
+    /// </summary>
+    public int? PrimaryWindowMinutes { get; set; }
+    /// <summary>
+    /// 主窗口参考上限（按 BillingMode 解释为 USD 或百万 Tokens；空或 &lt;=0 表示仅追踪实耗与重置时间）
+    /// </summary>
+    public double? PrimaryLimit { get; set; }
+    /// <summary>
+    /// 可选第二窗口周期分钟数（例如与 5h 搭配的 10080 周额度；单窗口套餐留空）
+    /// </summary>
+    public int? SecondaryWindowMinutes { get; set; }
+    public double? SecondaryLimit { get; set; }
+    public double? DailyBudgetUsd { get; set; }
+}
+
+/// <summary>
+/// 全局预算护栏与分席位配额水位配置（默认仅作视觉预警，绝不强行中断对话）
+/// </summary>
+public sealed class QuotaBudgetSettings
+{
+    public double DailyBudgetUsd { get; set; } = 0;
+    public double MonthlyBudgetUsd { get; set; } = 0;
+    public int WarnPercent { get; set; } = 65;
+    public int CriticalPercent { get; set; } = 85;
+    public Dictionary<string, SeatQuotaRule> SeatRules { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>
@@ -409,6 +472,7 @@ public sealed class HubStateDocument
     public List<ManagedAppInstance> Instances { get; set; } = new();
     public List<SubscriptionSource> Subscriptions { get; set; } = new();
     public List<ModelPricingRule> CustomPricings { get; set; } = new();
+    public QuotaBudgetSettings QuotaSettings { get; set; } = new();
     public HubUiPreferences Preferences { get; set; } = new();
     public int HostApiPort { get; set; } = 17880;
 
@@ -510,7 +574,7 @@ public sealed class SidecarEngineStatus
 public static class ProjectMetadata
 {
     public const string Name = "Agent Proxy Hub";
-    public const string Version = "0.7.1";
+    public const string Version = "0.8.0";
     public const string RepoOwner = "HeyoCode";
     public const string RepoName = "Agent_Proxy_Hub";
     public const string RepoSlug = "HeyoCode/Agent_Proxy_Hub";

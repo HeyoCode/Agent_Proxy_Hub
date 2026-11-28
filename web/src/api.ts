@@ -29,6 +29,7 @@ export interface ProxyNode {
   extra?: Record<string, string> | null;
   requiresSidecarEngine?: boolean;
   engineKind?: 'native' | 'sing-box';
+  isInfoEntry?: boolean;
   enabled: boolean;
   status: 'online' | 'offline' | 'unverified';
   latencyMs?: number | null;
@@ -106,6 +107,13 @@ export interface SubscriptionSourceDto {
   nodeCount: number;
   driftCount: number;
   lastError?: string | null;
+  uploadBytes?: number | null;
+  downloadBytes?: number | null;
+  totalBytes?: number | null;
+  remainingBytes?: number | null;
+  expireAt?: string | null;
+  resetInDays?: number | null;
+  infoEntryCount?: number;
 }
 
 export interface CountryCheckRecord {
@@ -261,8 +269,90 @@ export interface OverviewResponse {
   subscriptions?: SubscriptionSourceDto[];
   trafficSnapshots: SeatTrafficSnapshot[];
   seatTakeovers?: SeatTakeoverStatus[];
+  quotaSummary?: QuotaOverviewDto | null;
   sidecarEngine?: SidecarEngineStatus;
   cliSnippets: Record<string, string>;
+}
+
+export interface SeatQuotaRule {
+  billingMode: 'auto' | 'subscription_windows' | 'budget_usd' | 'token_quota';
+  primaryWindowMinutes?: number | null;
+  primaryLimit?: number | null;
+  secondaryWindowMinutes?: number | null;
+  secondaryLimit?: number | null;
+  dailyBudgetUsd?: number | null;
+}
+
+export interface QuotaBudgetSettings {
+  dailyBudgetUsd: number;
+  monthlyBudgetUsd: number;
+  warnPercent: number;
+  criticalPercent: number;
+  seatRules: Record<string, SeatQuotaRule>;
+}
+
+export interface QuotaWindowDto {
+  key: string;
+  label: string;
+  windowMinutes: number;
+  usedPercent?: number | null;
+  usedDisplay: string;
+  subDisplay?: string | null;
+  resetsAt?: string | null;
+  isNativeServerPercent: boolean;
+  tone: 'ok' | 'warn' | 'critical';
+}
+
+export interface AgentQuotaCardDto {
+  seatId: string;
+  appName: string;
+  planBadge?: string | null;
+  creditsBadge?: string | null;
+  isRunning: boolean;
+  todayCostUsd: number;
+  todayTokens: number;
+  todayCacheSavedUsd: number;
+  windows: QuotaWindowDto[];
+  highestTone: 'ok' | 'warn' | 'critical';
+  maxUsedPercent: number;
+}
+
+export interface SubscriptionTrafficCardDto {
+  id: string;
+  name: string;
+  group: string;
+  isManagedSubscription: boolean;
+  autoRefreshHours: number;
+  lastError?: string | null;
+  nodeCount: number;
+  infoEntryCount: number;
+  usedBytes?: number | null;
+  totalBytes?: number | null;
+  remainingBytes?: number | null;
+  usedPercent?: number | null;
+  remainingPercent?: number | null;
+  expireAt?: string | null;
+  remainingDays?: number | null;
+  resetInDays?: number | null;
+  tone: 'ok' | 'warn' | 'critical';
+}
+
+export interface QuotaOverviewDto {
+  dailySpentUsd: number;
+  dailyBudgetUsd: number;
+  dailyUsedPercent?: number | null;
+  monthlySpentUsd: number;
+  monthlyBudgetUsd: number;
+  monthlyUsedPercent?: number | null;
+  burnRateUsdPerHour: number;
+  todayCacheSavedUsd: number;
+  cacheSavingsRatioPercent: number;
+  warnPercent: number;
+  criticalPercent: number;
+  headlineStatus: string;
+  headlineTone: 'ok' | 'warn' | 'critical';
+  activeAgents: AgentQuotaCardDto[];
+  trafficPools: SubscriptionTrafficCardDto[];
 }
 
 export interface BatchParseResult {
@@ -415,6 +505,7 @@ export interface UsageDashboardResponse {
   modelBreakdown: ModelUsageSummary[];
   appAndProxyBreakdown: AppUsageAndProxySummary[];
   workspaceBreakdown?: WorkspaceUsageSummary[];
+  quota?: QuotaOverviewDto | null;
 }
 
 export interface ModelPricingRule {
@@ -662,6 +753,9 @@ export const api = {
   getPricings: () => requestJson<ModelPricingRule[]>('/api/stats/pricing'),
   upsertPricing: (body: Omit<ModelPricingRule, 'isCustom'>) =>
     requestJson<ModelPricingRule[]>('/api/stats/pricing', { method: 'PUT', body: JSON.stringify(body) }),
+  getQuotaSettings: () => requestJson<QuotaBudgetSettings>('/api/stats/quota-settings'),
+  updateQuotaSettings: (body: QuotaBudgetSettings) =>
+    requestJson<QuotaBudgetSettings>('/api/stats/quota-settings', { method: 'PUT', body: JSON.stringify(body) }),
   getDiagnosticLogs: (params?: { level?: string; keyword?: string; limit?: number }) => {
     const qs = new URLSearchParams();
     if (params?.level) qs.set('level', params.level);

@@ -76,7 +76,7 @@ export const OverviewView: React.FC<Props> = ({
   const [chartRange, setChartRange] = useState<'today' | '7d'>('today');
   const [stats, setStats] = useState<UsageDashboardResponse | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  const [showAllSeats, setShowAllSeats] = useState(false);
+  const [showAllSeats, setShowAllSeats] = useState(true);
   const [topoPage, setTopoPage] = useState(0);
   const [togglingAll, setTogglingAll] = useState(false);
   const [togglingIpv6, setTogglingIpv6] = useState(false);
@@ -621,18 +621,19 @@ export const OverviewView: React.FC<Props> = ({
         </div>
       </div>
 
-      {/* 下半区：AI 应用席位卡片（默认展示核心 4 席位 + 所有已启用席位，支持一键展开全部） */}
+      {/* 下半区：AI 应用席位卡片（默认展开全部支持应用，支持一键收起至常用席位） */}
       {(() => {
         const coreIds = new Set(['claude', 'chatgpt', 'agy', 'antigravity', 'cursor']);
         const unhiddenSeats = data.seats.filter(s => !s.isHidden || s.enabled || s.id === selectedSeatId);
-        const visibleSeats = showAllSeats
-          ? unhiddenSeats
-          : unhiddenSeats.filter(s => coreIds.has(s.id) || s.enabled || s.isPinned || s.id === selectedSeatId);
-        const hiddenCount = unhiddenSeats.length - visibleSeats.length;
+        const compactSeats = unhiddenSeats.filter(
+          s => coreIds.has(s.id) || s.enabled || s.isPinned || s.id === selectedSeatId
+        );
+        const visibleSeats = showAllSeats ? unhiddenSeats : compactSeats;
+        const collapsibleCount = unhiddenSeats.length - compactSeats.length;
 
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {data.seats.length > 4 && (
+            {collapsibleCount > 0 && (
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 2px' }}>
                 <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
                   AI 应用独立出口席位（共 {data.seats.length} 款支持应用）
@@ -643,7 +644,7 @@ export const OverviewView: React.FC<Props> = ({
                   style={{ height: 26, fontSize: 11.5 }}
                   onClick={() => setShowAllSeats(v => !v)}
                 >
-                  {showAllSeats ? '收起未启用席位' : `展开全部 ${data.seats.length} 款应用${hiddenCount > 0 ? ` (+${hiddenCount})` : ''}`}
+                  {showAllSeats ? '收起至常用席位' : `展开全部 ${unhiddenSeats.length} 款应用 (+${collapsibleCount})`}
                 </button>
               </div>
             )}
@@ -720,6 +721,7 @@ export const OverviewView: React.FC<Props> = ({
 
               <div
                 className="num"
+                title={`:${seat.localPort} · ${bound?.name ?? '未绑定线路'}`}
                 style={{
                   fontSize: 11,
                   color: 'var(--text-muted)',

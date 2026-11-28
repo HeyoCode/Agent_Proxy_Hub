@@ -23,9 +23,12 @@ public sealed class HubStateStore
 
     public HubStateStore(string? customDirectory = null)
     {
-        string dir = string.IsNullOrWhiteSpace(customDirectory)
-            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".agent-proxy-hub")
-            : customDirectory;
+        string? envDir = Environment.GetEnvironmentVariable("AGENT_PROXY_HUB_HOME");
+        string dir = !string.IsNullOrWhiteSpace(customDirectory)
+            ? customDirectory
+            : (!string.IsNullOrWhiteSpace(envDir)
+                ? envDir.Trim()
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".agent-proxy-hub"));
         Directory.CreateDirectory(dir);
         _statePath = Path.Combine(dir, "state.json");
         _vault = new CredentialVault(dir);
@@ -114,6 +117,8 @@ public sealed class HubStateStore
         doc.Subscriptions ??= new();
         doc.Instances ??= new();
         doc.Preferences ??= new();
+        doc.QuotaSettings ??= new();
+        doc.QuotaSettings.SeatRules ??= new(StringComparer.OrdinalIgnoreCase);
         foreach (var node in doc.Nodes)
         {
             if (!string.IsNullOrEmpty(node.Password))
@@ -159,6 +164,7 @@ public sealed class HubStateStore
             Isolation = doc.Isolation,
             HostApiPort = doc.HostApiPort,
             CustomPricings = doc.CustomPricings,
+            QuotaSettings = doc.QuotaSettings ?? new(),
             Seats = doc.Seats,
             Instances = doc.Instances ?? new(),
             Preferences = new HubUiPreferences
@@ -187,7 +193,14 @@ public sealed class HubStateStore
                 LastSyncedAt = s.LastSyncedAt,
                 NodeCount = s.NodeCount,
                 DriftCount = s.DriftCount,
-                LastError = s.LastError
+                LastError = s.LastError,
+                UploadBytes = s.UploadBytes,
+                DownloadBytes = s.DownloadBytes,
+                TotalBytes = s.TotalBytes,
+                RemainingBytes = s.RemainingBytes,
+                ExpireAt = s.ExpireAt,
+                ResetInDays = s.ResetInDays,
+                InfoEntryCount = s.InfoEntryCount
             }).ToList(),
             Nodes = doc.Nodes.Select(n =>
             {
@@ -232,6 +245,11 @@ public sealed class HubStateStore
 
     private static HubStateDocument EnsureDefaults(HubStateDocument doc)
     {
+        doc.QuotaSettings ??= new();
+        doc.QuotaSettings.SeatRules = doc.QuotaSettings.SeatRules != null
+            ? new Dictionary<string, SeatQuotaRule>(doc.QuotaSettings.SeatRules, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, SeatQuotaRule>(StringComparer.OrdinalIgnoreCase);
+
         var defaults = CreateDefaultSeats();
         if (doc.Seats.Count == 0)
         {

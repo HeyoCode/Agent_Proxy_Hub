@@ -37,9 +37,9 @@ cat > "$APP_DIR/Contents/Info.plist" << 'EOF'
   <key>CFBundleName</key>
   <string>Agent Proxy Hub</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.7.1</string>
+  <string>0.8.0</string>
   <key>CFBundleVersion</key>
-  <string>0.7.1</string>
+  <string>0.8.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
 </dict>

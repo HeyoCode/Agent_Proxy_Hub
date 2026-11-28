@@ -170,6 +170,106 @@ public sealed class UsageDashboardResponse
     public List<ModelUsageSummary> ModelBreakdown { get; set; } = new();
     public List<AppUsageAndProxySummary> AppAndProxyBreakdown { get; set; } = new();
     public List<WorkspaceUsageSummary> WorkspaceBreakdown { get; set; } = new();
+    public QuotaOverviewDto? Quota { get; set; }
+}
+
+/// <summary>
+/// 从本地会话日志提取的原生速率限制快照（例如 Codex rate_limits：支持 5h+7d 双窗、单周 prolite、日窗与 Credits）
+/// </summary>
+public sealed class CodexRateLimitSnapshot
+{
+    public string SeatKey { get; set; } = "codex";
+    public DateTimeOffset Timestamp { get; set; }
+    public string? PlanType { get; set; }
+    public double? PrimaryUsedPercent { get; set; }
+    public int? PrimaryWindowMinutes { get; set; }
+    public DateTimeOffset? PrimaryResetsAt { get; set; }
+    public double? SecondaryUsedPercent { get; set; }
+    public int? SecondaryWindowMinutes { get; set; }
+    public DateTimeOffset? SecondaryResetsAt { get; set; }
+    public bool HasCredits { get; set; }
+    public bool UnlimitedCredits { get; set; }
+    public double? CreditsBalance { get; set; }
+}
+
+/// <summary>
+/// 自适应单个配额窗口槽位（由实际周期分钟数决定显示 5h 窗口 / 日额度 / 周额度 / 月额度）
+/// </summary>
+public sealed class QuotaWindowDto
+{
+    public string Key { get; set; } = string.Empty;
+    public string Label { get; set; } = string.Empty;
+    public int WindowMinutes { get; set; }
+    public double? UsedPercent { get; set; }
+    public string UsedDisplay { get; set; } = string.Empty;
+    public string? SubDisplay { get; set; }
+    public DateTimeOffset? ResetsAt { get; set; }
+    public bool IsNativeServerPercent { get; set; }
+    public string Tone { get; set; } = "ok"; // ok | warn | critical
+}
+
+/// <summary>
+/// 单个活跃 AI 席位（或多开隔离实例）的动态配额微卡
+/// </summary>
+public sealed class AgentQuotaCardDto
+{
+    public string SeatId { get; set; } = string.Empty;
+    public string AppName { get; set; } = string.Empty;
+    public string? PlanBadge { get; set; }
+    public string? CreditsBadge { get; set; }
+    public bool IsRunning { get; set; }
+    public double TodayCostUsd { get; set; }
+    public long TodayTokens { get; set; }
+    public double TodayCacheSavedUsd { get; set; }
+    public List<QuotaWindowDto> Windows { get; set; } = new();
+    public string HighestTone { get; set; } = "ok"; // ok | warn | critical
+    public double MaxUsedPercent { get; set; }
+}
+
+/// <summary>
+/// 订阅源或分组导入池聚合流量额度与到期卡片（融合 Subscription-Userinfo 头与伪节点提取结果）
+/// </summary>
+public sealed class SubscriptionTrafficCardDto
+{
+    public string Id { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Group { get; set; } = string.Empty;
+    public bool IsManagedSubscription { get; set; }
+    public int AutoRefreshHours { get; set; }
+    public string? LastError { get; set; }
+    public int NodeCount { get; set; }
+    public int InfoEntryCount { get; set; }
+    public long? UsedBytes { get; set; }
+    public long? TotalBytes { get; set; }
+    public long? RemainingBytes { get; set; }
+    public double? UsedPercent { get; set; }
+    public double? RemainingPercent { get; set; }
+    public DateTimeOffset? ExpireAt { get; set; }
+    public int? RemainingDays { get; set; }
+    public int? ResetInDays { get; set; }
+    public string Tone { get; set; } = "ok"; // ok | warn | critical
+}
+
+/// <summary>
+/// 全局与多 Agent 自适应配额、预算护栏及订阅流量总览
+/// </summary>
+public sealed class QuotaOverviewDto
+{
+    public double DailySpentUsd { get; set; }
+    public double DailyBudgetUsd { get; set; }
+    public double? DailyUsedPercent { get; set; }
+    public double MonthlySpentUsd { get; set; }
+    public double MonthlyBudgetUsd { get; set; }
+    public double? MonthlyUsedPercent { get; set; }
+    public double BurnRateUsdPerHour { get; set; }
+    public double TodayCacheSavedUsd { get; set; }
+    public double CacheSavingsRatioPercent { get; set; }
+    public int WarnPercent { get; set; } = 65;
+    public int CriticalPercent { get; set; } = 85;
+    public string HeadlineStatus { get; set; } = "配额稳态";
+    public string HeadlineTone { get; set; } = "ok"; // ok | warn | critical
+    public List<AgentQuotaCardDto> ActiveAgents { get; set; } = new();
+    public List<SubscriptionTrafficCardDto> TrafficPools { get; set; } = new();
 }
 
 /// <summary>

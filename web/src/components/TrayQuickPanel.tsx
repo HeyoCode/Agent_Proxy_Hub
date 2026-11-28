@@ -289,7 +289,7 @@ export const TrayQuickPanel: React.FC = () => {
             }}
           >
             <GitHubIcon size={11} />
-            <span>v{project?.version ?? '0.7.0'}</span>
+            <span>v{project?.version ?? '0.8.0'}</span>
           </button>
           <span className="tray-footer-sep">·</span>
           <button

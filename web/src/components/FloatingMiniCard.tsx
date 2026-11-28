@@ -118,9 +118,20 @@ export const FloatingMiniCard: React.FC = () => {
 
       <div className="mini-metrics-row num">
         <span>实时 ↑{formatRate(txSec)} ↓{formatRate(rxSec)}</span>
-        <span className="pill-tag tag-indigo" style={{ padding: '1px 6px', fontSize: 10 }}>
-          {activeConns} 并发
-        </span>
+        {data?.quotaSummary ? (
+          <span
+            className={`pill-tag ${data.quotaSummary.headlineTone === 'critical' ? 'tag-coral' : (data.quotaSummary.headlineTone === 'warn' ? 'tag-amber' : 'tag-indigo')}`}
+            style={{ padding: '1px 6px', fontSize: 10 }}
+          >
+            {data.quotaSummary.headlineTone === 'ok'
+              ? `${activeConns} 并发`
+              : data.quotaSummary.headlineStatus}
+          </span>
+        ) : (
+          <span className="pill-tag tag-indigo" style={{ padding: '1px 6px', fontSize: 10 }}>
+            {activeConns} 并发
+          </span>
+        )}
       </div>
 
       <div className="mini-seat-list">

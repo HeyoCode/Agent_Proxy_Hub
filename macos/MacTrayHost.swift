@@ -4,7 +4,7 @@ import WebKit
 // macOS 原生轻量级菜单栏托盘 NSPopover 快捷面板 + 无边框圆角 WKWebView 主控制台宿主
 // 自动拉起同目录下的 AgentProxyHub.Host (.NET 10 arm64/x64 原生内核)
 class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate, WKScriptMessageHandler {
-    let appVersion = "0.7.1"
+    let appVersion = "0.8.0"
     var apiBaseUrl = "http://127.0.0.1:17880"
     var statusItem: NSStatusItem!
     var popover: NSPopover!

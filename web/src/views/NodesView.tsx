@@ -1,5 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { BatchParseResult, ProxyNode, ProxyProtocol, SubscriptionSourceDto, api } from '../api';
+import {
+  BatchParseResult,
+  ProxyNode,
+  ProxyProtocol,
+  SubscriptionSourceDto,
+  SubscriptionTrafficCardDto,
+  api,
+  formatBytes
+} from '../api';
 import { CustomSelect } from '../components/CustomSelect';
 import { PlusIcon, RefreshSpinIcon, UploadBatchIcon } from '../components/Icons';
 import { SegmentedTabs } from '../components/SegmentedTabs';
@@ -8,6 +16,7 @@ import { maskEndpoint, maskGeneric, maskIp } from '../privacy';
 interface Props {
   nodes: ProxyNode[];
   subscriptions?: SubscriptionSourceDto[];
+  trafficPools?: SubscriptionTrafficCardDto[];
   privacyMode?: boolean;
   autoHealthCheckEnabled?: boolean;
   autoHealthCheckMinutes?: number;
@@ -57,6 +66,7 @@ const TUIC_CC_OPTIONS = [
 export const NodesView: React.FC<Props> = ({
   nodes,
   subscriptions = [],
+  trafficPools = [],
   privacyMode = false,
   autoHealthCheckEnabled = true,
   autoHealthCheckMinutes = 5,
@@ -70,6 +80,7 @@ export const NodesView: React.FC<Props> = ({
   onToast
 }) => {
   const [filter, setFilter] = useState<'all' | 'NATIVE' | 'SIDECAR'>('all');
+  const [showInfoEntries, setShowInfoEntries] = useState(false);
   const [testingAll, setTestingAll] = useState(false);
   const [verifyingIds, setVerifyingIds] = useState<Record<string, boolean>>({});
   const [togglingPatrol, setTogglingPatrol] = useState(false);
@@ -136,7 +147,10 @@ export const NodesView: React.FC<Props> = ({
     return () => clearTimeout(t);
   }, [showBatch, batchText, batchProto, batchGroup]);
 
-  const filtered = nodes.filter(n => {
+  const infoEntriesCount = nodes.filter(n => n.isInfoEntry).length;
+  const visibleNodes = showInfoEntries ? nodes : nodes.filter(n => !n.isInfoEntry);
+
+  const filtered = visibleNodes.filter(n => {
     const isL2 = n.requiresSidecarEngine || ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(n.protocol);
     if (filter === 'NATIVE') return !isL2;
     if (filter === 'SIDECAR') return isL2;
@@ -432,16 +446,16 @@ export const NodesView: React.FC<Props> = ({
             value={filter}
             onChange={setFilter}
             items={[
-              { value: 'all', label: '全部线路', count: nodes.length },
+              { value: 'all', label: '全部线路', count: visibleNodes.length },
               {
                 value: 'NATIVE',
                 label: 'L1 原生引擎',
-                count: nodes.filter(n => !(n.requiresSidecarEngine || ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(n.protocol))).length
+                count: visibleNodes.filter(n => !(n.requiresSidecarEngine || ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(n.protocol))).length
               },
               {
                 value: 'SIDECAR',
                 label: 'L2 sing-box',
-                count: nodes.filter(n => n.requiresSidecarEngine || ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(n.protocol)).length
+                count: visibleNodes.filter(n => n.requiresSidecarEngine || ['VLESS', 'HYSTERIA2', 'TUIC', 'WIREGUARD'].includes(n.protocol)).length
               }
             ]}
           />
@@ -497,143 +511,260 @@ export const NodesView: React.FC<Props> = ({
           </div>
         </div>
 
-        {subscriptions.length > 0 && (
+        {(trafficPools.length > 0 || subscriptions.length > 0 || infoEntriesCount > 0) && (
           <>
             <div className="soft-divider" />
-            <div className="sub-source-strip">
-              <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-secondary)' }}>已托管订阅源：</span>
-              {subscriptions.map(sub => {
-                const isBusy = refreshingSubId === sub.id;
+            <div className="sub-quota-strip">
+              {(trafficPools.length > 0 ? trafficPools : subscriptions.map(s => ({
+                id: s.id,
+                name: s.name,
+                group: s.group,
+                isManagedSubscription: true,
+                autoRefreshHours: s.autoRefreshHours,
+                lastError: s.lastError,
+                nodeCount: s.nodeCount,
+                infoEntryCount: s.infoEntryCount ?? 0,
+                usedBytes: s.uploadBytes != null || s.downloadBytes != null ? (s.uploadBytes ?? 0) + (s.downloadBytes ?? 0) : null,
+                totalBytes: s.totalBytes,
+                remainingBytes: s.remainingBytes,
+                usedPercent: null,
+                remainingPercent: null,
+                expireAt: s.expireAt,
+                remainingDays: null,
+                resetInDays: s.resetInDays,
+                tone: 'ok' as const
+              }))).map(pool => {
+                const subObj = pool.isManagedSubscription ? subscriptions.find(s => s.id === pool.id) : undefined;
+                const isBusy = refreshingSubId === pool.id;
+                const remText = pool.remainingBytes != null ? `剩余 ${formatBytes(pool.remainingBytes)}` : '流量正常';
+                const totalText = pool.totalBytes != null && pool.usedBytes != null
+                  ? `已用 ${formatBytes(pool.usedBytes)} / ${formatBytes(pool.totalBytes)}${pool.usedPercent != null ? ` (${pool.usedPercent}%)` : ''}`
+                  : (pool.isManagedSubscription ? '已托管订阅源' : '从提示项自动提取 · 已净化列表');
+                const barWidth = pool.remainingPercent != null
+                  ? Math.max(4, pool.remainingPercent)
+                  : (pool.remainingBytes != null ? 100 : 100);
+
                 return (
-                  <div key={sub.id} className="sub-source-chip">
-                    <span style={{ fontWeight: 600 }}>{sub.name}</span>
-                    <span className="pill-tag tag-indigo num">{sub.nodeCount} 节点</span>
-                    {sub.autoRefreshHours > 0 && (
-                      <span className="pill-tag tag-emerald num">{sub.autoRefreshHours}h 自动</span>
-                    )}
-                    {sub.lastError && (
-                      <span className="pill-tag tag-coral" title={sub.lastError}>同步异常</span>
-                    )}
-                    <button
-                      type="button"
-                      className="btn-pill btn-soft btn-sm"
-                      style={{ height: 22, padding: '0 8px', fontSize: 11 }}
-                      disabled={Boolean(refreshingSubId)}
-                      onClick={() => handleRefreshBackendSub(sub)}
-                    >
-                      <RefreshSpinIcon size={11} spinning={isBusy} />
-                      <span>{isBusy ? '同步中' : '刷新'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 12, padding: '0 2px' }}
-                      title="移除该订阅源记录（保留节点）"
-                      onClick={() => handleDeleteBackendSub(sub)}
-                    >
-                      ✕
-                    </button>
+                  <div key={pool.id} className="sub-quota-card">
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span className="cell-ellipsis" style={{ fontWeight: 700, fontSize: 12.5, maxWidth: 145 }} title={pool.name}>
+                          {pool.name}
+                        </span>
+                        <span className="pill-tag pill-tag--xs tag-indigo num">{pool.nodeCount} 节点</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, fontSize: 10.5, color: 'var(--text-muted)', flexWrap: 'wrap' }}>
+                        {pool.autoRefreshHours > 0 && (
+                          <span className="pill-tag pill-tag--xs tag-emerald num">{pool.autoRefreshHours}h 自动</span>
+                        )}
+                        {pool.lastError && (
+                          <span className="pill-tag pill-tag--xs tag-coral" title={pool.lastError}>同步异常</span>
+                        )}
+                        {pool.infoEntryCount > 0 && (
+                          <button
+                            type="button"
+                            className="btn-link-subtle"
+                            onClick={() => setShowInfoEntries(v => !v)}
+                          >
+                            {showInfoEntries ? `收起 ${pool.infoEntryCount} 条提示项` : `已收纳 ${pool.infoEntryCount} 条提示项 · 查看`}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 11.5 }}>
+                        <span className="num">
+                          <strong style={{
+                            color: pool.tone === 'critical'
+                              ? 'var(--accent-coral-text)'
+                              : (pool.tone === 'warn' ? 'var(--accent-amber-text)' : 'var(--accent-emerald-text)')
+                          }}>
+                            {remText}
+                          </strong>
+                          <span style={{ color: 'var(--text-muted)', marginLeft: 8, fontSize: 11 }}>{totalText}</span>
+                        </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          {pool.expireAt && (
+                            <span className={`pill-tag pill-tag--xs num ${pool.tone === 'critical' ? 'tag-coral' : (pool.tone === 'warn' ? 'tag-amber' : 'tag-neutral')}`}>
+                              {new Date(pool.expireAt).toLocaleDateString('zh-CN')} 到期
+                              {pool.remainingDays != null ? ` (剩 ${Math.max(0, pool.remainingDays)} 天)` : ''}
+                            </span>
+                          )}
+                          {pool.resetInDays != null && (
+                            <span className="pill-tag pill-tag--xs tag-neutral num">{pool.resetInDays} 天后重置</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="meter-track" style={{ height: 7 }}>
+                        <div className={`meter-fill tone-${pool.tone}`} style={{ width: `${barWidth}%` }} />
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                      {subObj && (
+                        <>
+                          <button
+                            type="button"
+                            className="btn-pill btn-soft btn-sm btn-tbl"
+                            disabled={Boolean(refreshingSubId)}
+                            onClick={() => handleRefreshBackendSub(subObj)}
+                          >
+                            <RefreshSpinIcon size={11} spinning={isBusy} />
+                            <span>{isBusy ? '同步中' : '刷新'}</span>
+                          </button>
+                          <button
+                            type="button"
+                            style={{ border: 'none', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 12, padding: '0 4px' }}
+                            title="移除该订阅源记录（保留节点）"
+                            onClick={() => handleDeleteBackendSub(subObj)}
+                          >
+                            ✕
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 );
               })}
+
+              {trafficPools.length === 0 && infoEntriesCount > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11.5, color: 'var(--text-secondary)' }}>
+                  <span>已自动收纳 {infoEntriesCount} 条订阅提示伪节点，避免误测速。</span>
+                  <button type="button" className="btn-pill btn-soft btn-sm btn-tbl" onClick={() => setShowInfoEntries(v => !v)}>
+                    {showInfoEntries ? '隐藏提示项' : '在表中展开'}
+                  </button>
+                </div>
+              )}
             </div>
           </>
         )}
 
         <div className="soft-divider" />
 
-        <table className="clean-table">
-          <thead>
-            <tr>
-              <th>节点名称与分组</th>
-              <th>协议</th>
-              <th>代理入口地址</th>
-              <th>真实落地出口 IP / 说明</th>
-              <th>AI 可达性</th>
-              <th className="num-r">延迟</th>
-              <th className="num-r">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtered.map(n => (
-              <tr key={n.id}>
-                <td>
-                  <div style={{ fontWeight: 600 }}>{n.name}</div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
-                    <span style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>{n.group}</span>
-                    {n.allowInsecure && !n.insecureApproved && (
-                      <span className="pill-tag tag-amber" style={{ fontSize: 10, padding: '1px 6px' }}>待批准跳过证书</span>
-                    )}
-                  </div>
-                </td>
-                <td className="nowrap">
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                    <span className={`pill-tag ${n.requiresSidecarEngine ? 'tag-amber' : 'tag-indigo'} mono`}>{n.protocol}</span>
-                    {n.requiresSidecarEngine && (
-                      <span className="pill-tag tag-neutral" style={{ fontSize: 10, padding: '1px 6px' }}>sing-box</span>
-                    )}
-                  </div>
-                </td>
-                <td className="nowrap">
-                  <div className="mono" style={{ fontSize: 12 }}>
-                    {n.protocol === 'DIRECT_PHYSICAL' ? `${n.host}:${n.port}` : maskEndpoint(n.host, n.port, privacyMode)}
-                  </div>
-                  <div className="num" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                    {n.method
-                      ? `算法：${n.method}`
-                      : (n.sni
-                        ? `SNI：${n.sni}`
-                        : (n.username ? `认证：${maskGeneric(n.username, privacyMode)}` : (n.hasCredential ? '凭据已 AES-GCM 加密' : '无认证')))}
-                  </div>
-                </td>
-                <td>
-                  <div className="num" style={{ fontWeight: 600 }}>{maskIp(n.exitIp, privacyMode)}</div>
-                  <div style={{ fontSize: 11.5, color: 'var(--text-secondary)' }}>{n.ispSummary}</div>
-                </td>
-                <td>
-                  <div style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
-                    {n.aiReachability.map(tag => (
-                      <span key={tag} className={`pill-tag ${tag.includes('✕') || tag.includes('超时') ? 'tag-coral' : 'tag-neutral'}`}>
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </td>
-                <td
-                  className="num-r num nowrap"
-                  style={{
-                    fontWeight: 700,
-                    color: n.status === 'offline' ? 'var(--accent-coral-text)' : (n.latencyMs ? 'var(--accent-emerald-text)' : 'var(--text-muted)')
-                  }}
-                >
-                  <div>{n.latencyMs ? `${n.latencyMs} ms` : (n.status === 'offline' ? '超时' : '待测')}</div>
-                  {n.lastCheckedAt && (
-                    <div style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-muted)' }}>
-                      {new Date(n.lastCheckedAt).toLocaleTimeString('zh-CN', { hour12: false })}
-                    </div>
-                  )}
-                </td>
-                <td className="num-r nowrap">
-                  <div style={{ display: 'inline-flex', gap: 6 }}>
-                    {n.allowInsecure && !n.insecureApproved && (
-                      <button type="button" className="btn-pill btn-indigo btn-sm" onClick={() => handleApproveInsecure(n)}>批准风险</button>
-                    )}
-                    <button
-                      type="button"
-                      className={`btn-pill btn-sm ${verifyingIds[n.id] ? 'btn-coral' : 'btn-soft'}`}
-                      onClick={() => handleVerifyOne(n.id)}
-                    >
-                      {verifyingIds[n.id] ? <RefreshSpinIcon size={12} spinning /> : null}
-                      <span>{verifyingIds[n.id] ? '取消' : '验真'}</span>
-                    </button>
-                    {n.id !== 'direct-phy' && (
-                      <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => handleDelete(n.id)}>删除</button>
-                    )}
-                  </div>
-                </td>
+        <div className="table-scroll-wrap">
+          <table className="clean-table clean-table--nodes">
+            <thead>
+              <tr>
+                <th>节点名称与分组</th>
+                <th>协议</th>
+                <th>代理入口地址</th>
+                <th>真实出口 / 说明</th>
+                <th>AI 可达性</th>
+                <th className="num-r">延迟</th>
+                <th className="num-r sticky-col-right">操作</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {filtered.map(n => {
+                const compactProto = n.protocol === 'DIRECT_PHYSICAL'
+                  ? '物理直出'
+                  : (n.protocol === 'SHADOWSOCKS'
+                    ? 'SS'
+                    : (n.protocol === 'HYSTERIA2'
+                      ? 'HY2'
+                      : (n.protocol === 'WIREGUARD' ? 'WG' : n.protocol)));
+                const endpointText = n.protocol === 'DIRECT_PHYSICAL'
+                  ? `${n.host}:${n.port}`
+                  : maskEndpoint(n.host, n.port, privacyMode);
+                const endpointSubText = n.method
+                  ? `算法：${n.method}`
+                  : (n.sni
+                    ? `SNI：${n.sni}`
+                    : (n.username ? `认证：${maskGeneric(n.username, privacyMode)}` : (n.hasCredential ? '凭据已 AES-GCM 加密' : '无认证')));
+                const maskedExitIp = maskIp(n.exitIp, privacyMode);
+
+                return (
+                  <tr key={n.id}>
+                    <td>
+                      <div className="cell-ellipsis" style={{ fontWeight: 600, maxWidth: 156 }} title={n.name}>
+                        {n.name}
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginTop: 2 }}>
+                        <span className="cell-ellipsis" style={{ fontSize: 11, color: 'var(--text-muted)', maxWidth: 148 }} title={n.group}>
+                          {n.group}
+                        </span>
+                        {n.allowInsecure && !n.insecureApproved && (
+                          <span className="pill-tag pill-tag--xs tag-amber">待批准证书</span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="nowrap">
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        <span
+                          className={`pill-tag pill-tag--xs ${n.requiresSidecarEngine ? 'tag-amber' : 'tag-indigo'} mono`}
+                          title={n.protocol === 'DIRECT_PHYSICAL' ? 'DIRECT_PHYSICAL · 本机物理网卡直出' : n.protocol}
+                        >
+                          {compactProto}
+                        </span>
+                        {n.requiresSidecarEngine && (
+                          <span className="pill-tag pill-tag--xs tag-neutral" title="由 sing-box L2 扩展内核承载">L2</span>
+                        )}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="mono cell-ellipsis" style={{ fontSize: 11.5, maxWidth: 184 }} title={`${n.host}:${n.port}`}>
+                        {endpointText}
+                      </div>
+                      <div className="num cell-ellipsis" style={{ fontSize: 10.5, color: 'var(--text-muted)', maxWidth: 184 }} title={endpointSubText}>
+                        {endpointSubText}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="num cell-ellipsis" style={{ fontWeight: 600, maxWidth: 142 }} title={maskedExitIp}>
+                        {maskedExitIp}
+                      </div>
+                      <div className="cell-ellipsis" style={{ fontSize: 11, color: 'var(--text-secondary)', maxWidth: 142 }} title={n.ispSummary}>
+                        {n.ispSummary}
+                      </div>
+                    </td>
+                    <td>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', maxWidth: 162 }}>
+                        {n.aiReachability.map(tag => (
+                          <span key={tag} className={`pill-tag pill-tag--xs ${tag.includes('✕') || tag.includes('超时') ? 'tag-coral' : 'tag-neutral'}`}>
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td
+                      className="num-r num nowrap"
+                      style={{
+                        fontWeight: 700,
+                        color: n.status === 'offline' ? 'var(--accent-coral-text)' : (n.latencyMs ? 'var(--accent-emerald-text)' : 'var(--text-muted)')
+                      }}
+                    >
+                      <div>{n.latencyMs ? `${n.latencyMs} ms` : (n.status === 'offline' ? '超时' : '待测')}</div>
+                      {n.lastCheckedAt && (
+                        <div style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-muted)' }}>
+                          {new Date(n.lastCheckedAt).toLocaleTimeString('zh-CN', { hour12: false })}
+                        </div>
+                      )}
+                    </td>
+                    <td className="num-r nowrap sticky-col-right">
+                      <div style={{ display: 'inline-flex', gap: 5 }}>
+                        {n.allowInsecure && !n.insecureApproved && (
+                          <button type="button" className="btn-pill btn-indigo btn-sm btn-tbl" onClick={() => handleApproveInsecure(n)}>批准</button>
+                        )}
+                        <button
+                          type="button"
+                          className={`btn-pill btn-sm btn-tbl ${verifyingIds[n.id] ? 'btn-coral' : 'btn-soft'}`}
+                          onClick={() => handleVerifyOne(n.id)}
+                        >
+                          {verifyingIds[n.id] ? <RefreshSpinIcon size={11} spinning /> : null}
+                          <span>{verifyingIds[n.id] ? '取消' : '验真'}</span>
+                        </button>
+                        {n.id !== 'direct-phy' && (
+                          <button type="button" className="btn-pill btn-soft btn-sm btn-tbl" onClick={() => handleDelete(n.id)}>删除</button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* 手动添加弹窗（支持 L1 + L2 全协议动态表单与链接回填） */}

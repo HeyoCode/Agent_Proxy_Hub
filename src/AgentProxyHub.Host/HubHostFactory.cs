@@ -240,6 +240,7 @@ public static class HubHostFactory
             HubUiPreferences prefSnap;
             List<ProxyNode> redactedNodes;
             List<SubscriptionPublicDto> subDtos;
+            HubStateDocument quotaDocSnap;
 
             lock (stateLock)
             {
@@ -252,9 +253,17 @@ public static class HubHostFactory
                 prefSnap = doc.Preferences.ToRedactedCopy();
                 redactedNodes = doc.Nodes.Select(n => n.ToRedactedCopy()).ToList();
                 subDtos = (doc.Subscriptions ?? []).Select(s => s.ToPublicDto()).ToList();
+                quotaDocSnap = new HubStateDocument
+                {
+                    Seats = orderedSeats,
+                    Instances = instSnap,
+                    Nodes = doc.Nodes.ToList(),
+                    Subscriptions = (doc.Subscriptions ?? []).ToList(),
+                    QuotaSettings = doc.QuotaSettings ?? new QuotaBudgetSettings()
+                };
             }
 
-            // 锁外采集网卡、进程接管和流量快照，防止 IO/OS 枚举阻塞写操作或状态锁排队
+            // 锁外采集网卡、进程接管、流量与配额快照，防止 IO/OS 枚举阻塞写操作或状态锁排队
             var lockedNic = nicManager.GetLockedAdapter();
             var traffic = proxyServer.GetTrafficSnapshots();
             var adapters = nicManager.GetAdapters();
@@ -263,6 +272,7 @@ public static class HubHostFactory
                 orderedSeats.FirstOrDefault(s => s.Id == "claude"),
                 orderedSeats.FirstOrDefault(s => s.Id == "agy"));
             var seatTakeovers = takeoverService.InspectAll(orderedSeats);
+            var quotaSummary = usageService.BuildQuotaOverview(quotaDocSnap, traffic, seatTakeovers);
 
             return new
             {
@@ -281,6 +291,7 @@ public static class HubHostFactory
                 subscriptions = subDtos,
                 trafficSnapshots = traffic,
                 seatTakeovers,
+                quotaSummary,
                 sidecarEngine = sidecar.GetStatus(),
                 cliSnippets
             };
@@ -482,7 +493,7 @@ public static class HubHostFactory
             return Results.Ok(node.ToRedactedCopy());
         });
 
-        async Task<(string RawText, string SuggestedTitle, string DetectedFormat)> FetchSubscriptionRawAsync(
+        async Task<(string RawText, string SuggestedTitle, string DetectedFormat, SubscriptionTrafficParser.ParsedTrafficHint HeaderHint)> FetchSubscriptionRawAsync(
             Uri subUri,
             string? proxyUrl,
             string fallbackGroup,
@@ -555,7 +566,8 @@ public static class HubHostFactory
 
             string title = ProxyNodeImporter.ExtractSubscriptionName(headers, subUri);
             string format = ProxyNodeImporter.LooksLikeClashYaml(raw) ? "Clash YAML" : "URI / Base64";
-            return (raw, title, format);
+            var headerHint = SubscriptionTrafficParser.ParseSubscriptionUserInfoHeader(headers);
+            return (raw, title, format, headerHint);
         }
 
         async Task<SubscriptionSyncEngine.SyncDiffResult> RefreshSubscriptionInternalAsync(
@@ -568,15 +580,17 @@ public static class HubHostFactory
             await subRefreshGate.WaitAsync(ct);
             try
             {
-                var (raw, suggestedTitle, _) = await FetchSubscriptionRawAsync(subUri, sub.ProxyUrl, sub.Group, ct);
+                var (raw, suggestedTitle, _, headerHint) = await FetchSubscriptionRawAsync(subUri, sub.ProxyUrl, sub.Group, ct);
                 var parsed = ProxyNodeImporter.Parse(raw, ProxyProtocol.SOCKS5, sub.Group, []);
                 var validNodes = parsed.Items.Where(i => i.Node != null).Select(i => i.Node!).ToList();
+                var nodeHint = SubscriptionTrafficParser.ExtractHintsFromNodes(validNodes);
 
                 lock (stateLock)
                 {
                     if (string.IsNullOrWhiteSpace(sub.Name))
                         sub.Name = suggestedTitle;
                     var diff = SubscriptionSyncEngine.MergeParsedNodes(doc, sub, validNodes);
+                    SubscriptionTrafficParser.ApplyTrafficHints(sub, headerHint, nodeHint);
                     store.Save(doc);
                     if (!isVerifyOnly)
                         proxyServer.UpdateTopology(BuildEffectiveSeats(doc), doc.Nodes, doc.Isolation);
@@ -667,10 +681,10 @@ public static class HubHostFactory
                                     .ToHashSet(StringComparer.Ordinal);
 
                                 var priorityNodes = doc.Nodes
-                                    .Where(n => priorityIds.Contains(n.Id) && n.Protocol != ProxyProtocol.DIRECT_PHYSICAL && n.Enabled)
+                                    .Where(n => priorityIds.Contains(n.Id) && n.Protocol != ProxyProtocol.DIRECT_PHYSICAL && n.Enabled && !n.IsInfoEntry)
                                     .ToList();
                                 var fillNodes = doc.Nodes
-                                    .Where(n => !priorityIds.Contains(n.Id) && n.Protocol != ProxyProtocol.DIRECT_PHYSICAL && n.Enabled)
+                                    .Where(n => !priorityIds.Contains(n.Id) && n.Protocol != ProxyProtocol.DIRECT_PHYSICAL && n.Enabled && !n.IsInfoEntry)
                                     .OrderBy(n => n.LastCheckedAt ?? DateTimeOffset.MinValue)
                                     .Take(Math.Max(0, 16 - priorityNodes.Count))
                                     .ToList();
@@ -721,7 +735,7 @@ public static class HubHostFactory
             string group = string.IsNullOrWhiteSpace(req.DefaultGroup) ? "订阅导入池" : req.DefaultGroup.Trim();
             try
             {
-                var (raw, suggestedTitle, format) = await FetchSubscriptionRawAsync(subUri, req.ProxyUrl, group, ct);
+                var (raw, suggestedTitle, format, headerHint) = await FetchSubscriptionRawAsync(subUri, req.ProxyUrl, group, ct);
                 BatchParseResult parsed;
                 lock (stateLock)
                 {
@@ -739,7 +753,8 @@ public static class HubHostFactory
                     rawText = raw,
                     preview = parsed,
                     detectedFormat = format,
-                    suggestedTitle
+                    suggestedTitle,
+                    trafficHint = headerHint
                 });
             }
             catch (Exception ex)
@@ -963,7 +978,7 @@ public static class HubHostFactory
             string? lockedNicName;
             lock (stateLock)
             {
-                targets = doc.Nodes.Where(n => n.Protocol != ProxyProtocol.DIRECT_PHYSICAL).ToList();
+                targets = doc.Nodes.Where(n => n.Protocol != ProxyProtocol.DIRECT_PHYSICAL && !n.IsInfoEntry).ToList();
                 iso = doc.Isolation;
                 lockedNicName = nicManager.GetLockedAdapter()?.Name;
             }
@@ -1694,6 +1709,7 @@ public static class HubHostFactory
                 doc.Instances = restored.Instances ?? new();
                 doc.Subscriptions = restored.Subscriptions ?? doc.Subscriptions;
                 doc.CustomPricings = restored.CustomPricings ?? doc.CustomPricings;
+                doc.QuotaSettings = restored.QuotaSettings ?? doc.QuotaSettings;
                 doc.Preferences.LastWebDavSyncAt = DateTimeOffset.UtcNow;
                 pricingCatalog.SetCustomRules(doc.CustomPricings);
                 usageService.RecalculatePricing();
@@ -1704,7 +1720,7 @@ public static class HubHostFactory
             return Results.Ok(new { ok = true, message, lastWebDavSyncAt = doc.Preferences.LastWebDavSyncAt });
         });
 
-        // 5. CC Switch 级双源统计大盘、按需同步与模型定价 API
+        // 5. CC Switch 级双源统计大盘、自适应配额矩阵、按需同步与模型定价 API
         app.MapGet("/api/stats/dashboard", (string? range, string? appFilter, string? modelFilter, int? page, int? pageSize) =>
         {
             var traffic = proxyServer.GetTrafficSnapshots();
@@ -1715,7 +1731,73 @@ public static class HubHostFactory
                 page ?? 1,
                 pageSize ?? 20,
                 traffic);
+
+            HubStateDocument quotaDocSnap;
+            lock (stateLock)
+            {
+                quotaDocSnap = new HubStateDocument
+                {
+                    Seats = doc.Seats.ToList(),
+                    Instances = doc.Instances.ToList(),
+                    Nodes = doc.Nodes.ToList(),
+                    Subscriptions = (doc.Subscriptions ?? []).ToList(),
+                    QuotaSettings = doc.QuotaSettings ?? new QuotaBudgetSettings()
+                };
+            }
+            var takeovers = takeoverService.InspectAll(quotaDocSnap.Seats);
+            data.Quota = usageService.BuildQuotaOverview(quotaDocSnap, traffic, takeovers);
             return Results.Ok(data);
+        });
+
+        app.MapGet("/api/stats/quota-settings", () =>
+        {
+            lock (stateLock)
+                return Results.Ok(doc.QuotaSettings ?? new QuotaBudgetSettings());
+        });
+
+        app.MapPut("/api/stats/quota-settings", (QuotaBudgetSettings req) =>
+        {
+            lock (stateLock)
+            {
+                int warn = Math.Clamp(req.WarnPercent <= 0 ? 65 : req.WarnPercent, 10, 98);
+                int crit = Math.Clamp(req.CriticalPercent <= 0 ? 85 : req.CriticalPercent, warn + 1, 99);
+                var cleanedRules = new Dictionary<string, SeatQuotaRule>(StringComparer.OrdinalIgnoreCase);
+                if (req.SeatRules != null)
+                {
+                    foreach (var kv in req.SeatRules)
+                    {
+                        if (string.IsNullOrWhiteSpace(kv.Key) || kv.Value == null) continue;
+                        string mode = kv.Value.BillingMode is "subscription_windows" or "budget_usd" or "token_quota"
+                            ? kv.Value.BillingMode
+                            : "auto";
+                        if (mode == "auto" && kv.Value.DailyBudgetUsd is not > 0 && kv.Value.PrimaryLimit is not > 0)
+                            continue;
+
+                        cleanedRules[kv.Key.Trim()] = new SeatQuotaRule
+                        {
+                            BillingMode = mode,
+                            PrimaryWindowMinutes = kv.Value.PrimaryWindowMinutes is > 0 ? Math.Clamp(kv.Value.PrimaryWindowMinutes.Value, 15, 44640) : null,
+                            PrimaryLimit = kv.Value.PrimaryLimit is > 0 ? Math.Round(kv.Value.PrimaryLimit.Value, 4) : null,
+                            SecondaryWindowMinutes = kv.Value.SecondaryWindowMinutes is > 0 ? Math.Clamp(kv.Value.SecondaryWindowMinutes.Value, 15, 44640) : null,
+                            SecondaryLimit = kv.Value.SecondaryLimit is > 0 ? Math.Round(kv.Value.SecondaryLimit.Value, 4) : null,
+                            DailyBudgetUsd = kv.Value.DailyBudgetUsd is > 0 ? Math.Round(kv.Value.DailyBudgetUsd.Value, 4) : null
+                        };
+                    }
+                }
+
+                doc.QuotaSettings = new QuotaBudgetSettings
+                {
+                    DailyBudgetUsd = req.DailyBudgetUsd > 0 ? Math.Round(req.DailyBudgetUsd, 2) : 0,
+                    MonthlyBudgetUsd = req.MonthlyBudgetUsd > 0 ? Math.Round(req.MonthlyBudgetUsd, 2) : 0,
+                    WarnPercent = warn,
+                    CriticalPercent = crit,
+                    SeatRules = cleanedRules
+                };
+                store.Save(doc);
+                Interlocked.Increment(ref stateRevision);
+                HubEventLogger.Default.Info("QUOTA", $"已更新预算护栏与配额规则（日预算=${doc.QuotaSettings.DailyBudgetUsd}，月预算=${doc.QuotaSettings.MonthlyBudgetUsd}）");
+                return Results.Ok(doc.QuotaSettings);
+            }
         });
 
         app.MapGet("/api/stats/conversations/{conversationId}/audit", (string conversationId) =>

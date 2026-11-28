@@ -1,7 +1,10 @@
 import React, { useMemo, useState, useEffect, useCallback, useRef } from 'react';
 import {
+  AgentQuotaCardDto,
   ConversationAuditReport,
   ModelPricingRule,
+  QuotaBudgetSettings,
+  SeatQuotaRule,
   UsageDashboardResponse,
   api,
   formatBytes,
@@ -56,6 +59,48 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
   const [pricingDraft, setPricingDraft] = useState<Omit<ModelPricingRule, 'isCustom'> | null>(null);
   const [auditReport, setAuditReport] = useState<ConversationAuditReport | null>(null);
   const [loadingAuditId, setLoadingAuditId] = useState<string | null>(null);
+  const [showAllAgents, setShowAllAgents] = useState(false);
+  const [quotaModalOpen, setQuotaModalOpen] = useState(false);
+  const [quotaDraft, setQuotaDraft] = useState<QuotaBudgetSettings>({
+    dailyBudgetUsd: 0,
+    monthlyBudgetUsd: 0,
+    warnPercent: 65,
+    criticalPercent: 85,
+    seatRules: {}
+  });
+  const [savingQuota, setSavingQuota] = useState(false);
+
+  async function openQuotaModal() {
+    try {
+      const cfg = await api.getQuotaSettings();
+      setQuotaDraft({
+        dailyBudgetUsd: cfg.dailyBudgetUsd ?? 0,
+        monthlyBudgetUsd: cfg.monthlyBudgetUsd ?? 0,
+        warnPercent: cfg.warnPercent ?? 65,
+        criticalPercent: cfg.criticalPercent ?? 85,
+        seatRules: cfg.seatRules ?? {}
+      });
+    } catch {
+      // 使用当前默认草稿
+    }
+    setQuotaModalOpen(true);
+  }
+
+  async function handleSaveQuotaSettings(e: React.FormEvent) {
+    e.preventDefault();
+    if (savingQuota) return;
+    setSavingQuota(true);
+    try {
+      await api.updateQuotaSettings(quotaDraft);
+      setQuotaModalOpen(false);
+      await loadAll(page);
+      onToast('已更新全局预算护栏与分席位配额规则');
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '保存配额规则失败');
+    } finally {
+      setSavingQuota(false);
+    }
+  }
 
   async function openConversationAudit(conversationId: string) {
     setLoadingAuditId(conversationId);
@@ -324,6 +369,176 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
 
         <div className="soft-divider" />
 
+        {/* 自适应 AI 额度窗口与预算护栏舱（全局护栏 + 动态多活跃 Agent 矩阵） */}
+        {data?.quota && (
+          <>
+            <div style={{ padding: '14px 18px 16px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 10, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span className="card-title-sm">AI 额度窗口与预算水位舱</span>
+                <span className={`pill-tag pill-tag--xs ${data.quota.headlineTone === 'critical' ? 'tag-coral' : (data.quota.headlineTone === 'warn' ? 'tag-amber' : 'tag-emerald')}`}>
+                  {data.quota.headlineStatus}
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {(data.quota.activeAgents?.length ?? 0) > 5 && (
+                  <button
+                    type="button"
+                    className="btn-pill btn-soft btn-sm btn-tbl"
+                    onClick={() => setShowAllAgents(v => !v)}
+                  >
+                    {showAllAgents ? '收起次要席位' : `展开全部活跃席位 (${data.quota.activeAgents.length})`}
+                  </button>
+                )}
+                <button type="button" className="btn-pill btn-soft btn-sm btn-tbl" onClick={openQuotaModal}>
+                  配额规则与预算
+                </button>
+              </div>
+            </div>
+
+            <div className="quota-deck-grid">
+              {/* 卡 1：全局预算护栏 & Prompt Cache 净省 */}
+              <div className="quota-card">
+                <div className="quota-card-head">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                    <span className="quota-card-title">全局预算护栏</span>
+                    <span
+                      className={`pill-tag pill-tag--xs ${
+                        (data.quota.dailyUsedPercent ?? 0) >= data.quota.criticalPercent
+                          ? 'tag-coral'
+                          : ((data.quota.dailyUsedPercent ?? 0) >= data.quota.warnPercent ? 'tag-amber' : 'tag-emerald')
+                      }`}
+                    >
+                      {data.quota.dailyBudgetUsd > 0 ? '已启用' : '自由计数'}
+                    </span>
+                  </div>
+                  <span className="num" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    速率 ${data.quota.burnRateUsdPerHour.toFixed(2)}/h
+                  </span>
+                </div>
+
+                <div className="quota-win-row">
+                  <div className="quota-win-top">
+                    <span className="quota-win-lbl">今日支出</span>
+                    <span className="quota-win-val num">
+                      ${data.quota.dailySpentUsd.toFixed(2)}
+                      {data.quota.dailyBudgetUsd > 0 ? ` / $${data.quota.dailyBudgetUsd.toFixed(0)} (${data.quota.dailyUsedPercent ?? 0}%)` : ''}
+                    </span>
+                  </div>
+                  <div className="meter-track">
+                    <div
+                      className={`meter-fill tone-${
+                        (data.quota.dailyUsedPercent ?? 0) >= data.quota.criticalPercent
+                          ? 'critical'
+                          : ((data.quota.dailyUsedPercent ?? 0) >= data.quota.warnPercent ? 'warn' : 'ok')
+                      }`}
+                      style={{ width: `${data.quota.dailyBudgetUsd > 0 ? Math.max(4, data.quota.dailyUsedPercent ?? 0) : Math.min(100, Math.max(8, data.quota.dailySpentUsd * 10))}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="quota-win-row">
+                  <div className="quota-win-top">
+                    <span className="quota-win-lbl">本月累计</span>
+                    <span className="quota-win-val num">
+                      ${data.quota.monthlySpentUsd.toFixed(2)}
+                      {data.quota.monthlyBudgetUsd > 0 ? ` / $${data.quota.monthlyBudgetUsd.toFixed(0)} (${data.quota.monthlyUsedPercent ?? 0}%)` : ''}
+                    </span>
+                  </div>
+                  <div className="meter-track">
+                    <div
+                      className={`meter-fill tone-${
+                        (data.quota.monthlyUsedPercent ?? 0) >= data.quota.criticalPercent
+                          ? 'critical'
+                          : ((data.quota.monthlyUsedPercent ?? 0) >= data.quota.warnPercent ? 'warn' : 'indigo')
+                      }`}
+                      style={{ width: `${data.quota.monthlyBudgetUsd > 0 ? Math.max(4, data.quota.monthlyUsedPercent ?? 0) : Math.min(100, Math.max(8, data.quota.monthlySpentUsd * 2))}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="quota-card-foot num">
+                  <span>Cache 净省 ${data.quota.todayCacheSavedUsd.toFixed(2)}</span>
+                  <span style={{ color: 'var(--accent-emerald-text)', fontWeight: 600 }}>
+                    省 {data.quota.cacheSavingsRatioPercent}%
+                  </span>
+                </div>
+              </div>
+
+              {/* 卡 2..N：按实际活跃席位动态渲染（自动适配单周额度 / 5h+7d / Credits / 多开分号） */}
+              {(showAllAgents ? data.quota.activeAgents : data.quota.activeAgents.slice(0, 5)).map((agent: AgentQuotaCardDto) => (
+                <div key={agent.seatId} className="quota-card">
+                  <div className="quota-card-head">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                      <span className={`live-sync-dot ${agent.isRunning ? 'on' : ''}`} title={agent.isRunning ? '当前在线/运行中' : '近期活跃记录'} />
+                      <span className="quota-card-title cell-ellipsis" style={{ maxWidth: 120 }} title={agent.appName}>
+                        {agent.appName}
+                      </span>
+                      {agent.planBadge && (
+                        <span className="pill-tag pill-tag--xs tag-indigo mono">{agent.planBadge}</span>
+                      )}
+                    </div>
+                    {agent.creditsBadge ? (
+                      <span className="pill-tag pill-tag--xs tag-emerald num">{agent.creditsBadge}</span>
+                    ) : (
+                      <span className="num" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        今日 ${agent.todayCostUsd.toFixed(2)}
+                      </span>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {agent.windows.map(win => {
+                      const hasPct = win.usedPercent !== null && win.usedPercent !== undefined;
+                      const barWidth = hasPct ? Math.max(win.usedPercent! > 0 ? 4 : 0, win.usedPercent!) : 100;
+                      return (
+                        <div key={win.key} className="quota-win-row">
+                          <div className="quota-win-top">
+                            <span className="quota-win-lbl">{win.label}</span>
+                            <span
+                              className="quota-win-val num"
+                              style={{
+                                color: win.tone === 'critical'
+                                  ? 'var(--accent-coral-text)'
+                                  : (win.tone === 'warn' ? 'var(--accent-amber-text)' : 'var(--text-primary)')
+                              }}
+                            >
+                              {win.usedDisplay}
+                              {win.subDisplay ? (
+                                <span style={{ fontWeight: 400, color: 'var(--text-muted)', marginLeft: 5, fontSize: 10.5 }}>
+                                  · {win.subDisplay}
+                                </span>
+                              ) : null}
+                            </span>
+                          </div>
+                          {hasPct ? (
+                            <div className="meter-track">
+                              <div className={`meter-fill tone-${win.tone}`} style={{ width: `${barWidth}%` }} />
+                            </div>
+                          ) : (
+                            <div className="meter-track">
+                              <div className="meter-fill tone-subtle" style={{ width: agent.todayTokens > 0 ? '45%' : '0%' }} />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="quota-card-foot num">
+                    <span>今日 {formatCompactTokens(agent.todayTokens)} Tokens</span>
+                    <span style={{ color: 'var(--accent-emerald-text)' }}>
+                      缓省 ${agent.todayCacheSavedUsd.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            </div>
+            <div className="soft-divider" />
+          </>
+        )}
+
         <div style={{ padding: '16px 20px 14px' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
             <span className="card-title-sm">{metricLabel}</span>
@@ -428,29 +643,28 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
 
         {subTab === 'logs' && (
           <>
-            <div style={{ overflowX: 'auto' }}>
-              <table className="clean-table">
+            <div className="table-scroll-wrap">
+              <table className="clean-table clean-table--logs">
                 <thead>
                   <tr>
                     <th>时间</th>
                     <th>应用</th>
-                    <th>来源</th>
                     <th>模型</th>
                     <th>成本</th>
                     <th className="num-r">有效输入</th>
                     <th className="num-r">输出</th>
                     <th className="num-r">缓存命中</th>
                     <th className="num-r">流速</th>
-                    <th className="num-r">首字(估)</th>
+                    <th className="num-r" title="估算首字响应耗时">首字</th>
                     <th className="num-r">耗时</th>
-                    <th className="num-r">会话审计</th>
+                    <th className="num-r sticky-col-right">审计</th>
                   </tr>
                 </thead>
                 <tbody>
                   {(data?.logs ?? []).length === 0 ? (
                     <tr>
-                      <td colSpan={12} style={{ textAlign: 'center', padding: 30, color: 'var(--text-muted)' }}>
-                        当前时间范围内暂无会话记录（可切换「全部历史」或点击右上角「按需同步」）
+                      <td colSpan={11} style={{ textAlign: 'center', padding: 30, color: 'var(--text-muted)' }}>
+                        当前时间范围内暂无会话记录（可切换「全部历史」或点击右上角「立即同步」）
                       </td>
                     </tr>
                   ) : (
@@ -459,9 +673,19 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
                         <td className="num nowrap" style={{ color: 'var(--text-secondary)' }}>
                           {new Date(row.timestamp).toLocaleTimeString('zh-CN', { hour12: false })}
                         </td>
-                        <td className="nowrap"><span className="pill-tag tag-neutral">{row.appName}</span></td>
-                        <td className="nowrap" style={{ color: 'var(--text-secondary)' }}>{row.source}</td>
-                        <td className="mono nowrap" style={{ fontWeight: 500, fontSize: 12 }}>{row.model}</td>
+                        <td className="nowrap">
+                          <span
+                            className="pill-tag pill-tag--xs tag-neutral"
+                            title={`${row.appName} · 来源：${row.source}`}
+                          >
+                            {row.appName}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="mono cell-ellipsis" style={{ fontWeight: 500, fontSize: 11.5, maxWidth: 158 }} title={row.model}>
+                            {row.model}
+                          </span>
+                        </td>
                         <td className="nowrap">
                           {row.isPriced && row.costUsd !== null && row.costUsd !== undefined ? (
                             <span className="num" style={{ color: 'var(--accent-emerald-text)', fontWeight: 600 }}>
@@ -470,8 +694,7 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
                           ) : (
                             <button
                               type="button"
-                              className="btn-pill btn-soft btn-sm"
-                              style={{ height: 24, fontSize: 11, padding: '0 8px' }}
+                              className="btn-pill btn-soft btn-sm btn-tbl"
                               onClick={() => setPricingDraft({
                                 pattern: row.model,
                                 displayName: row.model,
@@ -489,20 +712,19 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
                         <td className="num-r num nowrap">{row.outputTokens.toLocaleString('en-US')}</td>
                         <td className="num-r num nowrap">{formatCompactTokens(row.cacheReadTokens)}</td>
                         <td className="num-r num nowrap" style={{ color: row.tokensPerSecond ? 'var(--accent-emerald-text)' : 'var(--text-muted)' }}>
-                          {row.tokensPerSecond ? `~${row.tokensPerSecond} tok/s` : '—'}
+                          {row.tokensPerSecond ? `~${Math.round(row.tokensPerSecond * 10) / 10} tok/s` : '—'}
                         </td>
                         <td className="num-r num nowrap" style={{ color: row.firstTokenSeconds ? 'var(--text-secondary)' : 'var(--text-muted)' }}>
-                          {row.firstTokenSeconds ? `~${row.firstTokenSeconds}s` : '—'}
+                          {row.firstTokenSeconds ? `~${Math.round(row.firstTokenSeconds * 10) / 10}s` : '—'}
                         </td>
                         <td className="num-r num nowrap" style={{ color: 'var(--text-secondary)' }}>
-                          {row.durationSeconds > 0 ? `~${row.durationSeconds}s` : '—'}
+                          {row.durationSeconds > 0 ? `~${Math.round(row.durationSeconds)}s` : '—'}
                         </td>
-                        <td className="num-r nowrap">
+                        <td className="num-r nowrap sticky-col-right">
                           {row.conversationId ? (
                             <button
                               type="button"
-                              className="btn-pill btn-soft btn-sm"
-                              style={{ height: 24, fontSize: 11, padding: '0 8px' }}
+                              className="btn-pill btn-soft btn-sm btn-tbl"
                               disabled={loadingAuditId === row.conversationId}
                               onClick={() => openConversationAudit(row.conversationId!)}
                             >
@@ -540,165 +762,339 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
         )}
 
         {subTab === 'workspaces' && (
-          <table className="clean-table">
-            <thead>
-              <tr>
-                <th>项目工作区路径</th>
-                <th>主力应用</th>
-                <th>主力模型</th>
-                <th className="num-r">请求次数</th>
-                <th className="num-r">累计 Tokens</th>
-                <th className="num-r">估算成本</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(data?.workspaceBreakdown ?? []).length === 0 ? (
+          <div className="table-scroll-wrap">
+            <table className="clean-table">
+              <thead>
                 <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', padding: 28, color: 'var(--text-muted)' }}>
-                    当前范围内暂未扫描到含工作区标识（cwd / workspace）的会话日志
-                  </td>
+                  <th>项目工作区路径</th>
+                  <th>主力应用</th>
+                  <th>主力模型</th>
+                  <th className="num-r">请求次数</th>
+                  <th className="num-r">累计 Tokens</th>
+                  <th className="num-r">估算成本</th>
                 </tr>
-              ) : (
-                (data?.workspaceBreakdown ?? []).map(ws => {
-                  const displayPath = privacyMode
-                    ? `…/${ws.workspace.split(/[\\/]/).filter(Boolean).pop() ?? ws.workspace}`
-                    : ws.workspace;
-                  return (
-                    <tr key={ws.workspace}>
-                      <td className="mono" style={{ fontWeight: 600, fontSize: 12 }} title={privacyMode ? '隐私护盾已遮蔽完整路径' : ws.workspace}>
-                        {displayPath}
-                      </td>
-                      <td><span className="pill-tag tag-neutral">{ws.topApp || '—'}</span></td>
-                      <td className="mono" style={{ fontSize: 11.5 }}>{ws.topModel || '—'}</td>
-                      <td className="num-r num">{ws.requests}</td>
-                      <td className="num-r num">{formatCompactTokens(ws.totalTokens)}</td>
-                      <td className="num-r num" style={{ color: 'var(--accent-emerald-text)', fontWeight: 600 }}>
-                        ${ws.costUsd.toFixed(4)}
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {(data?.workspaceBreakdown ?? []).length === 0 ? (
+                  <tr>
+                    <td colSpan={6} style={{ textAlign: 'center', padding: 28, color: 'var(--text-muted)' }}>
+                      当前范围内暂未扫描到含工作区标识（cwd / workspace）的会话日志
+                    </td>
+                  </tr>
+                ) : (
+                  (data?.workspaceBreakdown ?? []).map(ws => {
+                    const displayPath = privacyMode
+                      ? `…/${ws.workspace.split(/[\\/]/).filter(Boolean).pop() ?? ws.workspace}`
+                      : ws.workspace;
+                    return (
+                      <tr key={ws.workspace}>
+                        <td title={privacyMode ? '隐私护盾已遮蔽完整路径' : ws.workspace}>
+                          <span className="mono cell-ellipsis" style={{ fontWeight: 600, fontSize: 12, maxWidth: 280 }}>
+                            {displayPath}
+                          </span>
+                        </td>
+                        <td><span className="pill-tag tag-neutral">{ws.topApp || '—'}</span></td>
+                        <td>
+                          <span className="mono cell-ellipsis" style={{ fontSize: 11.5, maxWidth: 180 }} title={ws.topModel || '—'}>
+                            {ws.topModel || '—'}
+                          </span>
+                        </td>
+                        <td className="num-r num">{ws.requests}</td>
+                        <td className="num-r num">{formatCompactTokens(ws.totalTokens)}</td>
+                        <td className="num-r num" style={{ color: 'var(--accent-emerald-text)', fontWeight: 600 }}>
+                          ${ws.costUsd.toFixed(4)}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
         )}
 
         {subTab === 'models' && (
-          <table className="clean-table">
-            <thead>
-              <tr>
-                <th>模型名称</th>
-                <th className="num-r">请求数</th>
-                <th className="num-r">有效输入</th>
-                <th className="num-r">输出</th>
-                <th className="num-r">缓存命中</th>
-                <th className="num-r">命中率</th>
-                <th className="num-r">平均流速</th>
-                <th className="num-r">估算成本</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(data?.modelBreakdown ?? []).map(m => (
-                <tr key={m.model}>
-                  <td className="mono" style={{ fontWeight: 600, fontSize: 12 }}>{m.model}</td>
-                  <td className="num-r num">{m.requests}</td>
-                  <td className="num-r num">{formatCompactTokens(m.effectiveInputTokens)}</td>
-                  <td className="num-r num">{formatCompactTokens(m.outputTokens)}</td>
-                  <td className="num-r num">{formatCompactTokens(m.cacheReadTokens)}</td>
-                  <td className="num-r num" style={{ color: 'var(--accent-indigo)', fontWeight: 600 }}>{m.cacheHitRate}%</td>
-                  <td className="num-r num">{m.avgTokensPerSecond > 0 ? `~${m.avgTokensPerSecond} tok/s` : '—'}</td>
-                  <td className="num-r num">
-                    {m.hasPricing ? `$${m.costUsd.toFixed(4)}` : (
-                      <button
-                        type="button"
-                        className="btn-pill btn-soft btn-sm"
-                        style={{ height: 24, fontSize: 11 }}
-                        onClick={() => setPricingDraft({
-                          pattern: m.model,
-                          displayName: m.model,
-                          inputPerMillion: 1.25,
-                          outputPerMillion: 10.0,
-                          cacheReadPerMillion: 0.125,
-                          cacheWritePerMillion: 0
-                        })}
-                      >
-                        配置单价
-                      </button>
-                    )}
-                  </td>
+          <div className="table-scroll-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>模型名称</th>
+                  <th className="num-r">请求数</th>
+                  <th className="num-r">有效输入</th>
+                  <th className="num-r">输出</th>
+                  <th className="num-r">缓存命中</th>
+                  <th className="num-r">命中率</th>
+                  <th className="num-r">平均流速</th>
+                  <th className="num-r">估算成本</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {(data?.modelBreakdown ?? []).map(m => (
+                  <tr key={m.model}>
+                    <td>
+                      <span className="mono cell-ellipsis" style={{ fontWeight: 600, fontSize: 12, maxWidth: 220 }} title={m.model}>
+                        {m.model}
+                      </span>
+                    </td>
+                    <td className="num-r num">{m.requests}</td>
+                    <td className="num-r num">{formatCompactTokens(m.effectiveInputTokens)}</td>
+                    <td className="num-r num">{formatCompactTokens(m.outputTokens)}</td>
+                    <td className="num-r num">{formatCompactTokens(m.cacheReadTokens)}</td>
+                    <td className="num-r num" style={{ color: 'var(--accent-indigo)', fontWeight: 600 }}>{m.cacheHitRate}%</td>
+                    <td className="num-r num">{m.avgTokensPerSecond > 0 ? `~${m.avgTokensPerSecond} tok/s` : '—'}</td>
+                    <td className="num-r num">
+                      {m.hasPricing ? `$${m.costUsd.toFixed(4)}` : (
+                        <button
+                          type="button"
+                          className="btn-pill btn-soft btn-sm btn-tbl"
+                          onClick={() => setPricingDraft({
+                            pattern: m.model,
+                            displayName: m.model,
+                            inputPerMillion: 1.25,
+                            outputPerMillion: 10.0,
+                            cacheReadPerMillion: 0.125,
+                            cacheWritePerMillion: 0
+                          })}
+                        >
+                          配置单价
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
 
         {subTab === 'appsProxy' && (
-          <table className="clean-table">
-            <thead>
-              <tr>
-                <th>AI 应用 / 席位</th>
-                <th className="num-r">调用次数</th>
-                <th className="num-r">总消耗 Tokens</th>
-                <th className="num-r">缓存命中率</th>
-                <th>独立入口端口</th>
-                <th>绑定专线与出口 IP</th>
-                <th className="num-r">代理上行 / 下行流量</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(data?.appAndProxyBreakdown ?? []).map(row => (
-                <tr key={row.appName}>
-                  <td style={{ fontWeight: 600 }}>{row.appName}</td>
-                  <td className="num-r num">{row.requests}</td>
-                  <td className="num-r num">{formatCompactTokens(row.totalTokens)}</td>
-                  <td className="num-r num">{row.cacheHitRate}%</td>
-                  <td className="mono">{row.seatPort ?? '—'}</td>
-                  <td>
-                    <div style={{ fontWeight: 600 }}>{row.boundNodeName ?? '—'}</div>
-                    <div className="num" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{maskIp(row.exitIp, privacyMode)}</div>
-                  </td>
-                  <td className="num-r num">
-                    ↑ {formatBytes(row.bytesTx)} · ↓ {formatBytes(row.bytesRx)} ({row.proxyConnections} 次)
-                  </td>
+          <div className="table-scroll-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>AI 应用 / 席位</th>
+                  <th className="num-r">调用次数</th>
+                  <th className="num-r">总消耗 Tokens</th>
+                  <th className="num-r">缓存命中率</th>
+                  <th>独立入口端口</th>
+                  <th>绑定专线与出口 IP</th>
+                  <th className="num-r">代理上行 / 下行流量</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {(data?.appAndProxyBreakdown ?? []).map(row => (
+                  <tr key={row.appName}>
+                    <td style={{ fontWeight: 600 }}>{row.appName}</td>
+                    <td className="num-r num">{row.requests}</td>
+                    <td className="num-r num">{formatCompactTokens(row.totalTokens)}</td>
+                    <td className="num-r num">{row.cacheHitRate}%</td>
+                    <td className="mono">{row.seatPort ?? '—'}</td>
+                    <td>
+                      <div className="cell-ellipsis" style={{ fontWeight: 600, maxWidth: 210 }} title={row.boundNodeName ?? '—'}>
+                        {row.boundNodeName ?? '—'}
+                      </div>
+                      <div className="num" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{maskIp(row.exitIp, privacyMode)}</div>
+                    </td>
+                    <td className="num-r num nowrap">
+                      ↑ {formatBytes(row.bytesTx)} · ↓ {formatBytes(row.bytesRx)} ({row.proxyConnections} 次)
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
 
         {subTab === 'pricing' && (
-          <table className="clean-table">
-            <thead>
-              <tr>
-                <th>模型匹配规则</th>
-                <th>显示名称</th>
-                <th className="num-r">输入 ($/1M)</th>
-                <th className="num-r">输出 ($/1M)</th>
-                <th className="num-r">缓存读 ($/1M)</th>
-                <th className="num-r">缓存写 ($/1M)</th>
-                <th className="num-r">来源</th>
-              </tr>
-            </thead>
-            <tbody>
-              {pricings.map(r => (
-                <tr key={r.pattern}>
-                  <td className="mono" style={{ fontWeight: 600, fontSize: 12 }}>{r.pattern}</td>
-                  <td>{r.displayName}</td>
-                  <td className="num-r num">${r.inputPerMillion}</td>
-                  <td className="num-r num">${r.outputPerMillion}</td>
-                  <td className="num-r num">${r.cacheReadPerMillion}</td>
-                  <td className="num-r num">${r.cacheWritePerMillion}</td>
-                  <td className="num-r">
-                    <span className={`pill-tag ${r.isCustom ? 'tag-indigo' : 'tag-neutral'}`}>
-                      {r.isCustom ? '自定义' : '内置'}
-                    </span>
-                  </td>
+          <div className="table-scroll-wrap">
+            <table className="clean-table">
+              <thead>
+                <tr>
+                  <th>模型匹配规则</th>
+                  <th>显示名称</th>
+                  <th className="num-r">输入 ($/1M)</th>
+                  <th className="num-r">输出 ($/1M)</th>
+                  <th className="num-r">缓存读 ($/1M)</th>
+                  <th className="num-r">缓存写 ($/1M)</th>
+                  <th className="num-r">来源</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {pricings.map(r => (
+                  <tr key={r.pattern}>
+                    <td>
+                      <span className="mono cell-ellipsis" style={{ fontWeight: 600, fontSize: 12, maxWidth: 200 }} title={r.pattern}>
+                        {r.pattern}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="cell-ellipsis" style={{ maxWidth: 200 }} title={r.displayName}>
+                        {r.displayName}
+                      </span>
+                    </td>
+                    <td className="num-r num">${r.inputPerMillion}</td>
+                    <td className="num-r num">${r.outputPerMillion}</td>
+                    <td className="num-r num">${r.cacheReadPerMillion}</td>
+                    <td className="num-r num">${r.cacheWritePerMillion}</td>
+                    <td className="num-r">
+                      <span className={`pill-tag ${r.isCustom ? 'tag-indigo' : 'tag-neutral'}`}>
+                        {r.isCustom ? '自定义' : '内置'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
+
+      {quotaModalOpen && (
+        <div className="modal-backdrop" onClick={() => setQuotaModalOpen(false)}>
+          <form className="modal-surface" style={{ maxWidth: 640 }} onSubmit={handleSaveQuotaSettings} onClick={e => e.stopPropagation()}>
+            <div style={{ padding: '18px 22px 14px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>AI 预算护栏与分席位配额规则设置</div>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+                  仅用于自适应水位视觉提醒（填 0 表示不限制上限，默认绝不强行打断对话）
+                </div>
+              </div>
+              <button type="button" className="btn-pill btn-soft btn-sm" onClick={() => setQuotaModalOpen(false)}>关闭</button>
+            </div>
+            <div className="soft-divider" />
+            <div style={{ padding: '16px 22px', display: 'flex', flexDirection: 'column', gap: 14, maxHeight: '68vh', overflowY: 'auto' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>全局日预算 ($)</div>
+                  <input
+                    className="clean-input num"
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={quotaDraft.dailyBudgetUsd}
+                    onChange={e => setQuotaDraft(d => ({ ...d, dailyBudgetUsd: Number(e.target.value) || 0 }))}
+                  />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>全局月预算 ($)</div>
+                  <input
+                    className="clean-input num"
+                    type="number"
+                    min="0"
+                    step="5"
+                    value={quotaDraft.monthlyBudgetUsd}
+                    onChange={e => setQuotaDraft(d => ({ ...d, monthlyBudgetUsd: Number(e.target.value) || 0 }))}
+                  />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>琥珀预警 (%)</div>
+                  <input
+                    className="clean-input num"
+                    type="number"
+                    min="10"
+                    max="95"
+                    value={quotaDraft.warnPercent}
+                    onChange={e => setQuotaDraft(d => ({ ...d, warnPercent: Number(e.target.value) || 65 }))}
+                  />
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>珊瑚告警 (%)</div>
+                  <input
+                    className="clean-input num"
+                    type="number"
+                    min="20"
+                    max="99"
+                    value={quotaDraft.criticalPercent}
+                    onChange={e => setQuotaDraft(d => ({ ...d, criticalPercent: Number(e.target.value) || 85 }))}
+                  />
+                </div>
+              </div>
+
+              <div className="soft-divider" />
+
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                按席位定制计费与周期模式（未设定则按日志原生字段自动识别）
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {(['agy', 'claude', 'codex', 'cursor'] as const).map(seatKey => {
+                  const labelMap: Record<string, string> = { agy: 'Antigravity', claude: 'Claude Code', codex: 'Codex CLI', cursor: 'Cursor' };
+                  const cur: SeatQuotaRule = quotaDraft.seatRules[seatKey] ?? { billingMode: 'auto' };
+                  const templateVal = (() => {
+                    if (cur.billingMode === 'auto') return 'auto';
+                    if (cur.billingMode === 'budget_usd') return 'daily_usd';
+                    if (cur.primaryWindowMinutes === 10080 && !cur.secondaryWindowMinutes) return 'weekly_only';
+                    if (cur.primaryWindowMinutes === 1440 && !cur.secondaryWindowMinutes) return 'daily_only';
+                    return '5h_and_weekly';
+                  })();
+
+                  const setSeatRule = (patch: Partial<SeatQuotaRule>) => {
+                    setQuotaDraft(d => ({
+                      ...d,
+                      seatRules: { ...d.seatRules, [seatKey]: { ...cur, ...patch } }
+                    }));
+                  };
+
+                  return (
+                    <div
+                      key={seatKey}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '110px 1fr 120px',
+                        gap: 10,
+                        alignItems: 'center',
+                        background: 'var(--bg-subtle)',
+                        padding: '8px 12px',
+                        borderRadius: 10
+                      }}
+                    >
+                      <span style={{ fontWeight: 600, fontSize: 12 }}>{labelMap[seatKey]}</span>
+                      <select
+                        className="clean-input"
+                        style={{ height: 30, fontSize: 11.5 }}
+                        value={templateVal}
+                        onChange={e => {
+                          const v = e.target.value;
+                          if (v === 'auto') setSeatRule({ billingMode: 'auto', primaryWindowMinutes: null, secondaryWindowMinutes: null });
+                          else if (v === '5h_and_weekly') setSeatRule({ billingMode: 'subscription_windows', primaryWindowMinutes: 300, secondaryWindowMinutes: 10080 });
+                          else if (v === 'weekly_only') setSeatRule({ billingMode: 'subscription_windows', primaryWindowMinutes: 10080, secondaryWindowMinutes: null });
+                          else if (v === 'daily_only') setSeatRule({ billingMode: 'subscription_windows', primaryWindowMinutes: 1440, secondaryWindowMinutes: null });
+                          else if (v === 'daily_usd') setSeatRule({ billingMode: 'budget_usd', primaryWindowMinutes: 1440, secondaryWindowMinutes: null });
+                        }}
+                      >
+                        <option value="auto">自动识别（优先读取原生窗口）</option>
+                        <option value="5h_and_weekly">5 小时 + 周额度（双窗口）</option>
+                        <option value="weekly_only">仅周额度（7 天滚动）</option>
+                        <option value="daily_only">仅日额度（自然日重置）</option>
+                        <option value="daily_usd">按日美元预算 ($)</option>
+                      </select>
+                      <input
+                        className="clean-input num"
+                        style={{ height: 30, fontSize: 11.5 }}
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="主上限 ($)"
+                        disabled={templateVal === 'auto'}
+                        value={cur.primaryLimit ?? cur.dailyBudgetUsd ?? ''}
+                        onChange={e => {
+                          const val = e.target.value ? Number(e.target.value) : null;
+                          setSeatRule({ primaryLimit: val, dailyBudgetUsd: val });
+                        }}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="modal-footer-bar">
+              <button type="button" className="btn-pill btn-soft" onClick={() => setQuotaModalOpen(false)}>取消</button>
+              <button type="submit" className="btn-pill btn-indigo" disabled={savingQuota}>
+                {savingQuota ? '保存中...' : '保存规则'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {pricingDraft && (
         <div className="modal-backdrop" onClick={() => setPricingDraft(null)}>
@@ -801,34 +1197,40 @@ export const UsageStatsView: React.FC<Props> = ({ privacyMode = false, onToast }
               </div>
             )}
 
-            <table className="clean-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>模型</th>
-                  <th className="num-r">上下文总量</th>
-                  <th className="num-r">输出</th>
-                  <th>调用工具</th>
-                  <th className="num-r">费用</th>
-                </tr>
-              </thead>
-              <tbody>
-                {auditReport.turns.slice(0, 40).map(turn => (
-                  <tr key={turn.turnIndex}>
-                    <td className="num">{turn.turnIndex}</td>
-                    <td className="mono" style={{ fontSize: 11.5 }}>{turn.model}</td>
-                    <td className="num-r num">{formatCompactTokens(turn.cumulativeContextTokens)}</td>
-                    <td className="num-r num">{formatCompactTokens(turn.outputTokens)}</td>
-                    <td className="mono" style={{ fontSize: 11 }}>
-                      {turn.toolsCalled.length > 0 ? turn.toolsCalled.join(', ') : '—'}
-                    </td>
-                    <td className="num-r num">
-                      {turn.costUsd !== null && turn.costUsd !== undefined ? `$${turn.costUsd.toFixed(4)}` : '—'}
-                    </td>
+            <div className="table-scroll-wrap">
+              <table className="clean-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>模型</th>
+                    <th className="num-r">上下文总量</th>
+                    <th className="num-r">输出</th>
+                    <th>调用工具</th>
+                    <th className="num-r">费用</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {auditReport.turns.slice(0, 40).map(turn => (
+                    <tr key={turn.turnIndex}>
+                      <td className="num">{turn.turnIndex}</td>
+                      <td>
+                        <span className="mono cell-ellipsis" style={{ fontSize: 11.5, maxWidth: 160 }} title={turn.model}>
+                          {turn.model}
+                        </span>
+                      </td>
+                      <td className="num-r num">{formatCompactTokens(turn.cumulativeContextTokens)}</td>
+                      <td className="num-r num">{formatCompactTokens(turn.outputTokens)}</td>
+                      <td className="mono" style={{ fontSize: 11 }}>
+                        {turn.toolsCalled.length > 0 ? turn.toolsCalled.join(', ') : '—'}
+                      </td>
+                      <td className="num-r num">
+                        {turn.costUsd !== null && turn.costUsd !== undefined ? `$${turn.costUsd.toFixed(4)}` : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}

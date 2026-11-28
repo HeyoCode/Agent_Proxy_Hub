@@ -78,12 +78,12 @@
   </tr>
   <tr>
     <td width="50%" valign="top">
-      <h3>📊 免解密双源统计 · 工作区排行 &amp; 单会话审计</h3>
-      <p>零 MITM 拆包，后台每 <strong>5 秒</strong>增量巡检 <code>.claude / .codex / .gemini</code> 日志并去重合并，提供<strong>项目工作区成本排行</strong>、<strong>365 天活跃热力图</strong>、<strong>Cache 节省额</strong>以及<strong>单会话上下文膨胀轨迹与工具调用审计</strong>。</p>
+      <h3>📊 免解密双源统计 · 自适应额度水位舱</h3>
+      <p>零 MITM 拆包，后台每 <strong>5 秒</strong>增量巡检 <code>.claude / .codex / .gemini</code> 日志并去重合并，提供<strong>自适应多规则 AI 额度水位舱</strong>（<code>5h + 周</code> / <code>单周</code> / <code>日额度</code> / <code>Credits</code> 与全局预算护栏）、<strong>工作区成本排行</strong>、<strong>365 天热力图</strong>与<strong>单会话上下文审计</strong>。</p>
     </td>
     <td width="50%" valign="top">
-      <h3>🌐 L1/L2 全协议 · SHA-256 离线包与快照防漂移</h3>
-      <p><strong>L1 原生层</strong>支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code>（<code>VLESS / Hysteria2 / TUIC / WireGuard</code>），支持离线包 <strong>SHA-256 校验</strong>与订阅刷新<strong>快照防漂移锁定</strong>。</p>
+      <h3>🌐 L1/L2 全协议 · 订阅流量进度卡与快照防漂移</h3>
+      <p><strong>L1 原生层</strong>支持 <code>SOCKS5 / SOCKS4 / HTTP(S) / Trojan / Shadowsocks AEAD</code>；<strong>L2 扩展层</strong>按需懒加载 <code>sing-box</code>（<code>VLESS / Hysteria2 / TUIC / WireGuard</code>），支持订阅 <strong><code>Subscription-Userinfo</code> 流量卡提取 &amp; 提示伪节点收纳</strong>与<strong>快照防漂移锁定</strong>。</p>
     </td>
   </tr>
   <tr>
@@ -219,8 +219,8 @@ flowchart LR
 ### 方式一：直接下载安装程序（推荐）
 
 前往 [**GitHub Releases**](https://github.com/HeyoCode/Agent_Proxy_Hub/releases) 下载对应平台最新安装包：
-- **Windows x64**：`AgentProxyHub-Setup-v0.7.0-win-x64.exe`（默认用户级免管理员安装，同步内置 `aph.exe` CLI，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动接管旧实例）
-- **macOS**：`AgentProxyHub-v0.7.0-macos-arm64.dmg`
+- **Windows x64**：`AgentProxyHub-Setup-v0.8.0-win-x64.exe`（默认用户级免管理员安装，同步内置 `aph.exe` CLI，支持 `/PORTABLE=1` 便携模式与 `--minimized` 开机静默托盘自启，覆盖升级自动接管旧实例）
+- **macOS**：`AgentProxyHub-v0.8.0-macos-arm64.dmg`
 
 ### 方式二：3 步完成首次配置
 
@@ -298,7 +298,7 @@ Agent_Proxy_Hub/
 ├── macos/                              # macOS 原生菜单栏 NSPopover + WKWebView 宿主与脚本
 ├── web/                                # React 19 + TypeScript + Vite 前端（双主题自适应 + 隐私护盾 + 365天热力图）
 ├── installer/                          # Inno Setup 6 (Windows) 与 DMG (macOS) 打包脚本
-├── tests/AgentProxyHub.Tests/          # 37 项 xUnit 测试（多协议 / 21 应用 / 备用容灾 / 超时巡检 / WebSocket / CLI）
+├── tests/AgentProxyHub.Tests/          # 50 项 xUnit 测试（多协议 / 21 应用 / 自适应配额 / 订阅清洗 / 容灾 / CLI）
 └── docs/screenshots/                   # README 展示截图资源
 ```
 
@@ -309,7 +309,7 @@ Agent_Proxy_Hub/
 pnpm --dir web install --frozen-lockfile --config.node-linker=hoisted --config.package-import-method=copy
 pnpm --dir web build
 
-# 2. 运行全套 xUnit 单元测试（37 项全绿）
+# 2. 运行全套 xUnit 单元测试（50 项全绿）
 dotnet test AgentProxyHub.sln -c Release
 
 # 3. 命令行脚本控制示例 (aph CLI)
@@ -327,16 +327,16 @@ dotnet run --project src/AgentProxyHub.Host/AgentProxyHub.Host.csproj -c Release
 
 ```powershell
 # Windows 轻量安装程序（需安装 Inno Setup 6）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.7.0
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.8.0
 
 # Windows 离线独立版（内置完整 .NET 10 运行时）
-powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.7.0 -SelfContained
+powershell -ExecutionPolicy Bypass -File .\installer\windows\build-installer.ps1 -Version 0.8.0 -SelfContained
 ```
 
 ```bash
 # macOS Apple Silicon / Intel DMG 镜像
 chmod +x installer/macos/build-dmg.sh
-./installer/macos/build-dmg.sh osx-arm64 0.7.0
+./installer/macos/build-dmg.sh osx-arm64 0.8.0
 ```
 
 </details>
@@ -348,7 +348,7 @@ chmod +x installer/macos/build-dmg.sh
 | :---: | :--- | :--- |
 | `GET` | `/api/health` | 零开销本地启动健康检查（绕过系统代理） |
 | `WS` | `/ws/events` | 受环回 Origin/Host 校验的实时状态与速率推送通道 |
-| `GET` | `/api/overview` | 获取物理网卡、绕过隧道、21 款席位配置、多开实例、桌面偏好、节点池、实时吞吐与接管状态 |
+| `GET` | `/api/overview` | 获取物理网卡、绕过隧道、21 款席位配置、多开实例、桌面偏好、节点池、实时吞吐、配额与接管状态 |
 | `GET / POST` | `/api/maintenance/{stats,cleanup}` | 查询 `~/.agent-proxy-hub` 目录占用并安全清理失效接管备份与 `.tmp` 缓存 |
 | `POST` | `/api/seats/reorder` | 保存自定义 AI 席位展示顺序 |
 | `POST` | `/api/seats/{id}/restart` | 优雅关闭旧进程并携独立代理端口重连（严格保护 Antigravity） |
@@ -376,7 +376,8 @@ chmod +x installer/macos/build-dmg.sh
 | `POST` | `/api/engine/singbox/install` | 一键从官方 Release 下载安装 `sing-box` 至本地隔离目录 |
 | `POST` | `/api/engine/singbox/stop` | 手动停止 `sing-box` Sidecar 进程并释放临时桥接端口 |
 | `PUT` | `/api/isolation` | 切换锁定物理网卡、SNI 还原、全局熔断锁、IPv6 双栈及每 5 分钟自动巡检开关 (`autoHealthCheckEnabled`) |
-| `GET` | `/api/stats/dashboard` | 查询双源 AI 用量统计（含 TTFT 估算、Cache 节省额与 365 天活跃热力图） |
+| `GET` | `/api/stats/dashboard` | 查询双源 AI 用量统计、自适应多规则配额水位（`5h/周/日/Credits`）与 365 天活跃热力图 |
+| `GET / PUT` | `/api/stats/quota-settings` | 读写全局日/月预算护栏、预警阈值与分席位自定义配额规则 |
 | `POST` | `/api/stats/sync` | 立即触发一次增量会话日志同步（后台默认每 5 秒自动执行） |
 | `GET` | `/api/diagnostics/logs` | 查询自动脱敏的运行时事件日志（启动自动从 `~/.agent-proxy-hub/logs/` 回填最近 200 条记录） |
 | `GET` | `/api/system/update-check` | 检查 GitHub Releases 最新版本与发布说明 |

@@ -1783,7 +1783,7 @@ public class ProxyAndTelemetryTests
             string body = request.RequestUri?.AbsolutePath switch
             {
                 "/api/overview" => """
-                    {"project":{"version":"0.7.1"},"os":"win","memoryMb":42.5,"lockedNic":{"name":"以太网","iPv4Address":"192.168.5.16"},"nodes":[{"id":"n1"}],"seats":[{"id":"claude","localPort":17891,"enabled":true,"boundNodeId":"n1","fallbackNodeId":"n2"}]}
+                    {"project":{"version":"0.8.0"},"os":"win","memoryMb":42.5,"lockedNic":{"name":"以太网","iPv4Address":"192.168.5.16"},"nodes":[{"id":"n1"}],"seats":[{"id":"claude","localPort":17891,"enabled":true,"boundNodeId":"n1","fallbackNodeId":"n2"}]}
                     """,
                 _ => "{}"
             };
@@ -1804,7 +1804,7 @@ public class ProxyAndTelemetryTests
         int codeStatus = await AgentProxyHub.Cli.AphCliRunner.RunAsync(["status", "--json", "--port", "17899"], swOut, swErr, mockHttp);
         Assert.Equal(0, codeStatus);
         string statusOut = swOut.ToString();
-        Assert.Contains("\"version\": \"0.7.1\"", statusOut);
+        Assert.Contains("\"version\": \"0.8.0\"", statusOut);
         Assert.Contains("\"activeSeats\": 1", statusOut);
 
         using var swSeats = new StringWriter();
@@ -1818,7 +1818,12 @@ public class ProxyAndTelemetryTests
     public async Task HubWebSocket_LoopbackEndpoint_StreamsOverviewSnapshot()
     {
         int port = GetFreeTcpPort();
+        string tmpHome = Path.Combine(Path.GetTempPath(), $"aph_ws_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tmpHome);
+        string? prevHome = Environment.GetEnvironmentVariable("AGENT_PROXY_HUB_HOME");
+        Environment.SetEnvironmentVariable("AGENT_PROXY_HUB_HOME", tmpHome);
         var app = AgentProxyHub.Host.HubHostFactory.BuildApp([$"--verify-port={port}"]);
+        Environment.SetEnvironmentVariable("AGENT_PROXY_HUB_HOME", prevHome);
         await app.StartAsync();
         try
         {
@@ -1851,6 +1856,7 @@ public class ProxyAndTelemetryTests
             using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
             try { await app.StopAsync(stopCts.Token); } catch { }
             await app.DisposeAsync();
+            try { Directory.Delete(tmpHome, true); } catch { }
         }
     }
 
@@ -1994,7 +2000,12 @@ public class ProxyAndTelemetryTests
         Assert.True(LoopbackSecurityGuard.IsAllowedRequest("127.0.0.1:17880", "GET", "http://127.0.0.1:17880", isApiRoute: true));
 
         int port = GetFreeTcpPort();
+        string tmpHome = Path.Combine(Path.GetTempPath(), $"aph_guard_test_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tmpHome);
+        string? prevHome = Environment.GetEnvironmentVariable("AGENT_PROXY_HUB_HOME");
+        Environment.SetEnvironmentVariable("AGENT_PROXY_HUB_HOME", tmpHome);
         var app = AgentProxyHub.Host.HubHostFactory.BuildApp([$"--verify-port={port}"]);
+        Environment.SetEnvironmentVariable("AGENT_PROXY_HUB_HOME", prevHome);
         await app.StartAsync();
         try
         {
@@ -2016,6 +2027,7 @@ public class ProxyAndTelemetryTests
             using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
             try { await app.StopAsync(stopCts.Token); } catch { }
             await app.DisposeAsync();
+            try { Directory.Delete(tmpHome, true); } catch { }
         }
     }
 
@@ -2513,6 +2525,148 @@ public class ProxyAndTelemetryTests
         Assert.DoesNotContain("若为 HTTP 代理请改选 HTTP 协议", res.Message);
         Assert.Equal("online", landingNode.Status);
         Assert.Equal("物理直出连通", landingNode.IspSummary);
+    }
+
+    [Fact]
+    public void SubscriptionTrafficParser_ShouldParseUserInfoHeadersAndSanitizeInfoNodes()
+    {
+        var headers = new Dictionary<string, IEnumerable<string>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["subscription-userinfo"] = ["upload=10737418240; download=96636764160; total=536870912000; expire=1805068800"]
+        };
+
+        var headerHint = SubscriptionTrafficParser.ParseSubscriptionUserInfoHeader(headers);
+        Assert.Equal(536870912000L, headerHint.TotalBytes);
+        Assert.Equal(536870912000L - (10737418240L + 96636764160L), headerHint.RemainingBytes);
+        Assert.NotNull(headerHint.ExpireAt);
+
+        var infoTraffic = new ProxyNode { Id = "i1", Name = "剩余流量：282.58 GB", Group = "批量导入池", Protocol = ProxyProtocol.SHADOWSOCKS };
+        var infoReset = new ProxyNode { Id = "i2", Name = "距离下次重置剩余：18 天", Group = "批量导入池", Protocol = ProxyProtocol.SHADOWSOCKS };
+        var infoExpire = new ProxyNode { Id = "i3", Name = "套餐到期：2027-03-15", Group = "批量导入池", Protocol = ProxyProtocol.SHADOWSOCKS };
+        var realJp = new ProxyNode { Id = "r1", Name = "🇯🇵 日本01[直连]", Group = "批量导入池", Protocol = ProxyProtocol.VLESS };
+        var realHk = new ProxyNode { Id = "r2", Name = "HK 香港B[BGP] 0.5x", Group = "批量导入池", Protocol = ProxyProtocol.SHADOWSOCKS };
+
+        Assert.True(infoTraffic.IsInfoEntry);
+        Assert.True(infoReset.IsInfoEntry);
+        Assert.True(infoExpire.IsInfoEntry);
+        Assert.False(realJp.IsInfoEntry);
+        Assert.False(realHk.IsInfoEntry);
+
+        var cards = SubscriptionTrafficParser.BuildTrafficPoolCards(
+            [],
+            [infoTraffic, infoReset, infoExpire, realJp, realHk],
+            new DateTimeOffset(2026, 11, 28, 12, 0, 0, TimeSpan.FromHours(8)));
+
+        var card = Assert.Single(cards);
+        Assert.Equal("批量导入池", card.Name);
+        Assert.Equal(2, card.NodeCount);
+        Assert.Equal(3, card.InfoEntryCount);
+        Assert.Equal(18, card.ResetInDays);
+        Assert.NotNull(card.RemainingBytes);
+        Assert.InRange(card.RemainingBytes!.Value / (1024.0 * 1024 * 1024), 282.5, 282.6);
+        Assert.NotNull(card.ExpireAt);
+        Assert.Equal("ok", card.Tone);
+    }
+
+    [Fact]
+    public void CodexRateLimitsAndQuotaOverview_ShouldAdaptSingleWeeklyDualWindowsCreditsAndExpiry()
+    {
+        string tmp = Path.Combine(Path.GetTempPath(), $"aph_codex_rl_{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            var now = new DateTimeOffset(2026, 11, 28, 14, 0, 0, TimeSpan.FromHours(8));
+            long futureReset = now.AddDays(4).AddHours(3).ToUnixTimeSeconds();
+            long pastReset = now.AddHours(-2).ToUnixTimeSeconds();
+
+            // 含一条有效 prolite 单周额度 + Credits 1499，以及一条后续限频空帧 (premium primary:null) 应被忽略
+            File.WriteAllLines(tmp, [
+                """{"timestamp":"2026-11-28T05:50:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}""",
+                """{"timestamp":"2026-11-28T05:51:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":5000},"last_token_usage":{"input_tokens":3000,"cached_input_tokens":1000,"output_tokens":500}},"rate_limits":{"limit_id":"codex","plan_type":"prolite","primary":{"used_percent":70,"window_minutes":10080,"resets_at":__RESET__},"secondary":null,"credits":{"has_credits":true,"unlimited":false,"balance":"1499.50"}}}}""".Replace("__RESET__", futureReset.ToString()),
+                """{"timestamp":"2026-11-28T05:51:01Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"premium","primary":null,"secondary":null,"credits":{"has_credits":false,"unlimited":false,"balance":"0"},"plan_type":"prolite"}}}"""
+            ]);
+
+            var (entries, rl) = SessionLogScanner.ParseCodexSessionWithRateLimit(tmp, "codex");
+            Assert.Single(entries);
+            Assert.NotNull(rl);
+            Assert.Equal("prolite", rl!.PlanType);
+            Assert.Equal(10080, rl.PrimaryWindowMinutes);
+            Assert.Null(rl.SecondaryWindowMinutes);
+            Assert.Equal(70, rl.PrimaryUsedPercent);
+            Assert.Equal(1499.5, rl.CreditsBalance);
+
+            // 验证多 Agent 聚合：Codex (prolite 单周 70% warn) + 第二个 Codex 实例 (过期 resets_at 应自动归零为 0%) + Antigravity
+            var doc = new HubStateDocument
+            {
+                Seats =
+                [
+                    new AppSeat { Id = "codex", Name = "Codex", Enabled = true },
+                    new AppSeat { Id = "agy", Name = "Antigravity", Enabled = true }
+                ],
+                Instances =
+                [
+                    new ManagedAppInstance { Id = "work1", BaseSeatId = "codex", Name = "工作号", LocalPort = 17920, Enabled = true }
+                ],
+                QuotaSettings = new QuotaBudgetSettings { DailyBudgetUsd = 10, MonthlyBudgetUsd = 100, WarnPercent = 65, CriticalPercent = 85 }
+            };
+
+            var rateLimits = new Dictionary<string, CodexRateLimitSnapshot>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["codex"] = rl,
+                ["codex:inst:work1"] = new CodexRateLimitSnapshot
+                {
+                    SeatKey = "codex:inst:work1",
+                    Timestamp = now.AddHours(-5),
+                    PlanType = "plus",
+                    PrimaryWindowMinutes = 300,
+                    PrimaryUsedPercent = 88,
+                    PrimaryResetsAt = DateTimeOffset.FromUnixTimeSeconds(pastReset),
+                    SecondaryWindowMinutes = 10080,
+                    SecondaryUsedPercent = 12,
+                    SecondaryResetsAt = now.AddDays(5)
+                }
+            };
+
+            var scanner = new SessionLogScanner(Path.Combine(Path.GetTempPath(), $"empty_home_{Guid.NewGuid():N}"));
+            var svc = new UsageStatsService(scanner, new ModelPricingCatalog());
+            var agyEntry = new UsageLogEntry
+            {
+                Id = "agy-1",
+                Timestamp = now.AddMinutes(-10),
+                AppName = "Antigravity",
+                Model = "claude-sonnet-4-5",
+                EffectiveInputTokens = 1000,
+                OutputTokens = 500,
+                CostUsd = 1.25,
+                CacheSavedUsd = 2.5,
+                IsPriced = true
+            };
+
+            var overview = svc.BuildQuotaOverview(doc, [], null, now, [agyEntry], rateLimits);
+            Assert.Equal(3, overview.ActiveAgents.Count);
+
+            // 最高告警的 Codex 主席位排第一（warn 70%），且只有 1 条周额度轨道 + Credits 1,500（1499.5 取整）
+            var codexCard = overview.ActiveAgents[0];
+            Assert.Equal("codex", codexCard.SeatId);
+            Assert.Equal("PROLITE", codexCard.PlanBadge);
+            Assert.NotNull(codexCard.CreditsBadge);
+            var singleWin = Assert.Single(codexCard.Windows);
+            Assert.Equal("周额度", singleWin.Label);
+            Assert.Equal(70, singleWin.UsedPercent);
+            Assert.Equal("warn", singleWin.Tone);
+
+            // 多开实例 work1 拥有双窗口，且已过期的 5h 窗口应自动归零为 0%
+            var workCard = Assert.Single(overview.ActiveAgents, a => a.SeatId == "codex:inst:work1");
+            Assert.Equal(2, workCard.Windows.Count);
+            Assert.Equal("5h 窗口", workCard.Windows[0].Label);
+            Assert.Equal(0, workCard.Windows[0].UsedPercent);
+            Assert.Equal("新周期已重置", workCard.Windows[0].SubDisplay);
+            Assert.Equal("周额度", workCard.Windows[1].Label);
+            Assert.Equal(12, workCard.Windows[1].UsedPercent);
+        }
+        finally
+        {
+            if (File.Exists(tmp)) File.Delete(tmp);
+        }
     }
 
     private sealed class DuplexPipeStream : Stream

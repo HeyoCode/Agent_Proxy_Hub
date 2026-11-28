@@ -12,16 +12,49 @@ namespace AgentProxyHub.Core.Telemetry;
 /// </summary>
 public sealed class SessionLogScanner
 {
-    private sealed record CachedFileResult(DateTime LastWriteUtc, long Length, List<UsageLogEntry> Entries);
+    private sealed record CachedFileResult(
+        DateTime LastWriteUtc,
+        long Length,
+        List<UsageLogEntry> Entries,
+        CodexRateLimitSnapshot? LatestRateLimit = null);
 
     private readonly string _antigravityBrainDir;
     private readonly string _antigravityCliBrainDir;
     private readonly string _claudeProjectsDir;
     private readonly string _codexSessionsDir;
+    private readonly ConcurrentDictionary<string, string> _extraCodexDirs = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, CachedFileResult> _fileCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, string> _conversationFileMap = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, CodexRateLimitSnapshot> _latestRateLimits = new(StringComparer.OrdinalIgnoreCase);
     private List<UsageLogEntry>? _cachedOrdered;
     private int _lastFileCount = -1;
+
+    /// <summary>
+    /// 同步受管多开实例的独立 Codex 会话目录，使工作号/个人号隔离实例也能各自采集原生 rate_limits
+    /// </summary>
+    public void SyncExtraCodexProfileDirs(IEnumerable<ManagedAppInstance>? instances)
+    {
+        var activeKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (instances != null)
+        {
+            foreach (var inst in instances)
+            {
+                if (!inst.BaseSeatId.Equals("codex", StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.IsNullOrWhiteSpace(inst.ProfileDir)) continue;
+                string sessionsDir = Path.Combine(inst.ProfileDir.Trim(), "sessions");
+                string seatKey = $"codex:inst:{inst.Id}";
+                activeKeys.Add(seatKey);
+                _extraCodexDirs[seatKey] = sessionsDir;
+            }
+        }
+        foreach (string k in _extraCodexDirs.Keys)
+        {
+            if (!activeKeys.Contains(k)) _extraCodexDirs.TryRemove(k, out _);
+        }
+    }
+
+    public IReadOnlyDictionary<string, CodexRateLimitSnapshot> GetLatestCodexRateLimits()
+        => _latestRateLimits;
 
     public SessionLogScanner(string? userHomeOverride = null)
     {
@@ -48,13 +81,13 @@ public sealed class SessionLogScanner
     {
         var sw = Stopwatch.StartNew();
         var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var fileCandidates = new List<(string Path, Func<string, List<UsageLogEntry>> Parser)>();
+        var fileCandidates = new List<(string Path, Func<string, (List<UsageLogEntry> Entries, CodexRateLimitSnapshot? RateLimit)> Parser)>();
 
         if (Directory.Exists(_antigravityBrainDir))
         {
             foreach (string file in SafeEnumerateFiles(_antigravityBrainDir, "transcript.jsonl"))
             {
-                if (seenFiles.Add(file)) fileCandidates.Add((file, ParseAntigravityTranscript));
+                if (seenFiles.Add(file)) fileCandidates.Add((file, p => (ParseAntigravityTranscript(p), null)));
             }
         }
 
@@ -62,7 +95,7 @@ public sealed class SessionLogScanner
         {
             foreach (string file in SafeEnumerateFiles(_antigravityCliBrainDir, "transcript.jsonl"))
             {
-                if (seenFiles.Add(file)) fileCandidates.Add((file, ParseAntigravityCliTranscript));
+                if (seenFiles.Add(file)) fileCandidates.Add((file, p => (ParseAntigravityCliTranscript(p), null)));
             }
         }
 
@@ -70,7 +103,7 @@ public sealed class SessionLogScanner
         {
             foreach (string file in SafeEnumerateFiles(_claudeProjectsDir, "*.jsonl"))
             {
-                if (seenFiles.Add(file)) fileCandidates.Add((file, ParseClaudeSession));
+                if (seenFiles.Add(file)) fileCandidates.Add((file, p => (ParseClaudeSession(p), null)));
             }
         }
 
@@ -78,7 +111,19 @@ public sealed class SessionLogScanner
         {
             foreach (string file in SafeEnumerateFiles(_codexSessionsDir, "*.jsonl"))
             {
-                if (seenFiles.Add(file)) fileCandidates.Add((file, ParseCodexSession));
+                if (seenFiles.Add(file)) fileCandidates.Add((file, p => ParseCodexSessionWithRateLimit(p, "codex")));
+            }
+        }
+
+        foreach (var extra in _extraCodexDirs)
+        {
+            if (Directory.Exists(extra.Value))
+            {
+                string seatKey = extra.Key;
+                foreach (string file in SafeEnumerateFiles(extra.Value, "*.jsonl"))
+                {
+                    if (seenFiles.Add(file)) fileCandidates.Add((file, p => ParseCodexSessionWithRateLimit(p, seatKey)));
+                }
             }
         }
 
@@ -86,10 +131,17 @@ public sealed class SessionLogScanner
         int reparsedCount = 0;
         var allEntries = new List<UsageLogEntry>();
         var seenEntryIds = new HashSet<string>(StringComparer.Ordinal);
+        var rateLimitMap = new Dictionary<string, CodexRateLimitSnapshot>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var (file, parser) in fileCandidates)
         {
-            foreach (var item in ParseWithCache(file, parser, ref reparsedCount))
+            var (items, rl) = ParseWithCache(file, parser, ref reparsedCount);
+            if (rl != null)
+            {
+                if (!rateLimitMap.TryGetValue(rl.SeatKey, out var existingRl) || rl.Timestamp >= existingRl.Timestamp)
+                    rateLimitMap[rl.SeatKey] = rl;
+            }
+            foreach (var item in items)
             {
                 if (!string.IsNullOrWhiteSpace(item.ConversationId))
                 {
@@ -106,6 +158,7 @@ public sealed class SessionLogScanner
                     allEntries.Add(item);
             }
         }
+        _latestRateLimits = rateLimitMap;
 
         // 清理已从磁盘移除文件的旧缓存项
         bool removedAny = false;
@@ -161,31 +214,31 @@ public sealed class SessionLogScanner
         return (ordered, info, changed);
     }
 
-    private List<UsageLogEntry> ParseWithCache(
+    private (List<UsageLogEntry> Entries, CodexRateLimitSnapshot? RateLimit) ParseWithCache(
         string filePath,
-        Func<string, List<UsageLogEntry>> parser,
+        Func<string, (List<UsageLogEntry> Entries, CodexRateLimitSnapshot? RateLimit)> parser,
         ref int reparsedCount)
     {
         try
         {
             var fi = new FileInfo(filePath);
-            if (!fi.Exists || fi.Length == 0) return [];
+            if (!fi.Exists || fi.Length == 0) return ([], null);
 
             if (_fileCache.TryGetValue(filePath, out var cached)
                 && cached.LastWriteUtc == fi.LastWriteTimeUtc
                 && cached.Length == fi.Length)
             {
-                return cached.Entries;
+                return (cached.Entries, cached.LatestRateLimit);
             }
 
-            var parsed = parser(filePath);
-            _fileCache[filePath] = new CachedFileResult(fi.LastWriteTimeUtc, fi.Length, parsed);
+            var (parsed, rl) = parser(filePath);
+            _fileCache[filePath] = new CachedFileResult(fi.LastWriteTimeUtc, fi.Length, parsed, rl);
             reparsedCount++;
-            return parsed;
+            return (parsed, rl);
         }
         catch
         {
-            return [];
+            return ([], null);
         }
     }
 
@@ -457,12 +510,18 @@ public sealed class SessionLogScanner
         return byMessageId.Values.ToList();
     }
 
-    /// <summary>
-    /// 解析 OpenAI Codex 会话 JSONL（关联 turn_context.model 与 token_count 事件并按累计值去重）
-    /// </summary>
     public static List<UsageLogEntry> ParseCodexSession(string filePath)
+        => ParseCodexSessionWithRateLimit(filePath, "codex").Entries;
+
+    /// <summary>
+    /// 解析 OpenAI Codex 会话 JSONL（关联 turn_context.model、token_count 与原生 rate_limits 配额快照）
+    /// </summary>
+    public static (List<UsageLogEntry> Entries, CodexRateLimitSnapshot? LatestRateLimit) ParseCodexSessionWithRateLimit(
+        string filePath,
+        string seatKey = "codex")
     {
         var results = new List<UsageLogEntry>();
+        CodexRateLimitSnapshot? latestRateLimit = null;
         string sessionTag = Path.GetFileNameWithoutExtension(filePath);
         string convId = $"codex:{sessionTag}";
         string currentModel = "codex-unknown";
@@ -510,53 +569,65 @@ public sealed class SessionLogScanner
                     {
                         turnStartTime = ts;
                     }
-                    else if (pType == "token_count"
-                             && payload.TryGetProperty("info", out var info) && info.ValueKind == JsonValueKind.Object
-                             && info.TryGetProperty("last_token_usage", out var lastUsage) && lastUsage.ValueKind == JsonValueKind.Object)
+                    else if (pType == "token_count")
                     {
-                        long cumulative = info.TryGetProperty("total_token_usage", out var totUsage) && totUsage.ValueKind == JsonValueKind.Object
-                            ? TryGetInt64(totUsage, "total_tokens")
-                            : seq;
-
-                        // Codex 同一轮可能会多次推送相同累计值的 token_count，跳过重复快照
-                        if (cumulative == lastCumulativeTotal) continue;
-                        lastCumulativeTotal = cumulative;
-
-                        long rawInput = TryGetInt64(lastUsage, "input_tokens");
-                        long cacheRead = TryGetInt64(lastUsage, "cached_input_tokens");
-                        long cacheWrite = TryGetInt64(lastUsage, "cache_write_input_tokens");
-                        long output = TryGetInt64(lastUsage, "output_tokens");
-                        long effectiveInput = Math.Max(0, rawInput - cacheRead);
-
-                        if (effectiveInput + cacheRead + cacheWrite + output > 0 && ts.HasValue)
+                        // 提取原生 rate_limits 快照（过滤 primary/secondary 全空且无可用点数的高频状态帧）
+                        if (payload.TryGetProperty("rate_limits", out var rlEl) && rlEl.ValueKind == JsonValueKind.Object)
                         {
-                            double durationSec = 0;
-                            if (turnStartTime.HasValue)
+                            var extracted = TryExtractCodexRateLimit(rlEl, ts ?? DateTimeOffset.UtcNow, seatKey);
+                            if (extracted != null)
                             {
-                                double diff = (ts.Value - turnStartTime.Value).TotalSeconds;
-                                if (diff > 0.05 && diff <= 600) durationSec = Math.Round(diff, 1);
+                                latestRateLimit = extracted;
                             }
-                            double? tps = (durationSec >= 0.2 && output > 0)
-                                ? Math.Round(output / durationSec, 1)
-                                : null;
+                        }
 
-                            results.Add(new UsageLogEntry
+                        if (payload.TryGetProperty("info", out var info) && info.ValueKind == JsonValueKind.Object
+                            && info.TryGetProperty("last_token_usage", out var lastUsage) && lastUsage.ValueKind == JsonValueKind.Object)
+                        {
+                            long cumulative = info.TryGetProperty("total_token_usage", out var totUsage) && totUsage.ValueKind == JsonValueKind.Object
+                                ? TryGetInt64(totUsage, "total_tokens")
+                                : seq;
+
+                            // Codex 同一轮可能会多次推送相同累计值的 token_count，跳过重复快照
+                            if (cumulative == lastCumulativeTotal) continue;
+                            lastCumulativeTotal = cumulative;
+
+                            long rawInput = TryGetInt64(lastUsage, "input_tokens");
+                            long cacheRead = TryGetInt64(lastUsage, "cached_input_tokens");
+                            long cacheWrite = TryGetInt64(lastUsage, "cache_write_input_tokens");
+                            long output = TryGetInt64(lastUsage, "output_tokens");
+                            long effectiveInput = Math.Max(0, rawInput - cacheRead);
+
+                            if (effectiveInput + cacheRead + cacheWrite + output > 0 && ts.HasValue)
                             {
-                                Id = $"codex:{sessionTag}:{seq}",
-                                Timestamp = ts.Value,
-                                AppName = "Codex",
-                                Source = "会话日志",
-                                Model = currentModel,
-                                EffectiveInputTokens = effectiveInput,
-                                CacheReadTokens = cacheRead,
-                                CacheWriteTokens = cacheWrite,
-                                OutputTokens = output,
-                                DurationSeconds = durationSec,
-                                TokensPerSecond = tps,
-                                Workspace = detectedWorkspace,
-                                ConversationId = convId
-                            });
-                            turnStartTime = ts;
+                                double durationSec = 0;
+                                if (turnStartTime.HasValue)
+                                {
+                                    double diff = (ts.Value - turnStartTime.Value).TotalSeconds;
+                                    if (diff > 0.05 && diff <= 600) durationSec = Math.Round(diff, 1);
+                                }
+                                double? tps = (durationSec >= 0.2 && output > 0)
+                                    ? Math.Round(output / durationSec, 1)
+                                    : null;
+
+                                results.Add(new UsageLogEntry
+                                {
+                                    Id = $"codex:{sessionTag}:{seq}",
+                                    Timestamp = ts.Value,
+                                    AppName = seatKey == "codex" ? "Codex" : seatKey,
+                                    Source = "会话日志",
+                                    Model = currentModel,
+                                    EffectiveInputTokens = effectiveInput,
+                                    CacheReadTokens = cacheRead,
+                                    CacheWriteTokens = cacheWrite,
+                                    OutputTokens = output,
+                                    DurationSeconds = durationSec,
+                                    TokensPerSecond = tps,
+                                    Workspace = detectedWorkspace,
+                                    ConversationId = convId
+                                });
+                                turnStartTime = ts;
+                            }
                         }
                     }
                 }
@@ -575,7 +646,82 @@ public sealed class SessionLogScanner
             }
         }
 
-        return results;
+        return (results, latestRateLimit);
+    }
+
+    private static CodexRateLimitSnapshot? TryExtractCodexRateLimit(
+        JsonElement rlEl,
+        DateTimeOffset eventTs,
+        string seatKey)
+    {
+        static (double? Pct, int? Mins, DateTimeOffset? ResetAt) ReadBucket(JsonElement root, string prop)
+        {
+            if (!root.TryGetProperty(prop, out var b) || b.ValueKind != JsonValueKind.Object)
+                return (null, null, null);
+
+            double? pct = null;
+            if (b.TryGetProperty("used_percent", out var pEl) && pEl.ValueKind == JsonValueKind.Number && pEl.TryGetDouble(out double pVal))
+                pct = Math.Clamp(Math.Round(pVal, 1), 0, 100);
+
+            int? mins = null;
+            if (b.TryGetProperty("window_minutes", out var wEl) && wEl.ValueKind == JsonValueKind.Number && wEl.TryGetInt32(out int wVal) && wVal > 0)
+                mins = wVal;
+
+            DateTimeOffset? resetAt = null;
+            if (b.TryGetProperty("resets_at", out var rEl) && rEl.ValueKind == JsonValueKind.Number && rEl.TryGetInt64(out long sec) && sec > 946684800)
+                resetAt = DateTimeOffset.FromUnixTimeSeconds(sec).ToLocalTime();
+
+            return (pct, mins, resetAt);
+        }
+
+        var (pPct, pMins, pReset) = ReadBucket(rlEl, "primary");
+        var (sPct, sMins, sReset) = ReadBucket(rlEl, "secondary");
+
+        bool hasCredits = false;
+        bool unlimited = false;
+        double? balance = null;
+        if (rlEl.TryGetProperty("credits", out var crEl) && crEl.ValueKind == JsonValueKind.Object)
+        {
+            if (crEl.TryGetProperty("has_credits", out var hc) && hc.ValueKind == JsonValueKind.True)
+                hasCredits = true;
+            if (crEl.TryGetProperty("unlimited", out var ul) && ul.ValueKind == JsonValueKind.True)
+                unlimited = true;
+            if (crEl.TryGetProperty("balance", out var balEl))
+            {
+                if (balEl.ValueKind == JsonValueKind.String && double.TryParse(balEl.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out double b1))
+                    balance = Math.Round(b1, 2);
+                else if (balEl.ValueKind == JsonValueKind.Number && balEl.TryGetDouble(out double b2))
+                    balance = Math.Round(b2, 2);
+            }
+        }
+
+        // 若主副窗口全空且无有效点数/无限权限（例如某些 limit_id="premium" 的空探针），直接忽略
+        if (!pMins.HasValue && !sMins.HasValue && !(hasCredits && balance > 0) && !unlimited)
+            return null;
+
+        string? planType = TryGetString(rlEl, "plan_type");
+        if (string.IsNullOrWhiteSpace(planType))
+        {
+            string? lid = TryGetString(rlEl, "limit_name") ?? TryGetString(rlEl, "limit_id");
+            if (!string.IsNullOrWhiteSpace(lid) && !lid.Equals("codex", StringComparison.OrdinalIgnoreCase))
+                planType = lid;
+        }
+
+        return new CodexRateLimitSnapshot
+        {
+            SeatKey = seatKey,
+            Timestamp = eventTs,
+            PlanType = planType,
+            PrimaryUsedPercent = pPct,
+            PrimaryWindowMinutes = pMins,
+            PrimaryResetsAt = pReset,
+            SecondaryUsedPercent = sPct,
+            SecondaryWindowMinutes = sMins,
+            SecondaryResetsAt = sReset,
+            HasCredits = hasCredits,
+            UnlimitedCredits = unlimited,
+            CreditsBalance = balance
+        };
     }
 
     private static IEnumerable<string> ReadLinesShared(string path)

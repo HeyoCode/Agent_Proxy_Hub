@@ -90,8 +90,10 @@ export const RightInspector: React.FC<Props> = ({
   const nodes = overview?.nodes ?? [];
   const seat: AppSeat | undefined = seats.find(s => s.id === selectedSeatId) ?? seats[0];
   const bound: ProxyNode | undefined = nodes.find(n => n.id === seat?.boundNodeId) ?? nodes[0];
+  const relay: ProxyNode | undefined = seat?.relayNodeId ? nodes.find(n => n.id === seat.relayNodeId) : undefined;
   const snap = overview?.trafficSnapshots.find(t => t.seatId === seat?.id);
   const takeover = overview?.seatTakeovers?.find(t => t.seatId === seat?.id);
+  const isDoubleHopRoute = Boolean(relay && bound && snap?.effectiveNodeName === `${relay.name} → ${bound.name}`);
 
   useEffect(() => {
     if (!seat?.id) return;
@@ -101,8 +103,10 @@ export const RightInspector: React.FC<Props> = ({
     }).catch(() => {});
   }, [seat?.id, snap?.totalConnections]);
 
+  const selectableNodes = useMemo(() => nodes.filter(n => !n.isInfoEntry), [nodes]);
+
   const nodeOptions: SelectOption[] = useMemo(() => {
-    return nodes.map(n => ({
+    return selectableNodes.map(n => ({
       value: n.id,
       label: n.name,
       sublabel: n.protocol === 'DIRECT_PHYSICAL'
@@ -111,7 +115,7 @@ export const RightInspector: React.FC<Props> = ({
       tag: n.protocol === 'DIRECT_PHYSICAL' ? 'DIRECT' : n.protocol,
       dotColor: n.status === 'offline' ? '#F27973' : (n.status === 'online' ? '#34D399' : '#94A3B8')
     }));
-  }, [nodes, privacyMode]);
+  }, [selectableNodes, privacyMode]);
 
   const relayOptions: SelectOption[] = useMemo(() => {
     const base: SelectOption[] = [
@@ -122,7 +126,7 @@ export const RightInspector: React.FC<Props> = ({
         dotColor: '#64748B'
       }
     ];
-    for (const n of nodes) {
+    for (const n of selectableNodes) {
       if (n.protocol === 'DIRECT_PHYSICAL' || n.id === seat?.boundNodeId) continue;
       base.push({
         value: n.id,
@@ -133,7 +137,7 @@ export const RightInspector: React.FC<Props> = ({
       });
     }
     return base;
-  }, [nodes, seat?.boundNodeId]);
+  }, [selectableNodes, seat?.boundNodeId]);
 
   async function handleBindRelay(relayNodeId: string) {
     if (!seat) return;
@@ -156,7 +160,7 @@ export const RightInspector: React.FC<Props> = ({
         dotColor: '#64748B'
       }
     ];
-    for (const n of nodes) {
+    for (const n of selectableNodes) {
       if (n.id === seat?.boundNodeId) continue;
       base.push({
         value: n.id,
@@ -167,7 +171,7 @@ export const RightInspector: React.FC<Props> = ({
       });
     }
     return base;
-  }, [nodes, seat?.boundNodeId]);
+  }, [selectableNodes, seat?.boundNodeId]);
 
   async function handleBindFallback(fallbackNodeId: string) {
     if (!seat) return;
@@ -305,7 +309,13 @@ export const RightInspector: React.FC<Props> = ({
     }
   }
 
-  const visibleRadarNodes = nodes.slice(0, RADAR_SLOTS.length);
+  const visibleRadarNodes = selectableNodes.slice(0, RADAR_SLOTS.length);
+  const quotaSummary = overview?.quotaSummary ?? null;
+  const seatQuotaCard = quotaSummary?.activeAgents.find(a => a.seatId === seat?.id);
+  const primarySeatWin = seatQuotaCard?.windows?.[0];
+  const boundTrafficPool = quotaSummary?.trafficPools.find(
+    p => (bound?.sourceSubscriptionId && p.id === bound.sourceSubscriptionId) || (bound?.group && p.group === bound.group)
+  ) ?? (bound?.protocol !== 'DIRECT_PHYSICAL' ? quotaSummary?.trafficPools[0] : undefined);
   const directBindText = overview?.os === 'mac' ? 'IP_BOUND_IF' : 'IP_UNICAST_IF';
   const totalBytes = (snap?.bytesTx ?? 0) + (snap?.bytesRx ?? 0);
 
@@ -432,6 +442,61 @@ export const RightInspector: React.FC<Props> = ({
               </div>
             </div>
 
+            {(seatQuotaCard || boundTrafficPool) && (
+              <div
+                className="insp-quota-strip"
+                title={
+                  [
+                    seatQuotaCard ? seatQuotaCard.windows.map(w => `${w.label}: ${w.usedDisplay}${w.subDisplay ? ` (${w.subDisplay})` : ''}`).join(' | ') : '',
+                    boundTrafficPool?.remainingBytes != null ? `${boundTrafficPool.name}: 剩余 ${formatBytes(boundTrafficPool.remainingBytes)}` : ''
+                  ].filter(Boolean).join('\n')
+                }
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 10.5, gap: 6 }}>
+                  <span className="cell-ellipsis" style={{ color: 'var(--insp-val)', fontWeight: 600 }}>
+                    {primarySeatWin
+                      ? `${primarySeatWin.label} ${primarySeatWin.usedDisplay}`
+                      : (quotaSummary?.dailySpentUsd ? `今日 $${quotaSummary.dailySpentUsd.toFixed(2)}` : '配额就绪')}
+                  </span>
+                  <span
+                    className="num nowrap"
+                    style={{
+                      fontWeight: 600,
+                      color: boundTrafficPool?.tone === 'critical'
+                        ? 'var(--insp-latency-err)'
+                        : (boundTrafficPool?.tone === 'warn' ? 'var(--accent-amber-text)' : 'var(--insp-latency-ok)')
+                    }}
+                  >
+                    {boundTrafficPool?.remainingBytes != null
+                      ? `余 ${formatBytes(boundTrafficPool.remainingBytes)}`
+                      : (seatQuotaCard?.creditsBadge ?? (bound?.protocol === 'DIRECT_PHYSICAL' ? '直出无限制' : '专线在线'))}
+                  </span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                  <div className="meter-track" style={{ height: 4 }}>
+                    <div
+                      className={`meter-fill tone-${primarySeatWin?.tone ?? 'ok'}`}
+                      style={{
+                        width: `${primarySeatWin?.usedPercent != null
+                          ? Math.max(primarySeatWin.usedPercent > 0 ? 6 : 0, primarySeatWin.usedPercent)
+                          : (seatQuotaCard && seatQuotaCard.todayTokens > 0 ? 35 : 0)}%`
+                      }}
+                    />
+                  </div>
+                  <div className="meter-track" style={{ height: 4 }}>
+                    <div
+                      className={`meter-fill tone-${boundTrafficPool?.tone ?? 'ok'}`}
+                      style={{
+                        width: `${boundTrafficPool?.remainingPercent != null
+                          ? Math.max(6, boundTrafficPool.remainingPercent)
+                          : (boundTrafficPool?.remainingBytes != null ? 100 : 100)}%`
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {seat.hasNodeDrift && (
                 <div className="insp-drift-banner">
@@ -490,8 +555,15 @@ export const RightInspector: React.FC<Props> = ({
               </div>
 
               {snap?.effectiveNodeName && bound && snap.effectiveNodeName !== bound.name && (
-                <div className="insp-drift-banner" style={{ padding: '5px 9px' }}>
-                  <span>当前实际容灾路由：<strong className="mono">{snap.effectiveNodeName}</strong></span>
+                <div
+                  className={isDoubleHopRoute ? 'insp-route-banner' : 'insp-drift-banner'}
+                  style={{ padding: '5px 9px' }}
+                  title={snap.effectiveNodeName}
+                >
+                  <span className="cell-ellipsis" style={{ maxWidth: '100%' }}>
+                    {isDoubleHopRoute ? '双跳加速：' : '容灾切换：'}
+                    <strong className="mono">{snap.effectiveNodeName}</strong>
+                  </span>
                 </div>
               )}
 

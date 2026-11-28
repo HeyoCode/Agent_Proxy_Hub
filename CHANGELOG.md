@@ -2,6 +2,22 @@
 
 All notable changes to **Agent Proxy Hub** are documented in this file.
 
+## [v0.8.0] - 2026-11-28
+
+### 📊 自适应多规则 AI 额度窗口与预算水位舱
+- **多规则配额免解密提取与自适应归算 (`SessionLogScanner` / `UsageStatsService`)**：免解密解析 Codex 会话日志中的 `rate_limits` 快照（`plan_type`、`primary`/`secondary` 窗口、如 `prolite` 单周 `10080m` 窗口、`resets_at` 过期自动归零、`credits.balance` 额度点并过滤无窗口的空 `premium` 帧）及 Claude `5h` 滚动会话块与周窗口。
+- **AI 额度窗口与预算水位舱 (`UsageStatsView` / `BuildQuotaOverview`)**：新增全局日/月预算护栏、实时消耗速率、Cache 净省比与多活跃 Agent 智能优先级排序矩阵（`critical > warn > 运行中 > Token 量`，按真实窗口数自适应单/双进度条并在 `>5` 活跃席位时自动折叠次要席位）；提供「配额规则与预算」配置弹窗与 `GET / PUT /api/stats/quota-settings` 持久化（同步纳入 WebDAV 云端恢复），并在顶栏状态胶囊、右侧检视栏微缩额度条与置顶悬浮监控窗联动预警。
+
+### 🌐 订阅流量额度提取与提示类伪节点收纳
+- **订阅响应头与伪节点流量解析 (`SubscriptionTrafficParser`)**：同时解析托管订阅 `Subscription-Userinfo` 响应头与批量导入池中的 `剩余流量 / 套餐到期 / 距离下次重置` 提示伪节点。
+- **独立线路池流量进度卡与测速豁免 (`NodesView` / `RightInspector` / `HubHostFactory`)**：「独立线路池」顶部新增订阅池与批量导入池流量进度卡，默认隐藏收纳 `IsInfoEntry` 提示项（支持点击展开核对），并在右侧绑定下拉、出口雷达、全量直连验真与后台 5 分钟巡检中自动跳过伪节点。
+
+### 🪟 1360×850 默认窗口零裁切精修与回归测试
+- **主界面 1360×850 默认视口全面适配**：「控制台」默认展开全部 21 款支持应用席位；重构「独立线路池」「用量统计」「应用接管与 CLI」栅格列宽与紧凑间距，消除 `1360×850` 默认窗口下的横向截断；优化右侧检视栏双跳中转路由横幅与底部雷达纵向排布。
+- **回归测试扩充至 50 项全绿**：新增订阅 `Subscription-Userinfo` 解析/伪节点清洗与 Codex/Claude 多规则配额自适应测试，`AgentProxyHub.Tests` 全量 50 项 xUnit 测试全部通过。
+
+---
+
 ## [v0.7.1] - 2026-11-28
 
 ### 🔒 关键安全与稳定性修复
